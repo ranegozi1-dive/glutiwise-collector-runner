@@ -1,0 +1,42 @@
+name: Ping Make Webhook (test payload)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST test payload to Make
+        run: |
+          curl -sS -X POST "$MAKE_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-make-apikey: $MAKE_APIKEY" \
+            --data '{
+              "source":"github_actions_test",
+              "generated_at":"2026-02-20T15:00:00Z",
+              "stores":[
+                {
+                  "retailer":"ramilevy",
+                  "store_id":"001",
+                  "store_key":"ramilevy:001",
+                  "store_name":"Demo Store",
+                  "city":"Tel Aviv",
+                  "address":"Demo 1",
+                  "area":"",
+                  "store_type":""
+                }
+              ],
+              "records":[
+                {
+                  "price_key":"7290000000011:ramilevy:001",
+                  "barcode":"7290000000011",
+                  "store_key":"ramilevy:001",
+                  "price":9.9,
+                  "updated_at":"2026-02-20T15:00:00Z"
+                }
+              ]
+            }'
+        env:
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+          MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
