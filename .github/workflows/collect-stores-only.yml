@@ -1,0 +1,31 @@
+name: Collect real data - stores only (2 networks)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare folders
+        run: |
+          mkdir -p dumps
+
+      - name: Pull scraper image
+        run: |
+          docker pull erlichsefi/israeli-supermarket-scarpers:latest
+
+      - name: Scrape STORE files (RAMI_LEVY + SHUFERSAL)
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/dumps:/usr/src/app/dumps" \
+            -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL" \
+            -e ENABLED_FILE_TYPES="STORE_FILE" \
+            -e LIMIT=5 \
+            erlichsefi/israeli-supermarket-scarpers:latest
+
+      - name: Upload dumps as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dumps
+          path: dumps
