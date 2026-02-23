@@ -1,4 +1,4 @@
-name: MVP Bootstrap Stores (2 networks, up to 30)
+name: MVP Bootstrap Stores (+ Yohananof additional, no replacement)
 
 on:
   workflow_dispatch:
@@ -9,48 +9,49 @@ jobs:
     steps:
       - name: Prepare folders
         run: |
-          mkdir -p dumps
+          mkdir -p dumps out
 
       - name: Pull scraper image
         run: |
           docker pull erlichsefi/israeli-supermarket-scarpers:latest
 
-      - name: Download STORE files (RAMI_LEVY + SHUFERSAL)
+      - name: Download STORE files (RAMI_LEVY + SHUFERSAL + YOHANANOF)
         run: |
           docker run --rm \
             -v "${{ github.workspace }}/dumps:/usr/src/app/dumps" \
-            -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL" \
+            -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL,YOHANANOF" \
             -e ENABLED_FILE_TYPES="STORE_FILE" \
             -e LIMIT=500 \
             erlichsefi/israeli-supermarket-scarpers:latest
 
-      - name: Build stores payload (up to 30) and POST to Make
-        env:
-          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
-          MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
+      - name: Build payloads (Rami+Shuf up to 30) + (Yohananof up to 15)
         run: |
-          python3 - << 'PY' | curl -sS -X POST "$MAKE_WEBHOOK_URL" \
-              -H "Content-Type: application/json" \
-              -H "x-make-apikey: $MAKE_APIKEY" \
-              --data-binary @-
+          python3 - << 'PY'
           import os, json, glob, re
           import xml.etree.ElementTree as ET
           from datetime import datetime, timezone
 
-          # MVP: שתי רשתות, עד 30 סניפים. עדיפות לאזור הוד השרון/הסביבה, ואם אין מספיק — משלים אוטומטית.
+          # MVP: עדיפות להוד השרון/הסביבה, ואם אין מספיק — משלים אוטומטית.
           TARGET_TOKENS = [
               "הוד השרון", "כפר סבא", "רעננה", "הרצליה",
               "רמת השרון", "פתח תקווה", "תל אביב", "אחוזה"
           ]
 
-          # ChainID -> retailer (לפי הקבצים שכבר ראית)
+          # ChainID -> retailer (נעול רק למה שידוע לנו; יוחננוף מזוהה לפי ChainName)
           CHAINID_TO_RETAILER = {
               "7290027600007": "ramilevy",
               "7290058140886": "shufersal",
           }
 
-          # כדי שה-Route A לא ייפול על FK במחירים: נדאג שה-store_key הזה תמיד יופיע ב-stores שנשלחים
-          REQUIRED_STORE_KEYS = ["ramilevy:001"]
+          # Limits
+          LIMIT_RAMI_SHUF_TOTAL = 30
+          PER_RETAILER_RAMI = 15
+          PER_RETAILER_SHUF = 15
+          PER_RETAILER_YOH = 15  # "בנוסף" (לא על חשבון 30)
+
+          # Dummy product (קיים אצלך ב-DB לפי הדוגמאות)
+          DUMMY_BARCODE = "7290000000011"
+          DUMMY_PRICE = 9.9
 
           def norm(s: str) -> str:
               return re.sub(r"\s+", " ", (s or "").strip())
@@ -59,7 +60,7 @@ jobs:
               return tag.split("}")[-1] if "}" in tag else tag
 
           def looks_numeric(s: str) -> bool:
-              return bool(re.fullmatch(r"\d{3,8}", (s or "").strip()))
+              return bool(re.fullmatch(r"\d{3,12}", (s or "").strip()))
 
           def find_first_text_anywhere(root, wanted_lower: str) -> str:
               for el in root.iter():
@@ -81,6 +82,8 @@ jobs:
                   return "shufersal"
               if "רמי" in cn:
                   return "ramilevy"
+              if "יוחננוף" in cn:
+                  return "yohananof"
               return None
 
           def parse_store_file(path):
@@ -101,8 +104,20 @@ jobs:
                   stores.append((store_id, city, address, name))
               return chain_id, chain_name, stores
 
-          # איסוף מועמדים
-          candidates = {"ramilevy": [], "shufersal": []}
+          # Prefer score with normalization (helps exact-city targeting across formatting differences)
+          def score(city, address, name):
+              city_for_search = "" if looks_numeric(city) else (city or "")
+              hay = norm(f"{city_for_search} {address or ''} {name or ''}")
+              hay2 = re.sub(r"[\s\-]", "", hay)
+              for tok in TARGET_TOKENS:
+                  if tok in hay:
+                      return True
+                  if re.sub(r"[\s\-]", "", tok) in hay2:
+                      return True
+              return False
+
+          # Collect candidates
+          candidates = {"ramilevy": [], "shufersal": [], "yohananof": []}
           for path in glob.glob("dumps/**/*.xml", recursive=True):
               base = os.path.basename(path).lower()
               if not base.startswith("stores"):
@@ -112,19 +127,12 @@ jobs:
               if retailer in candidates and stores:
                   candidates[retailer].extend(stores)
 
-          if not candidates["ramilevy"] and not candidates["shufersal"]:
+          if not candidates["ramilevy"] and not candidates["shufersal"] and not candidates["yohananof"]:
               raise SystemExit("No parsable STORE records found in dumps.")
-
-          # בחירה: עד 15 לכל רשת (סה״כ עד 30). קודם לפי טוקנים באזור, ואז משלים.
-          def score(city, address, name):
-              city_for_search = "" if looks_numeric(city) else (city or "")
-              hay = norm(f"{city_for_search} {address or ''} {name or ''}")
-              return any(tok in hay for tok in TARGET_TOKENS)
 
           def build_selected_for(retailer, limit):
               items = candidates.get(retailer, [])
-              preferred = []
-              fallback = []
+              preferred, fallback = [], []
               for store_id, city, address, name in items:
                   (preferred if score(city, address, name) else fallback).append((store_id, city, address, name))
               out = preferred[:limit]
@@ -132,30 +140,9 @@ jobs:
                   out.extend(fallback[: (limit - len(out))])
               return out
 
-          per_retailer = 15
-          sel_rami = build_selected_for("ramilevy", per_retailer) if candidates["ramilevy"] else []
-          sel_shuf = build_selected_for("shufersal", per_retailer) if candidates["shufersal"] else []
-
-          # אם אחת הרשתות לא זמינה, ממלאים עד 30 מהשנייה
-          combined_raw = [("ramilevy", *x) for x in sel_rami] + [("shufersal", *x) for x in sel_shuf]
-          if len(combined_raw) < 30:
-              for retailer in ("ramilevy", "shufersal"):
-                  for store_id, city, address, name in candidates.get(retailer, []):
-                      combined_raw.append((retailer, store_id, city, address, name))
-                      if len(combined_raw) >= 30:
-                          break
-                  if len(combined_raw) >= 30:
-                      break
-
-          selected = []
-          seen_keys = set()
-
-          def add_store_obj(retailer, store_id, city, address, name):
+          def make_store_obj(retailer, store_id, city, address, name):
               store_key = f"{retailer}:{store_id}"
-              if store_key in seen_keys:
-                  return
-              seen_keys.add(store_key)
-              selected.append({
+              return {
                   "retailer": retailer,
                   "store_id": str(store_id),
                   "store_key": store_key,
@@ -164,33 +151,114 @@ jobs:
                   "address": address or "",
                   "area": "",
                   "store_type": ""
-              })
+              }
 
-          for retailer, store_id, city, address, name in combined_raw:
-              add_store_obj(retailer, store_id, city, address, name)
-              if len(selected) >= 30:
-                  break
-
-          # Force include REQUIRED_STORE_KEYS (so the minimal record won't fail FK)
-          for sk in REQUIRED_STORE_KEYS:
-              if sk not in seen_keys:
-                  r, sid = sk.split(":", 1)
-                  add_store_obj(r, sid, "", "", "")
+          def add_unique(selected, seen_keys, obj):
+              sk = obj["store_key"]
+              if sk in seen_keys:
+                  return False
+              seen_keys.add(sk)
+              selected.append(obj)
+              return True
 
           now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-          payload = {
-              "source": "mvp_bootstrap_stores",
+          # Payload 1: RAMI + SHUFERSAL (up to 30 total)
+          sel_rami = build_selected_for("ramilevy", PER_RETAILER_RAMI) if candidates["ramilevy"] else []
+          sel_shuf = build_selected_for("shufersal", PER_RETAILER_SHUF) if candidates["shufersal"] else []
+
+          combined_raw = [("ramilevy", *x) for x in sel_rami] + [("shufersal", *x) for x in sel_shuf]
+
+          # Fill to 30 total without replacing the split logic
+          if len(combined_raw) < LIMIT_RAMI_SHUF_TOTAL:
+              for retailer in ("ramilevy", "shufersal"):
+                  for store_id, city, address, name in candidates.get(retailer, []):
+                      combined_raw.append((retailer, store_id, city, address, name))
+                      if len(combined_raw) >= LIMIT_RAMI_SHUF_TOTAL:
+                          break
+                  if len(combined_raw) >= LIMIT_RAMI_SHUF_TOTAL:
+                      break
+
+          selected_1, seen_1 = [], set()
+          for retailer, store_id, city, address, name in combined_raw:
+              add_unique(selected_1, seen_1, make_store_obj(retailer, store_id, city, address, name))
+              if len(selected_1) >= LIMIT_RAMI_SHUF_TOTAL:
+                  break
+
+          # Ensure at least 1 store exists for dummy record in payload 1
+          if not selected_1:
+              raise SystemExit("Payload1: no stores selected for ramilevy/shufersal.")
+
+          dummy_store_key_1 = selected_1[0]["store_key"]
+          payload_1 = {
+              "source": "mvp_bootstrap_stores_rami_shuf",
               "generated_at": now,
-              "stores": selected[:30],
+              "stores": selected_1,
               "records": [{
-                  "price_key": "7290000000011:ramilevy:001",
-                  "barcode": "7290000000011",
-                  "store_key": "ramilevy:001",
-                  "price": 9.9,
+                  "price_key": f"{DUMMY_BARCODE}:{dummy_store_key_1}",
+                  "barcode": DUMMY_BARCODE,
+                  "store_key": dummy_store_key_1,
+                  "price": DUMMY_PRICE,
                   "updated_at": now
               }]
           }
 
-          print(json.dumps(payload, ensure_ascii=False))
+          # Payload 2: YOHANANOF (additional, up to 15)
+          selected_2, seen_2 = [], set()
+          sel_yoh = build_selected_for("yohananof", PER_RETAILER_YOH) if candidates["yohananof"] else []
+
+          for store_id, city, address, name in sel_yoh:
+              add_unique(selected_2, seen_2, make_store_obj("yohananof", store_id, city, address, name))
+              if len(selected_2) >= PER_RETAILER_YOH:
+                  break
+
+          # If Yohananof has no stores, we still write an empty payload file (so it's explicit)
+          if selected_2:
+              dummy_store_key_2 = selected_2[0]["store_key"]
+              records_2 = [{
+                  "price_key": f"{DUMMY_BARCODE}:{dummy_store_key_2}",
+                  "barcode": DUMMY_BARCODE,
+                  "store_key": dummy_store_key_2,
+                  "price": DUMMY_PRICE,
+                  "updated_at": now
+              }]
+          else:
+              dummy_store_key_2 = ""
+              records_2 = []
+
+          payload_2 = {
+              "source": "mvp_bootstrap_stores_yohananof",
+              "generated_at": now,
+              "stores": selected_2,
+              "records": records_2
+          }
+
+          os.makedirs("out", exist_ok=True)
+          with open("out/payload_rami_shuf.json", "w", encoding="utf-8") as f:
+              json.dump(payload_1, f, ensure_ascii=False)
+          with open("out/payload_yohananof.json", "w", encoding="utf-8") as f:
+              json.dump(payload_2, f, ensure_ascii=False)
+
+          print("Wrote out/payload_rami_shuf.json and out/payload_yohananof.json")
+          print(f"Payload1 stores: {len(payload_1['stores'])} | Payload2 stores: {len(payload_2['stores'])}")
           PY
+
+      - name: POST payload (RAMI + SHUFERSAL) to Make
+        env:
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+          MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
+        run: |
+          curl -sS -X POST "$MAKE_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-make-apikey: $MAKE_APIKEY" \
+            --data-binary @out/payload_rami_shuf.json
+
+      - name: POST payload (YOHANANOF additional) to Make
+        env:
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+          MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
+        run: |
+          curl -sS -X POST "$MAKE_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-make-apikey: $MAKE_APIKEY" \
+            --data-binary @out/payload_yohananof.json
