@@ -1,4 +1,4 @@
-name: Bootstrap stores automatically (Hod Hasharon area)
+name: MVP Bootstrap Stores (2 networks, up to 30)
 
 on:
   workflow_dispatch:
@@ -21,10 +21,10 @@ jobs:
             -v "${{ github.workspace }}/dumps:/usr/src/app/dumps" \
             -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL" \
             -e ENABLED_FILE_TYPES="STORE_FILE" \
-            -e LIMIT=10 \
+            -e LIMIT=500 \
             erlichsefi/israeli-supermarket-scarpers:latest
 
-      - name: Build payload (up to 30 stores near Hod Hasharon) and POST to Make
+      - name: Build stores payload (up to 30) and POST to Make
         env:
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
           MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
@@ -37,16 +37,20 @@ jobs:
           import xml.etree.ElementTree as ET
           from datetime import datetime, timezone
 
+          # MVP: שתי רשתות, עד 30 סניפים. עדיפות לאזור הוד השרון/הסביבה, ואם אין מספיק — משלים אוטומטית.
           TARGET_TOKENS = [
               "הוד השרון", "כפר סבא", "רעננה", "הרצליה",
-              "רמת השרון", "פתח תקווה", "תל אביב",
-              "אחוזה", "רמת החייל"
+              "רמת השרון", "פתח תקווה", "תל אביב", "אחוזה"
           ]
 
+          # ChainID -> retailer (לפי הקבצים שכבר ראית)
           CHAINID_TO_RETAILER = {
               "7290027600007": "ramilevy",
               "7290058140886": "shufersal",
           }
+
+          # כדי שה-Route A לא ייפול על FK במחירים: נדאג שה-store_key הזה תמיד יופיע ב-stores שנשלחים
+          REQUIRED_STORE_KEYS = ["ramilevy:001"]
 
           def norm(s: str) -> str:
               return re.sub(r"\s+", " ", (s or "").strip())
@@ -95,11 +99,10 @@ jobs:
                   address = text_in_subtree(el, {"address"})
                   name = text_in_subtree(el, {"storename"})
                   stores.append((store_id, city, address, name))
-
               return chain_id, chain_name, stores
 
+          # איסוף מועמדים
           candidates = {"ramilevy": [], "shufersal": []}
-
           for path in glob.glob("dumps/**/*.xml", recursive=True):
               base = os.path.basename(path).lower()
               if not base.startswith("stores"):
@@ -110,19 +113,51 @@ jobs:
                   candidates[retailer].extend(stores)
 
           if not candidates["ramilevy"] and not candidates["shufersal"]:
-              raise SystemExit("No parsable STORE records found in dumps (unexpected XML structure or unmapped chain).")
+              raise SystemExit("No parsable STORE records found in dumps.")
+
+          # בחירה: עד 15 לכל רשת (סה״כ עד 30). קודם לפי טוקנים באזור, ואז משלים.
+          def score(city, address, name):
+              city_for_search = "" if looks_numeric(city) else (city or "")
+              hay = norm(f"{city_for_search} {address or ''} {name or ''}")
+              return any(tok in hay for tok in TARGET_TOKENS)
+
+          def build_selected_for(retailer, limit):
+              items = candidates.get(retailer, [])
+              preferred = []
+              fallback = []
+              for store_id, city, address, name in items:
+                  (preferred if score(city, address, name) else fallback).append((store_id, city, address, name))
+              out = preferred[:limit]
+              if len(out) < limit:
+                  out.extend(fallback[: (limit - len(out))])
+              return out
+
+          per_retailer = 15
+          sel_rami = build_selected_for("ramilevy", per_retailer) if candidates["ramilevy"] else []
+          sel_shuf = build_selected_for("shufersal", per_retailer) if candidates["shufersal"] else []
+
+          # אם אחת הרשתות לא זמינה, ממלאים עד 30 מהשנייה
+          combined_raw = [("ramilevy", *x) for x in sel_rami] + [("shufersal", *x) for x in sel_shuf]
+          if len(combined_raw) < 30:
+              for retailer in ("ramilevy", "shufersal"):
+                  for store_id, city, address, name in candidates.get(retailer, []):
+                      combined_raw.append((retailer, store_id, city, address, name))
+                      if len(combined_raw) >= 30:
+                          break
+                  if len(combined_raw) >= 30:
+                      break
 
           selected = []
           seen_keys = set()
 
-          def add_store(retailer, store_id, city, address, name):
+          def add_store_obj(retailer, store_id, city, address, name):
               store_key = f"{retailer}:{store_id}"
               if store_key in seen_keys:
-                  return False
+                  return
               seen_keys.add(store_key)
               selected.append({
                   "retailer": retailer,
-                  "store_id": store_id,
+                  "store_id": str(store_id),
                   "store_key": store_key,
                   "store_name": name or "",
                   "city": city or "",
@@ -130,46 +165,22 @@ jobs:
                   "area": "",
                   "store_type": ""
               })
-              return True
 
-          # Pass 1: preferred area by tokens
-          for retailer in ("ramilevy", "shufersal"):
-              for store_id, city, address, name in candidates.get(retailer, []):
-                  city_for_search = "" if looks_numeric(city) else (city or "")
-                  hay = norm(f"{city_for_search} {address or ''} {name or ''}")
-                  if any(tok in hay for tok in TARGET_TOKENS):
-                      add_store(retailer, store_id, city, address, name)
-                  if len(selected) >= 30:
-                      break
+          for retailer, store_id, city, address, name in combined_raw:
+              add_store_obj(retailer, store_id, city, address, name)
               if len(selected) >= 30:
                   break
 
-          # Ensure at least 2 networks if possible
-          retailers_in_selected = {s["retailer"] for s in selected}
-          if len(retailers_in_selected) < 2:
-              for retailer in ("ramilevy", "shufersal"):
-                  if retailer not in retailers_in_selected and candidates.get(retailer):
-                      store_id, city, address, name = candidates[retailer][0]
-                      add_store(retailer, store_id, city, address, name)
-                      retailers_in_selected.add(retailer)
-
-          # Pass 2: stable fallback to fill up to 30
-          if len(selected) < 30:
-              for retailer in ("ramilevy", "shufersal"):
-                  for store_id, city, address, name in candidates.get(retailer, []):
-                      add_store(retailer, store_id, city, address, name)
-                      if len(selected) >= 30:
-                          break
-                  if len(selected) >= 30:
-                      break
-
-          if len(selected) == 0:
-              raise SystemExit("Store extraction succeeded but selection is empty (unexpected).")
+          # Force include REQUIRED_STORE_KEYS (so the minimal record won't fail FK)
+          for sk in REQUIRED_STORE_KEYS:
+              if sk not in seen_keys:
+                  r, sid = sk.split(":", 1)
+                  add_store_obj(r, sid, "", "", "")
 
           now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
           payload = {
-              "source": "bootstrap_stores_auto",
+              "source": "mvp_bootstrap_stores",
               "generated_at": now,
               "stores": selected[:30],
               "records": [{
