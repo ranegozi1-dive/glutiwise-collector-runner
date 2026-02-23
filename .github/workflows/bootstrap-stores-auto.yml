@@ -1,0 +1,123 @@
+name: Bootstrap stores automatically (Hod Hasharon area)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare folders
+        run: |
+          mkdir -p dumps
+
+      - name: Pull scraper image
+        run: |
+          docker pull erlichsefi/israeli-supermarket-scarpers:latest
+
+      - name: Download STORE files (RAMI_LEVY + SHUFERSAL)
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/dumps:/usr/src/app/dumps" \
+            -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL" \
+            -e ENABLED_FILE_TYPES="STORE_FILE" \
+            -e LIMIT=10 \
+            erlichsefi/israeli-supermarket-scarpers:latest
+
+      - name: Build payload (up to 30 stores near Hod Hasharon) and POST to Make
+        env:
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+          MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
+        run: |
+          python3 - << 'PY'
+          import os, json, glob, xml.etree.ElementTree as ET
+          from datetime import datetime, timezone
+
+          # ערים "קרובות" להוד השרון (ברירת מחדל בטוחה בלי חישוב רדיוס)
+          TARGET_CITIES = {
+              "הוד השרון", "כפר סבא", "רעננה", "הרצליה",
+              "רמת השרון", "פתח תקווה", "תל אביב"
+          }
+
+          def text_of(elem, tag):
+              x = elem.find(tag)
+              return (x.text or "").strip() if x is not None else ""
+
+          def parse_store_file(path):
+              # מנסה למצוא Stores/Store במבנה הנפוץ של הקבצים
+              root = ET.parse(path).getroot()
+              stores = []
+              for store in root.findall(".//Store"):
+                  store_id = text_of(store, "StoreID")
+                  city = text_of(store, "City") or text_of(store, "CITY")
+                  address = text_of(store, "Address") or text_of(store, "ADDRESS")
+                  name = text_of(store, "StoreName") or text_of(store, "STORENAME")
+                  if store_id:
+                      stores.append((store_id, city, address, name))
+              return stores
+
+          def retailer_from_filename(fn):
+              fn = fn.lower()
+              if "ramilevy" in fn:
+                  return "ramilevy"
+              if "shufersal" in fn:
+                  return "shufersal"
+              # fallback בטוח: לא נשלח אם לא מזהים
+              return None
+
+          selected = []
+          seen_keys = set()
+
+          for path in glob.glob("dumps/**/*.xml", recursive=True):
+              base = os.path.basename(path)
+              retailer = retailer_from_filename(base)
+              if not retailer:
+                  continue
+
+              for store_id, city, address, name in parse_store_file(path):
+                  if city and city in TARGET_CITIES:
+                      store_key = f"{retailer}:{store_id}"
+                      if store_key in seen_keys:
+                          continue
+                      seen_keys.add(store_key)
+                      selected.append({
+                          "retailer": retailer,
+                          "store_id": store_id,
+                          "store_key": store_key,
+                          "store_name": name or "",
+                          "city": city or "",
+                          "address": address or "",
+                          "area": "",
+                          "store_type": ""
+                      })
+                  if len(selected) >= 30:
+                      break
+              if len(selected) >= 30:
+                  break
+
+          if not selected:
+              raise SystemExit("לא נמצאו סניפים בערים המוגדרות (TARGET_CITIES).")
+
+          now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+          # כדי לעבור Route A (שדורש גם records), שולחים רשומה אחת בלבד (מינימום)
+          # משתמשים בברקוד קיים אצלך וב-store_key קיים (ramilevy:001) כדי לא ליפול על FK
+          payload = {
+              "source": "bootstrap_stores_auto",
+              "generated_at": now,
+              "stores": selected,
+              "records": [{
+                  "price_key": "7290000000011:ramilevy:001",
+                  "barcode": "7290000000011",
+                  "store_key": "ramilevy:001",
+                  "price": 9.9,
+                  "updated_at": now
+              }]
+          }
+
+          print(json.dumps(payload, ensure_ascii=False))
+          PY
+          | curl -sS -X POST "$MAKE_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -H "x-make-apikey: $MAKE_APIKEY" \
+              --data-binary @-
