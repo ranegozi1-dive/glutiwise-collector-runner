@@ -37,14 +37,12 @@ jobs:
           import xml.etree.ElementTree as ET
           from datetime import datetime, timezone
 
-          # סינון “הוד השרון והסביבה” לפי טקסט (עיר לפעמים מספרית)
           TARGET_TOKENS = [
               "הוד השרון", "כפר סבא", "רעננה", "הרצליה",
               "רמת השרון", "פתח תקווה", "תל אביב",
               "אחוזה", "רמת החייל"
           ]
 
-          # מיפוי ChainID -> retailer (מבוסס על מה שראית בקבצים)
           CHAINID_TO_RETAILER = {
               "7290027600007": "ramilevy",
               "7290058140886": "shufersal",
@@ -57,53 +55,62 @@ jobs:
               return tag.split("}")[-1] if "}" in tag else tag
 
           def looks_numeric(s: str) -> bool:
-              return bool(re.fullmatch(r"\d{3,6}", s or ""))
+              return bool(re.fullmatch(r"\d{3,8}", (s or "").strip()))
 
-          def find_first_text_anywhere(root, wanted_lower_set):
+          def find_first_text_anywhere(root, wanted_lower: str) -> str:
               for el in root.iter():
-                  if localname(el.tag).lower() in wanted_lower_set and (el.text or "").strip():
+                  if localname(el.tag).lower() == wanted_lower and (el.text or "").strip():
                       return norm(el.text)
               return ""
 
-          def child_text_by_names(elem, wanted_lower_set):
-              for ch in list(elem):
-                  if localname(ch.tag).lower() in wanted_lower_set and (ch.text or "").strip():
-                      return norm(ch.text)
+          def text_in_subtree(elem, wanted_lower_set):
+              for x in elem.iter():
+                  if localname(x.tag).lower() in wanted_lower_set and (x.text or "").strip():
+                      return norm(x.text)
               return ""
+
+          def retailer_from_chain(chain_id: str, chain_name: str):
+              if chain_id and chain_id in CHAINID_TO_RETAILER:
+                  return CHAINID_TO_RETAILER[chain_id]
+              cn = chain_name or ""
+              if "שופרסל" in cn:
+                  return "shufersal"
+              if "רמי" in cn:
+                  return "ramilevy"
+              return None
 
           def parse_store_file(path):
               root = ET.parse(path).getroot()
-              chain_id = find_first_text_anywhere(root, {"chainid"})  # תופס גם ChainID/CHAINID/עם namespace
+              chain_id = find_first_text_anywhere(root, "chainid")
+              chain_name = find_first_text_anywhere(root, "chainname")
 
               stores = []
               for el in root.iter():
                   if localname(el.tag).lower() != "store":
                       continue
-                  store_id = child_text_by_names(el, {"storeid"})
+                  store_id = text_in_subtree(el, {"storeid"})
                   if not store_id:
                       continue
-                  city = child_text_by_names(el, {"city"})
-                  address = child_text_by_names(el, {"address"})
-                  name = child_text_by_names(el, {"storename"})
+                  city = text_in_subtree(el, {"city"})
+                  address = text_in_subtree(el, {"address"})
+                  name = text_in_subtree(el, {"storename"})
                   stores.append((store_id, city, address, name))
 
-              return chain_id, stores
+              return chain_id, chain_name, stores
 
-          # 1) קוראים את כל קבצי Stores מתוך dumps ומזהים רשת לפי ChainID
-          candidates = []
+          candidates = {"ramilevy": [], "shufersal": []}
+
           for path in glob.glob("dumps/**/*.xml", recursive=True):
               base = os.path.basename(path).lower()
               if not base.startswith("stores"):
                   continue
-              chain_id, stores = parse_store_file(path)
-              retailer = CHAINID_TO_RETAILER.get(chain_id)
-              if not retailer:
-                  continue
-              # שומרים גם אם הרשימה ריקה, ונעשה בדיקה בהמשך
-              candidates.append((retailer, stores))
+              chain_id, chain_name, stores = parse_store_file(path)
+              retailer = retailer_from_chain(chain_id, chain_name)
+              if retailer in candidates and stores:
+                  candidates[retailer].extend(stores)
 
-          if not candidates:
-              raise SystemExit("לא נמצאו קבצי Stores תואמים ב-dumps או שה-ChainID לא ממופה.")
+          if not candidates["ramilevy"] and not candidates["shufersal"]:
+              raise SystemExit("No parsable STORE records found in dumps (unexpected XML structure or unmapped chain).")
 
           selected = []
           seen_keys = set()
@@ -111,7 +118,7 @@ jobs:
           def add_store(retailer, store_id, city, address, name):
               store_key = f"{retailer}:{store_id}"
               if store_key in seen_keys:
-                  return
+                  return False
               seen_keys.add(store_key)
               selected.append({
                   "retailer": retailer,
@@ -123,12 +130,13 @@ jobs:
                   "area": "",
                   "store_type": ""
               })
+              return True
 
-          # 2) עדיפות: חיפוש טקסט “הוד השרון והסביבה”
-          for retailer, stores in candidates:
-              for store_id, city, address, name in stores:
-                  city_for_search = "" if looks_numeric(city) else city
-                  hay = norm(f"{city_for_search} {address} {name}")
+          # Pass 1: preferred area by tokens
+          for retailer in ("ramilevy", "shufersal"):
+              for store_id, city, address, name in candidates.get(retailer, []):
+                  city_for_search = "" if looks_numeric(city) else (city or "")
+                  hay = norm(f"{city_for_search} {address or ''} {name or ''}")
                   if any(tok in hay for tok in TARGET_TOKENS):
                       add_store(retailer, store_id, city, address, name)
                   if len(selected) >= 30:
@@ -136,23 +144,30 @@ jobs:
               if len(selected) >= 30:
                   break
 
-          # 3) fallback יציב: השלמה ל-30 לפי סדר הופעה
+          # Ensure at least 2 networks if possible
+          retailers_in_selected = {s["retailer"] for s in selected}
+          if len(retailers_in_selected) < 2:
+              for retailer in ("ramilevy", "shufersal"):
+                  if retailer not in retailers_in_selected and candidates.get(retailer):
+                      store_id, city, address, name = candidates[retailer][0]
+                      add_store(retailer, store_id, city, address, name)
+                      retailers_in_selected.add(retailer)
+
+          # Pass 2: stable fallback to fill up to 30
           if len(selected) < 30:
-              for retailer, stores in candidates:
-                  for store_id, city, address, name in stores:
+              for retailer in ("ramilevy", "shufersal"):
+                  for store_id, city, address, name in candidates.get(retailer, []):
                       add_store(retailer, store_id, city, address, name)
                       if len(selected) >= 30:
                           break
                   if len(selected) >= 30:
                       break
 
-          # אם עדיין לא מצאנו אף סניף — נכשיל כדי לא לשלוח stores:[]
           if len(selected) == 0:
-              raise SystemExit("נכשל חילוץ Stores (כנראה XML במבנה שונה) — לא שולח payload ריק.")
+              raise SystemExit("Store extraction succeeded but selection is empty (unexpected).")
 
           now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-          # מינימום records כדי להיכנס ל-Route A (stores+records) ב-Make
           payload = {
               "source": "bootstrap_stores_auto",
               "generated_at": now,
