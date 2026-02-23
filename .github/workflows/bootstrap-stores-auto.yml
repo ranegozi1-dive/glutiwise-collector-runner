@@ -29,26 +29,39 @@ jobs:
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
           MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
         run: |
-          python3 - << 'PY'
-          import os, json, glob, xml.etree.ElementTree as ET
+          python3 - << 'PY' | curl -sS -X POST "$MAKE_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -H "x-make-apikey: $MAKE_APIKEY" \
+              --data-binary @-
+          import os, json, glob, re
+          import xml.etree.ElementTree as ET
           from datetime import datetime, timezone
 
-          # ערים "קרובות" להוד השרון (ברירת מחדל בטוחה בלי חישוב רדיוס)
-          TARGET_CITIES = {
-              "הוד השרון", "כפר סבא", "רעננה", "הרצליה",
-              "רמת השרון", "פתח תקווה", "תל אביב"
-          }
+          # סינון "הוד השרון והסביבה" לפי טקסט (כי City לפעמים קוד מספרי)
+          TARGET_TOKENS = [
+              "הוד השרון",
+              "כפר סבא",
+              "רעננה",
+              "הרצליה",
+              "רמת השרון",
+              "פתח תקווה",
+              "תל אביב",
+              "אחוזה",        # רעננה אחוזה מופיע הרבה
+              "רמת החייל"     # אם יש סניפים רלוונטיים לת״א/מרכז
+          ]
+
+          def norm(s: str) -> str:
+              return re.sub(r"\s+", " ", (s or "").strip())
 
           def text_of(elem, tag):
               x = elem.find(tag)
-              return (x.text or "").strip() if x is not None else ""
+              return norm(x.text) if (x is not None and x.text) else ""
 
           def parse_store_file(path):
-              # מנסה למצוא Stores/Store במבנה הנפוץ של הקבצים
               root = ET.parse(path).getroot()
               stores = []
               for store in root.findall(".//Store"):
-                  store_id = text_of(store, "StoreID")
+                  store_id = text_of(store, "StoreID") or text_of(store, "STOREID")
                   city = text_of(store, "City") or text_of(store, "CITY")
                   address = text_of(store, "Address") or text_of(store, "ADDRESS")
                   name = text_of(store, "StoreName") or text_of(store, "STORENAME")
@@ -62,12 +75,16 @@ jobs:
                   return "ramilevy"
               if "shufersal" in fn:
                   return "shufersal"
-              # fallback בטוח: לא נשלח אם לא מזהים
               return None
+
+          def looks_numeric_city(city: str) -> bool:
+              # City כקוד מספרי (למשל 9700/6400/9100...) → לא נסתמך עליו לשמות
+              return bool(re.fullmatch(r"\d{3,6}", city or ""))
 
           selected = []
           seen_keys = set()
 
+          # 1) ניסיון עדיפות: לבחור סניפים שיש בהם טוקנים בשדה שם/כתובת/עיר (אם היא לא מספרית)
           for path in glob.glob("dumps/**/*.xml", recursive=True):
               base = os.path.basename(path)
               retailer = retailer_from_filename(base)
@@ -75,7 +92,39 @@ jobs:
                   continue
 
               for store_id, city, address, name in parse_store_file(path):
-                  if city and city in TARGET_CITIES:
+                  store_key = f"{retailer}:{store_id}"
+                  if store_key in seen_keys:
+                      continue
+
+                  city_for_search = "" if looks_numeric_city(city) else city
+                  hay = norm(f"{city_for_search} {address} {name}")
+
+                  if any(tok in hay for tok in TARGET_TOKENS):
+                      seen_keys.add(store_key)
+                      selected.append({
+                          "retailer": retailer,
+                          "store_id": store_id,
+                          "store_key": store_key,
+                          "store_name": name or "",
+                          "city": city or "",
+                          "address": address or "",
+                          "area": "",
+                          "store_type": ""
+                      })
+
+                  if len(selected) >= 30:
+                      break
+              if len(selected) >= 30:
+                  break
+
+          # 2) Fallback יציב: אם עדיין אין מספיק, משלימים לפי סדר הופעה עד 30 (כדי לא להיתקע)
+          if len(selected) < 30:
+              for path in glob.glob("dumps/**/*.xml", recursive=True):
+                  base = os.path.basename(path)
+                  retailer = retailer_from_filename(base)
+                  if not retailer:
+                      continue
+                  for store_id, city, address, name in parse_store_file(path):
                       store_key = f"{retailer}:{store_id}"
                       if store_key in seen_keys:
                           continue
@@ -90,22 +139,18 @@ jobs:
                           "area": "",
                           "store_type": ""
                       })
+                      if len(selected) >= 30:
+                          break
                   if len(selected) >= 30:
                       break
-              if len(selected) >= 30:
-                  break
-
-          if not selected:
-              raise SystemExit("לא נמצאו סניפים בערים המוגדרות (TARGET_CITIES).")
 
           now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-          # כדי לעבור Route A (שדורש גם records), שולחים רשומה אחת בלבד (מינימום)
-          # משתמשים בברקוד קיים אצלך וב-store_key קיים (ramilevy:001) כדי לא ליפול על FK
+          # מינימום Records כדי לעבור Route A (stores+records)
           payload = {
               "source": "bootstrap_stores_auto",
               "generated_at": now,
-              "stores": selected,
+              "stores": selected[:30],
               "records": [{
                   "price_key": "7290000000011:ramilevy:001",
                   "barcode": "7290000000011",
@@ -117,7 +162,3 @@ jobs:
 
           print(json.dumps(payload, ensure_ascii=False))
           PY
-          | curl -sS -X POST "$MAKE_WEBHOOK_URL" \
-              -H "Content-Type: application/json" \
-              -H "x-make-apikey: $MAKE_APIKEY" \
-              --data-binary @-
