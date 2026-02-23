@@ -37,13 +37,11 @@ jobs:
           import xml.etree.ElementTree as ET
           from datetime import datetime, timezone
 
-          # אזור מועדף (מסייע לבחירה, לא משנה נתונים)
           TARGET_TOKENS = [
               "הוד השרון", "כפר סבא", "רעננה", "הרצליה",
               "רמת השרון", "פתח תקווה", "תל אביב", "אחוזה"
           ]
 
-          # ChainID -> retailer (רק מה שידוע; יוחננוף מזוהה לפי ChainName)
           CHAINID_TO_RETAILER = {
               "7290027600007": "ramilevy",
               "7290058140886": "shufersal",
@@ -52,7 +50,6 @@ jobs:
           LIMIT_RAMI_SHUF_TOTAL = 30
           PER_RETAILER_YOH = 15
 
-          # Dummy product (לבדיקת pipeline בלבד)
           DUMMY_BARCODE = "7290000000011"
           DUMMY_PRICE = 9.9
 
@@ -99,6 +96,22 @@ jobs:
                       return True
               return False
 
+          # פתרון C: עיר משופרסל מהסוף של store_name, רק אם city ריק/מספרי
+          def city_from_shufersal_store_name(name: str) -> str:
+              n = norm(name)
+              if not n:
+                  return ""
+              parts = n.split(" ")
+              # ננסה 2 מילים אחרונות ("תל אביב") ואז מילה אחרונה ("רעננה")
+              if len(parts) >= 2:
+                  last2 = " ".join(parts[-2:])
+                  if re.search(r"[א-ת]", last2):
+                      return last2
+              last1 = parts[-1]
+              if re.search(r"[א-ת]", last1):
+                  return last1
+              return ""
+
           def parse_store_file(path):
               root = ET.parse(path).getroot()
               chain_id = find_first_text_anywhere(root, "chainid")
@@ -113,24 +126,21 @@ jobs:
                   if not store_id:
                       continue
 
-                  # שם סניף
                   name = text_in_subtree(el, {"storename"}) or ""
 
-                  # כתובת (אם מגיע "unknown"/מספרי/ריק -> נשאיר ריק)
-                  address = text_in_subtree(el, {"address", "street", "streetname"}) or ""
-                  if address.lower() == "unknown" or looks_numeric(address):
+                  # כתובת: אם "unknown" -> ריק
+                  address = text_in_subtree(el, {"address"}) or ""
+                  if address.lower() == "unknown":
                       address = ""
 
-                  # עיר: אצל חלק מהרשתות city מגיע כמספר/קוד (כמו אצלך: 0).
-                  # לכן: ננסה קודם שדות טקסטיים חלופיים, ואם עדיין מספרי/unknown -> נשאיר ריק.
-                  city = text_in_subtree(el, {"city", "town", "locality", "municipality", "cityname"}) or ""
-                  if city.lower() == "unknown" or looks_numeric(city):
+                  # עיר: ברירת מחדל מהתג city (אם יוצא מספרי/ריק -> ריק)
+                  city = text_in_subtree(el, {"city"}) or ""
+                  if (not city) or city.lower() == "unknown" or looks_numeric(city):
                       city = ""
 
                   stores.append((store_id, city, address, name))
               return chain_id, chain_name, stores
 
-          # Collect candidates
           candidates = {"ramilevy": [], "shufersal": [], "yohananof": []}
           for path in glob.glob("dumps/**/*.xml", recursive=True):
               base = os.path.basename(path).lower()
@@ -148,6 +158,9 @@ jobs:
               items = candidates.get(retailer, [])
               preferred, fallback = [], []
               for store_id, city, address, name in items:
+                  # פתרון C בפועל: רק לשופרסל, אם city חסר -> מפיקים מהשם
+                  if retailer == "shufersal" and (not city or looks_numeric(city) or city.lower() == "unknown"):
+                      city = city_from_shufersal_store_name(name)
                   (preferred if score(city, address, name) else fallback).append((store_id, city, address, name))
               out = preferred[:limit]
               if len(out) < limit:
@@ -175,7 +188,6 @@ jobs:
               selected.append(obj)
               return True
 
-          # Pick rami+shuf: 15+15 preferred, fill to 30
           per = 15
           sel_rami = build_selected_for("ramilevy", per) if candidates["ramilevy"] else []
           sel_shuf = build_selected_for("shufersal", per) if candidates["shufersal"] else []
@@ -184,6 +196,8 @@ jobs:
           if len(combined_raw) < LIMIT_RAMI_SHUF_TOTAL:
               for retailer in ("ramilevy", "shufersal"):
                   for store_id, city, address, name in candidates.get(retailer, []):
+                      if retailer == "shufersal" and (not city or looks_numeric(city) or city.lower() == "unknown"):
+                          city = city_from_shufersal_store_name(name)
                       combined_raw.append((retailer, store_id, city, address, name))
                       if len(combined_raw) >= LIMIT_RAMI_SHUF_TOTAL:
                           break
@@ -196,7 +210,6 @@ jobs:
               if len(selected) >= LIMIT_RAMI_SHUF_TOTAL:
                   break
 
-          # Add Yohananof additional up to 15 (do NOT replace)
           sel_yoh = build_selected_for("yohananof", PER_RETAILER_YOH) if candidates["yohananof"] else []
           yoh_added = 0
           for store_id, city, address, name in sel_yoh:
