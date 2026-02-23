@@ -24,7 +24,7 @@ jobs:
             -e LIMIT=10 \
             erlichsefi/israeli-supermarket-scarpers:latest
 
-      - name: Build payload (up to 30 stores near Hod Hasharon) and POST to Make
+       - name: Build payload (up to 30 stores near Hod Hasharon) and POST to Make
         env:
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
           MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
@@ -37,112 +37,110 @@ jobs:
           import xml.etree.ElementTree as ET
           from datetime import datetime, timezone
 
-          # סינון "הוד השרון והסביבה" לפי טקסט (כי City לפעמים קוד מספרי)
+          # מילים שמאפיינות "הוד השרון והסביבה" — סינון לפי טקסט (כי City לפעמים קוד מספרי)
           TARGET_TOKENS = [
-              "הוד השרון",
-              "כפר סבא",
-              "רעננה",
-              "הרצליה",
-              "רמת השרון",
-              "פתח תקווה",
-              "תל אביב",
-              "אחוזה",        # רעננה אחוזה מופיע הרבה
-              "רמת החייל"     # אם יש סניפים רלוונטיים לת״א/מרכז
+              "הוד השרון", "כפר סבא", "רעננה", "הרצליה", "רמת השרון",
+              "פתח תקווה", "תל אביב", "אחוזה", "רמת החייל"
           ]
+
+          # מיפוי ChainID -> retailer (מינימום נדרש כרגע)
+          # רמי לוי: 7290027600007 (כבר ראית בקובץ)
+          # שופרסל: 7290058140886 (כבר ראית בקובץ)
+          CHAINID_TO_RETAILER = {
+              "7290027600007": "ramilevy",
+              "7290058140886": "shufersal",
+          }
 
           def norm(s: str) -> str:
               return re.sub(r"\s+", " ", (s or "").strip())
 
-          def text_of(elem, tag):
-              x = elem.find(tag)
-              return norm(x.text) if (x is not None and x.text) else ""
+          def text_any(store, tags):
+              for t in tags:
+                  x = store.find(t)
+                  if x is not None and x.text:
+                      return norm(x.text)
+              return ""
+
+          def get_chain_id(root):
+              # תופס גם ChainID וגם CHAINID
+              for tag in ("ChainID", "CHAINID"):
+                  x = root.find(f".//{tag}")
+                  if x is not None and x.text:
+                      return norm(x.text)
+              return ""
 
           def parse_store_file(path):
               root = ET.parse(path).getroot()
+              chain_id = get_chain_id(root)
               stores = []
               for store in root.findall(".//Store"):
-                  store_id = text_of(store, "StoreID") or text_of(store, "STOREID")
-                  city = text_of(store, "City") or text_of(store, "CITY")
-                  address = text_of(store, "Address") or text_of(store, "ADDRESS")
-                  name = text_of(store, "StoreName") or text_of(store, "STORENAME")
+                  store_id = text_any(store, ["StoreID", "STOREID"])
+                  city = text_any(store, ["City", "CITY"])
+                  address = text_any(store, ["Address", "ADDRESS"])
+                  name = text_any(store, ["StoreName", "STORENAME"])
                   if store_id:
                       stores.append((store_id, city, address, name))
-              return stores
+              return chain_id, stores
 
-          def retailer_from_filename(fn):
-              fn = fn.lower()
-              if "ramilevy" in fn:
-                  return "ramilevy"
-              if "shufersal" in fn:
-                  return "shufersal"
-              return None
-
-          def looks_numeric_city(city: str) -> bool:
-              # City כקוד מספרי (למשל 9700/6400/9100...) → לא נסתמך עליו לשמות
-              return bool(re.fullmatch(r"\d{3,6}", city or ""))
+          def looks_numeric(s: str) -> bool:
+              return bool(re.fullmatch(r"\d{3,6}", s or ""))
 
           selected = []
           seen_keys = set()
 
-          # 1) ניסיון עדיפות: לבחור סניפים שיש בהם טוקנים בשדה שם/כתובת/עיר (אם היא לא מספרית)
+          # 1) אוספים מועמדים מהקבצים לפי ChainID (לא לפי שם קובץ)
+          candidates = []
           for path in glob.glob("dumps/**/*.xml", recursive=True):
-              base = os.path.basename(path)
-              retailer = retailer_from_filename(base)
+              base = os.path.basename(path).lower()
+              if not base.startswith("stores"):
+                  continue
+              chain_id, stores = parse_store_file(path)
+              retailer = CHAINID_TO_RETAILER.get(chain_id)
               if not retailer:
                   continue
+              candidates.append((retailer, stores))
 
-              for store_id, city, address, name in parse_store_file(path):
-                  store_key = f"{retailer}:{store_id}"
-                  if store_key in seen_keys:
-                      continue
+          # 2) מסננים לפי טקסט באזור, ואם לא מספיק — fallback לראשונים
+          def add_store(retailer, store_id, city, address, name):
+              store_key = f"{retailer}:{store_id}"
+              if store_key in seen_keys:
+                  return
+              seen_keys.add(store_key)
+              selected.append({
+                  "retailer": retailer,
+                  "store_id": store_id,
+                  "store_key": store_key,
+                  "store_name": name or "",
+                  "city": city or "",
+                  "address": address or "",
+                  "area": "",
+                  "store_type": ""
+              })
 
-                  city_for_search = "" if looks_numeric_city(city) else city
+          # עדיפות 1: לפי טוקנים (ב-StoreName/Address/City אם לא מספרי)
+          for retailer, stores in candidates:
+              for store_id, city, address, name in stores:
+                  city_for_search = "" if looks_numeric(city) else city
                   hay = norm(f"{city_for_search} {address} {name}")
-
                   if any(tok in hay for tok in TARGET_TOKENS):
-                      seen_keys.add(store_key)
-                      selected.append({
-                          "retailer": retailer,
-                          "store_id": store_id,
-                          "store_key": store_key,
-                          "store_name": name or "",
-                          "city": city or "",
-                          "address": address or "",
-                          "area": "",
-                          "store_type": ""
-                      })
-
+                      add_store(retailer, store_id, city, address, name)
                   if len(selected) >= 30:
                       break
               if len(selected) >= 30:
                   break
 
-          # 2) Fallback יציב: אם עדיין אין מספיק, משלימים לפי סדר הופעה עד 30 (כדי לא להיתקע)
+          # fallback: משלימים ל-30 לפי סדר הופעה
           if len(selected) < 30:
-              for path in glob.glob("dumps/**/*.xml", recursive=True):
-                  base = os.path.basename(path)
-                  retailer = retailer_from_filename(base)
-                  if not retailer:
-                      continue
-                  for store_id, city, address, name in parse_store_file(path):
-                      store_key = f"{retailer}:{store_id}"
-                      if store_key in seen_keys:
-                          continue
-                      seen_keys.add(store_key)
-                      selected.append({
-                          "retailer": retailer,
-                          "store_id": store_id,
-                          "store_key": store_key,
-                          "store_name": name or "",
-                          "city": city or "",
-                          "address": address or "",
-                          "area": "",
-                          "store_type": ""
-                      })
+              for retailer, stores in candidates:
+                  for store_id, city, address, name in stores:
+                      add_store(retailer, store_id, city, address, name)
                       if len(selected) >= 30:
                           break
                   if len(selected) >= 30:
                       break
+
+          if not selected:
+              raise SystemExit("לא נמצאו קבצי Stores תואמים (ChainID לא מזוהה או dumps ריק).")
 
           now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -162,3 +160,4 @@ jobs:
 
           print(json.dumps(payload, ensure_ascii=False))
           PY
+          
