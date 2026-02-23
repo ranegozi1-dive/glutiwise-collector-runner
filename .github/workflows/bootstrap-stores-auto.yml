@@ -1,4 +1,4 @@
-name: MVP Bootstrap Stores (+ Yohananof additional, no replacement)
+name: MVP Bootstrap Stores (3 networks in ONE POST)
 
 on:
   workflow_dispatch:
@@ -24,32 +24,32 @@ jobs:
             -e LIMIT=500 \
             erlichsefi/israeli-supermarket-scarpers:latest
 
-      - name: Build payloads (Rami+Shuf up to 30) + (Yohananof up to 15)
+      - name: Build ONE payload (Rami+Shuf up to 30) + (Yohananof up to 15) and POST to Make
+        env:
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+          MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
         run: |
-          python3 - << 'PY'
+          python3 - << 'PY' | curl -sS -X POST "$MAKE_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -H "x-make-apikey: $MAKE_APIKEY" \
+              --data-binary @-
           import os, json, glob, re
           import xml.etree.ElementTree as ET
           from datetime import datetime, timezone
 
-          # MVP: עדיפות להוד השרון/הסביבה, ואם אין מספיק — משלים אוטומטית.
           TARGET_TOKENS = [
               "הוד השרון", "כפר סבא", "רעננה", "הרצליה",
               "רמת השרון", "פתח תקווה", "תל אביב", "אחוזה"
           ]
 
-          # ChainID -> retailer (נעול רק למה שידוע לנו; יוחננוף מזוהה לפי ChainName)
           CHAINID_TO_RETAILER = {
               "7290027600007": "ramilevy",
               "7290058140886": "shufersal",
           }
 
-          # Limits
           LIMIT_RAMI_SHUF_TOTAL = 30
-          PER_RETAILER_RAMI = 15
-          PER_RETAILER_SHUF = 15
-          PER_RETAILER_YOH = 15  # "בנוסף" (לא על חשבון 30)
+          PER_RETAILER_YOH = 15
 
-          # Dummy product (קיים אצלך ב-DB לפי הדוגמאות)
           DUMMY_BARCODE = "7290000000011"
           DUMMY_PRICE = 9.9
 
@@ -104,7 +104,6 @@ jobs:
                   stores.append((store_id, city, address, name))
               return chain_id, chain_name, stores
 
-          # Prefer score with normalization (helps exact-city targeting across formatting differences)
           def score(city, address, name):
               city_for_search = "" if looks_numeric(city) else (city or "")
               hay = norm(f"{city_for_search} {address or ''} {name or ''}")
@@ -116,7 +115,6 @@ jobs:
                       return True
               return False
 
-          # Collect candidates
           candidates = {"ramilevy": [], "shufersal": [], "yohananof": []}
           for path in glob.glob("dumps/**/*.xml", recursive=True):
               base = os.path.basename(path).lower()
@@ -161,15 +159,12 @@ jobs:
               selected.append(obj)
               return True
 
-          now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-          # Payload 1: RAMI + SHUFERSAL (up to 30 total)
-          sel_rami = build_selected_for("ramilevy", PER_RETAILER_RAMI) if candidates["ramilevy"] else []
-          sel_shuf = build_selected_for("shufersal", PER_RETAILER_SHUF) if candidates["shufersal"] else []
+          # Pick rami+shuf: 15+15 preferred, fill to 30
+          per = 15
+          sel_rami = build_selected_for("ramilevy", per) if candidates["ramilevy"] else []
+          sel_shuf = build_selected_for("shufersal", per) if candidates["shufersal"] else []
 
           combined_raw = [("ramilevy", *x) for x in sel_rami] + [("shufersal", *x) for x in sel_shuf]
-
-          # Fill to 30 total without replacing the split logic
           if len(combined_raw) < LIMIT_RAMI_SHUF_TOTAL:
               for retailer in ("ramilevy", "shufersal"):
                   for store_id, city, address, name in candidates.get(retailer, []):
@@ -179,86 +174,37 @@ jobs:
                   if len(combined_raw) >= LIMIT_RAMI_SHUF_TOTAL:
                       break
 
-          selected_1, seen_1 = [], set()
+          selected, seen = [], set()
           for retailer, store_id, city, address, name in combined_raw:
-              add_unique(selected_1, seen_1, make_store_obj(retailer, store_id, city, address, name))
-              if len(selected_1) >= LIMIT_RAMI_SHUF_TOTAL:
+              add_unique(selected, seen, make_store_obj(retailer, store_id, city, address, name))
+              if len(selected) >= LIMIT_RAMI_SHUF_TOTAL:
                   break
 
-          # Ensure at least 1 store exists for dummy record in payload 1
-          if not selected_1:
-              raise SystemExit("Payload1: no stores selected for ramilevy/shufersal.")
-
-          dummy_store_key_1 = selected_1[0]["store_key"]
-          payload_1 = {
-              "source": "mvp_bootstrap_stores_rami_shuf",
-              "generated_at": now,
-              "stores": selected_1,
-              "records": [{
-                  "price_key": f"{DUMMY_BARCODE}:{dummy_store_key_1}",
-                  "barcode": DUMMY_BARCODE,
-                  "store_key": dummy_store_key_1,
-                  "price": DUMMY_PRICE,
-                  "updated_at": now
-              }]
-          }
-
-          # Payload 2: YOHANANOF (additional, up to 15)
-          selected_2, seen_2 = [], set()
+          # Add Yohananof additional up to 15 (do NOT replace)
           sel_yoh = build_selected_for("yohananof", PER_RETAILER_YOH) if candidates["yohananof"] else []
-
           for store_id, city, address, name in sel_yoh:
-              add_unique(selected_2, seen_2, make_store_obj("yohananof", store_id, city, address, name))
-              if len(selected_2) >= PER_RETAILER_YOH:
+              add_unique(selected, seen, make_store_obj("yohananof", store_id, city, address, name))
+              if len([s for s in selected if s["retailer"] == "yohananof"]) >= PER_RETAILER_YOH:
                   break
 
-          # If Yohananof has no stores, we still write an empty payload file (so it's explicit)
-          if selected_2:
-              dummy_store_key_2 = selected_2[0]["store_key"]
-              records_2 = [{
-                  "price_key": f"{DUMMY_BARCODE}:{dummy_store_key_2}",
+          if not selected:
+              raise SystemExit("No stores selected for payload.")
+
+          now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+          dummy_store_key = selected[0]["store_key"]
+
+          payload = {
+              "source": "mvp_bootstrap_stores_3networks",
+              "generated_at": now,
+              "stores": selected,
+              "records": [{
+                  "price_key": f"{DUMMY_BARCODE}:{dummy_store_key}",
                   "barcode": DUMMY_BARCODE,
-                  "store_key": dummy_store_key_2,
+                  "store_key": dummy_store_key,
                   "price": DUMMY_PRICE,
                   "updated_at": now
               }]
-          else:
-              dummy_store_key_2 = ""
-              records_2 = []
-
-          payload_2 = {
-              "source": "mvp_bootstrap_stores_yohananof",
-              "generated_at": now,
-              "stores": selected_2,
-              "records": records_2
           }
 
-          os.makedirs("out", exist_ok=True)
-          with open("out/payload_rami_shuf.json", "w", encoding="utf-8") as f:
-              json.dump(payload_1, f, ensure_ascii=False)
-          with open("out/payload_yohananof.json", "w", encoding="utf-8") as f:
-              json.dump(payload_2, f, ensure_ascii=False)
-
-          print("Wrote out/payload_rami_shuf.json and out/payload_yohananof.json")
-          print(f"Payload1 stores: {len(payload_1['stores'])} | Payload2 stores: {len(payload_2['stores'])}")
+          print(json.dumps(payload, ensure_ascii=False))
           PY
-
-      - name: POST payload (RAMI + SHUFERSAL) to Make
-        env:
-          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
-          MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
-        run: |
-          curl -sS -X POST "$MAKE_WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-make-apikey: $MAKE_APIKEY" \
-            --data-binary @out/payload_rami_shuf.json
-
-      - name: POST payload (YOHANANOF additional) to Make
-        env:
-          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
-          MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
-        run: |
-          curl -sS -X POST "$MAKE_WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-make-apikey: $MAKE_APIKEY" \
-            --data-binary @out/payload_yohananof.json
