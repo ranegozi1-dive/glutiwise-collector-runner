@@ -37,7 +37,7 @@ jobs:
           import xml.etree.ElementTree as ET
           from datetime import datetime, timezone
 
-          # סינון לפי טקסט (City לעיתים מספרי), כדי להתמקד בהוד השרון והסביבה
+          # סינון “הוד השרון והסביבה” לפי טקסט (עיר לפעמים מספרית)
           TARGET_TOKENS = [
               "הוד השרון", "כפר סבא", "רעננה", "הרצליה",
               "רמת השרון", "פתח תקווה", "תל אביב",
@@ -53,37 +53,62 @@ jobs:
           def norm(s: str) -> str:
               return re.sub(r"\s+", " ", (s or "").strip())
 
-          def text_any(elem, tags):
-              for t in tags:
-                  x = elem.find(t)
-                  if x is not None and x.text:
-                      return norm(x.text)
-              return ""
-
-          def get_chain_id(root):
-              for tag in ("ChainID", "CHAINID"):
-                  x = root.find(f".//{tag}")
-                  if x is not None and x.text:
-                      return norm(x.text)
-              return ""
-
-          def parse_store_file(path):
-              root = ET.parse(path).getroot()
-              chain_id = get_chain_id(root)
-              stores = []
-              for store in root.findall(".//Store"):
-                  store_id = text_any(store, ["StoreID", "STOREID"])
-                  city = text_any(store, ["City", "CITY"])
-                  address = text_any(store, ["Address", "ADDRESS"])
-                  name = text_any(store, ["StoreName", "STORENAME"])
-                  if store_id:
-                      stores.append((store_id, city, address, name))
-              return chain_id, stores
+          def localname(tag: str) -> str:
+              return tag.split("}")[-1] if "}" in tag else tag
 
           def looks_numeric(s: str) -> bool:
               return bool(re.fullmatch(r"\d{3,6}", s or ""))
 
-          def add_store(selected, seen_keys, retailer, store_id, city, address, name):
+          def find_first_text_anywhere(root, wanted_lower_set):
+              for el in root.iter():
+                  if localname(el.tag).lower() in wanted_lower_set and (el.text or "").strip():
+                      return norm(el.text)
+              return ""
+
+          def child_text_by_names(elem, wanted_lower_set):
+              for ch in list(elem):
+                  if localname(ch.tag).lower() in wanted_lower_set and (ch.text or "").strip():
+                      return norm(ch.text)
+              return ""
+
+          def parse_store_file(path):
+              root = ET.parse(path).getroot()
+              chain_id = find_first_text_anywhere(root, {"chainid"})  # תופס גם ChainID/CHAINID/עם namespace
+
+              stores = []
+              for el in root.iter():
+                  if localname(el.tag).lower() != "store":
+                      continue
+                  store_id = child_text_by_names(el, {"storeid"})
+                  if not store_id:
+                      continue
+                  city = child_text_by_names(el, {"city"})
+                  address = child_text_by_names(el, {"address"})
+                  name = child_text_by_names(el, {"storename"})
+                  stores.append((store_id, city, address, name))
+
+              return chain_id, stores
+
+          # 1) קוראים את כל קבצי Stores מתוך dumps ומזהים רשת לפי ChainID
+          candidates = []
+          for path in glob.glob("dumps/**/*.xml", recursive=True):
+              base = os.path.basename(path).lower()
+              if not base.startswith("stores"):
+                  continue
+              chain_id, stores = parse_store_file(path)
+              retailer = CHAINID_TO_RETAILER.get(chain_id)
+              if not retailer:
+                  continue
+              # שומרים גם אם הרשימה ריקה, ונעשה בדיקה בהמשך
+              candidates.append((retailer, stores))
+
+          if not candidates:
+              raise SystemExit("לא נמצאו קבצי Stores תואמים ב-dumps או שה-ChainID לא ממופה.")
+
+          selected = []
+          seen_keys = set()
+
+          def add_store(retailer, store_id, city, address, name):
               store_key = f"{retailer}:{store_id}"
               if store_key in seen_keys:
                   return
@@ -99,45 +124,31 @@ jobs:
                   "store_type": ""
               })
 
-          # 1) קוראים את כל קבצי ה-Stores מה-dumps ומזהים רשת לפי ChainID (לא לפי שם קובץ)
-          candidates = []
-          for path in glob.glob("dumps/**/*.xml", recursive=True):
-              base = os.path.basename(path).lower()
-              if not base.startswith("stores"):
-                  continue
-              chain_id, stores = parse_store_file(path)
-              retailer = CHAINID_TO_RETAILER.get(chain_id)
-              if not retailer:
-                  continue
-              candidates.append((retailer, stores))
-
-          if not candidates:
-              raise SystemExit("לא נמצאו קבצי Stores תואמים ב-dumps או שה-ChainID לא ממופה.")
-
-          selected = []
-          seen_keys = set()
-
-          # 2) עדיפות: טוקנים ב-StoreName/Address/City (אם City לא מספרי)
+          # 2) עדיפות: חיפוש טקסט “הוד השרון והסביבה”
           for retailer, stores in candidates:
               for store_id, city, address, name in stores:
                   city_for_search = "" if looks_numeric(city) else city
                   hay = norm(f"{city_for_search} {address} {name}")
                   if any(tok in hay for tok in TARGET_TOKENS):
-                      add_store(selected, seen_keys, retailer, store_id, city, address, name)
+                      add_store(retailer, store_id, city, address, name)
                   if len(selected) >= 30:
                       break
               if len(selected) >= 30:
                   break
 
-          # 3) fallback יציב: אם לא הגיע ל-30, משלימים לפי סדר הופעה
+          # 3) fallback יציב: השלמה ל-30 לפי סדר הופעה
           if len(selected) < 30:
               for retailer, stores in candidates:
                   for store_id, city, address, name in stores:
-                      add_store(selected, seen_keys, retailer, store_id, city, address, name)
+                      add_store(retailer, store_id, city, address, name)
                       if len(selected) >= 30:
                           break
                   if len(selected) >= 30:
                       break
+
+          # אם עדיין לא מצאנו אף סניף — נכשיל כדי לא לשלוח stores:[]
+          if len(selected) == 0:
+              raise SystemExit("נכשל חילוץ Stores (כנראה XML במבנה שונה) — לא שולח payload ריק.")
 
           now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
