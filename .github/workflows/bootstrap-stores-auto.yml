@@ -57,28 +57,53 @@ jobs:
       # =========================
       # DISCOVER PRICE TYPES (SAFE)
       # =========================
-      - name: Discover PRICE file types (SAFE)
+      - name: Discover PRICE file types (SAFE - never empty, with fallback)
         if: ${{ inputs.run_mode != 'inspect' }}
         id: discover
         run: |
           set -euo pipefail
 
           docker run --rm --entrypoint python3 erlichsefi/israeli-supermarket-scarpers:latest - <<'PY' > price_types.txt
-          import re, sys
-          from il_supermarket_scarper import FileTypesFilters
+          import re, sys, glob
 
-          types = [str(t).strip() for t in FileTypesFilters.all_types() if str(t).strip()]
-          # נעדיף PRICE/FULL (לפני PROMO) כדי לא לנפח
-          price = [t for t in types if re.search(r"(PRICE|FULL)", t, re.I) and not re.search(r"PROMO", t, re.I)]
-          if not price:
-              price = [t for t in types if re.search(r"(PRICE|PROMO|FULL)", t, re.I)]
-          price = sorted(set([t for t in price if t.upper() != "STORE_FILE"]))
+          def norm_list(xs):
+              out=[]
+              for x in xs or []:
+                  s=str(x).strip()
+                  if s:
+                      out.append(s)
+              return sorted(set(out))
 
-          if not price:
-              print("ERROR:NO_PRICE_TYPES")
+          # 1) Preferred: API
+          types = []
+          try:
+              from il_supermarket_scarper import FileTypesFilters
+              types = norm_list(FileTypesFilters.all_types())
+          except Exception:
+              types = []
+
+          # 2) Fallback: scan *file_types*.py for *_FILE tokens (only if API empty)
+          if not types:
+              paths = glob.glob("**/*file_types*.py", recursive=True)
+              if paths:
+                  txt = open(paths[0], "r", encoding="utf-8", errors="ignore").read()
+                  # Grab quoted tokens containing FILE, e.g. "PRICE_FILE"
+                  types = norm_list(re.findall(r'["\']([A-Z0-9_]*FILE[A-Z0-9_]*)["\']', txt))
+
+          if not types:
+              print("ERROR:NO_FILE_TYPES_FOUND")
               sys.exit(2)
 
-          print(",".join(price))
+          # Prefer PRICE/PROMO/FULL if present; otherwise fallback to all non-store types
+          price_like = [t for t in types if re.search(r"(PRICE|PROMO|FULL)", t, re.I)]
+          non_store  = [t for t in types if t.upper() != "STORE_FILE"]
+          chosen = norm_list(price_like) or norm_list(non_store)
+
+          if not chosen:
+              print("ERROR:EMPTY_CHOSEN_TYPES")
+              sys.exit(2)
+
+          print(",".join(chosen))
           PY
 
           PRICE_TYPES="$(cat price_types.txt | tr -d '\r\n' | sed 's/,,*/,/g; s/^,//; s/,$//')"
