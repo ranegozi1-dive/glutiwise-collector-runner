@@ -23,24 +23,35 @@ jobs:
       # =========================
       # INSPECT (בלי Make בכלל)
       # =========================
-      - name: Inspect scraper image (FAST - show file_types.py + grep tokens)
+      - name: Inspect scraper image (FAST - locate file_types and grep tokens)
         if: ${{ inputs.run_mode == 'inspect' }}
         run: |
           set -e
           docker run --rm --entrypoint sh erlichsefi/israeli-supermarket-scarpers:latest -lc '
             set -e
 
-            echo "== SHOW file_types.py (source of truth) ==";
-            if [ -f "./il_supermarket_scraper/utils/file_types.py" ]; then
-              sed -n "1,260p" ./il_supermarket_scraper/utils/file_types.py
-            else
-              echo "NOT FOUND: ./il_supermarket_scraper/utils/file_types.py"
-              exit 2
+            echo "== FIND file_types candidates ==";
+            CANDS="$(find . -maxdepth 8 -type f -iname "*file_types*.py" | head -n 50 || true)"
+            if [ -z "$CANDS" ]; then
+              echo "NO *file_types*.py found. Showing hints (grep)..."
+              grep -RIn --line-number --binary-files=without-match -E "ENABLED_FILE_TYPES|STORE_FILE|PRICE|PROMO|FULL|FILE_TYPE" . 2>/dev/null | head -n 200 || true
+              echo "== DONE (inspect finished without failing) =="
+              exit 0
             fi
 
+            echo "$CANDS"
             echo
-            echo "== GREP PRICE/PROMO/FULL tokens ==";
-            grep -nE "PRICE|PROMO|FULL|FILE" ./il_supermarket_scraper/utils/file_types.py | head -n 200 || true
+
+            echo "== SHOW + GREP first candidate (source-of-truth guess) ==";
+            FT="$(echo "$CANDS" | head -n 1)"
+            echo "Chosen: $FT"
+            echo "--- HEAD 260 lines ---"
+            sed -n "1,260p" "$FT" || true
+            echo
+            echo "--- GREP TOKENS ---"
+            grep -nE "STORE_FILE|PRICE|PROMO|FULL|FILE" "$FT" | head -n 200 || true
+
+            echo "== DONE (inspect finished) =="
           '
 
       # =========================
