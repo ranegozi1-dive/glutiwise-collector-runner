@@ -57,20 +57,29 @@ jobs:
       # =========================
       # DISCOVER PRICE TYPES (SAFE)
       # =========================
-      - name: Discover PRICE file types (SAFE - correct import, never empty)
+      - name: Discover PRICE file types (SAFE - from all_types, never empty)
         if: ${{ inputs.run_mode != 'inspect' }}
         id: discover
         run: |
           set -euo pipefail
 
-          docker run --rm --entrypoint python3 erlichsefi/israeli-supermarket-scarpers:latest - <<'PY' > price_types.txt
+          docker run --rm --entrypoint python3 erlichsefi/israeli-supermarket-scarpers:latest - <<'PY' > ft.out
           from il_supermarket_scarper.utils.file_types import FileTypesFilters
-          print(",".join(FileTypesFilters.only_price()))
+          print("ALL=" + ",".join(FileTypesFilters.all_types()))
           PY
 
-          PRICE_TYPES="$(cat price_types.txt | tr -d '\r\n' | sed 's/,,*/,/g; s/^,//; s/,$//')"
+          ALL_TYPES="$(grep '^ALL=' ft.out | cut -d= -f2- | tr -d '\r\n')"
+          echo "All file types in image: $ALL_TYPES"
+
+          # Pick price types deterministically (must be valid per main.py validation)
+          if echo "$ALL_TYPES" | grep -q "PRICE_FILE" && echo "$ALL_TYPES" | grep -q "PRICE_FULL_FILE"; then
+            PRICE_TYPES="PRICE_FILE,PRICE_FULL_FILE"
+          else
+            echo "ERROR:NO_PRICE_TYPES_IN_IMAGE_ALL_TYPES"
+            exit 2
+          fi
+
           echo "Discovered PRICE types: $PRICE_TYPES"
-          [ -z "$PRICE_TYPES" ] && echo "ERROR:EMPTY_PRICE_TYPES" && exit 2
           echo "price_types=$PRICE_TYPES" >> "$GITHUB_OUTPUT"
 
       # =========================
