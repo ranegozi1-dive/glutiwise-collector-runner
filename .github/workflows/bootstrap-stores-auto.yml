@@ -24,24 +24,29 @@ jobs:
         run: |
           docker pull erlichsefi/israeli-supermarket-scarpers:latest
 
-      # ✅ FAST INSPECT: סורק רק את קבצי הפרויקט הרלוונטיים, לא את כל /
       - name: Inspect scraper image (FAST - discover PRICE file type strings)
         if: ${{ inputs.run_mode == 'inspect' }}
         run: |
           docker run --rm --entrypoint sh erlichsefi/israeli-supermarket-scarpers:latest -lc '
             set -e
+
             echo "== LS (project root) ==";
             ls -la;
 
             echo "== FAST GREP (project only) ==";
-            # אצלך רואים במפורש main.py + il_supermarket_scraper בשורש,
-            # אז אנחנו סורקים רק את הנתיבים האלה ולא את / כולו.
             for t in ./main.py ./il_supermarket_scraper ./example.py ./README.md ./MANIFEST.in ./setup.py ./setup.cfg; do
               if [ -e "$t" ]; then
                 echo "--- scanning $t ---";
                 grep -RIn --line-number --binary-files=without-match -E "ENABLED_FILE_TYPES|STORE_FILE|PRICE|PRICE_FILE|FULL|FILE_TYPE" "$t" 2>/dev/null | head -n 200 || true
               fi
             done
+
+            echo "== SHOW file_types.py (source of truth) ==";
+            if [ -f "./il_supermarket_scraper/utils/file_types.py" ]; then
+              sed -n "1,260p" ./il_supermarket_scraper/utils/file_types.py
+            else
+              echo "NOT FOUND: ./il_supermarket_scraper/utils/file_types.py"
+            fi
 
             echo "== DONE ==";
           '
@@ -129,7 +134,6 @@ jobs:
                       return True
               return False
 
-          # פתרון C: עיר משופרסל מהסוף של store_name, רק אם city ריק/מספרי
           def city_from_shufersal_store_name(name: str) -> str:
               n = norm(name)
               if not n:
