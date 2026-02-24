@@ -1,10 +1,15 @@
-name: MVP Bootstrap Stores + Prices (AUTO discover PRICE file types, ONE POST)
+name: MVP Bootstrap Stores + Prices (3 networks in ONE POST)
 
 on:
   workflow_dispatch:
+    inputs:
+      run_mode:
+        description: "inspect (מהיר, בלי Make) | stores (כמו היום) | stores_prices (STORE+PRICE אמיתי)"
+        required: true
+        default: "inspect"
 
 jobs:
-  run:
+  bootstrap:
     runs-on: ubuntu-latest
     steps:
       - name: Prepare folders
@@ -15,121 +20,45 @@ jobs:
         run: |
           docker pull erlichsefi/israeli-supermarket-scarpers:latest
 
-      # 1) Discover price-related ENABLED_FILE_TYPES from inside the image (no guessing)
-      - name: Discover PRICE file type strings (from image)
-        id: discover
+      # =========================
+      # INSPECT (בלי Make בכלל)
+      # =========================
+      - name: Inspect scraper image (FAST - show file_types.py + grep tokens)
+        if: ${{ inputs.run_mode == 'inspect' }}
         run: |
           set -e
-          PRICE_TYPES="$(docker run --rm --entrypoint python3 erlichsefi/israeli-supermarket-scarpers:latest - <<'PY'
-import re, sys, pkgutil, importlib, inspect
+          docker run --rm --entrypoint sh erlichsefi/israeli-supermarket-scarpers:latest -lc '
+            set -e
 
-def find_price_tokens_in_module(mod):
-    tokens = set()
-    # Look for constants / lists / dicts that contain file type strings
-    for name, val in vars(mod).items():
-        if isinstance(val, (list, tuple, set)):
-            for x in val:
-                if isinstance(x, str) and re.search(r'price', x, re.I):
-                    tokens.add(x)
-        if isinstance(val, dict):
-            for k, v in val.items():
-                if isinstance(k, str) and re.search(r'price', k, re.I):
-                    tokens.add(k)
-                if isinstance(v, str) and re.search(r'price', v, re.I):
-                    tokens.add(v)
-        if isinstance(val, str) and re.search(r'price', val, re.I) and re.search(r'file', val, re.I):
-            tokens.add(val)
+            echo "== SHOW file_types.py (source of truth) ==";
+            if [ -f "./il_supermarket_scraper/utils/file_types.py" ]; then
+              sed -n "1,260p" ./il_supermarket_scraper/utils/file_types.py
+            else
+              echo "NOT FOUND: ./il_supermarket_scraper/utils/file_types.py"
+              exit 2
+            fi
 
-    # Look for Enum-like classes with members containing 'PRICE'
-    for name, obj in vars(mod).items():
-        try:
-            if inspect.isclass(obj) and hasattr(obj, "__members__"):
-                for m in obj.__members__.values():
-                    vv = getattr(m, "value", None)
-                    if isinstance(vv, str) and re.search(r'price', vv, re.I):
-                        tokens.add(vv)
-                    if isinstance(m.name, str) and re.search(r'price', m.name, re.I):
-                        tokens.add(m.name)
-        except Exception:
-            pass
-    return tokens
+            echo
+            echo "== GREP PRICE/PROMO/FULL tokens ==";
+            grep -nE "PRICE|PROMO|FULL|FILE" ./il_supermarket_scraper/utils/file_types.py | head -n 200 || true
+          '
 
-def try_import_candidates():
-    # Try a few likely module names first, then fall back to scanning package tree.
-    candidates = [
-        "il_supermarket_scraper.utils.file_types",
-        "il_supermarket_scraper.file_types",
-        "il_supermarket_scraper.utils",
-        "il_supermarket_scraper",
-    ]
-    for c in candidates:
-        try:
-            yield importlib.import_module(c)
-        except Exception:
-            pass
-
-def scan_all():
-    # Scan top-level package modules for "file" + "type" keywords
-    for m in pkgutil.iter_modules():
-        name = m.name
-        if "scraper" in name or "supermarket" in name:
-            try:
-                yield importlib.import_module(name)
-            except Exception:
-                pass
-
-tokens = set()
-
-for mod in try_import_candidates():
-    tokens |= find_price_tokens_in_module(mod)
-
-# If still empty, scan deeper inside the il_supermarket_scraper package if it exists
-try:
-    import il_supermarket_scraper
-    pkg = il_supermarket_scraper
-    for m in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
-        try:
-            mod = importlib.import_module(m.name)
-            tokens |= find_price_tokens_in_module(mod)
-        except Exception:
-            pass
-except Exception:
-    pass
-
-# Hard stop if nothing found (no guessing)
-tokens = sorted(tokens)
-if not tokens:
-    print("ERROR:NO_PRICE_FILE_TYPES_FOUND")
-    sys.exit(2)
-
-# Print as comma-separated for GitHub step output
-print(",".join(tokens))
-PY)"
-          echo "Discovered PRICE types: $PRICE_TYPES"
-
-          if echo "$PRICE_TYPES" | grep -q "ERROR:NO_PRICE_FILE_TYPES_FOUND"; then
-            echo "Failed to discover PRICE file types from image. Aborting (no guessing)."
-            exit 2
-          fi
-
-          echo "price_types=$PRICE_TYPES" >> "$GITHUB_OUTPUT"
-
-      # 2) Download STORE + PRICE files in one docker run (minimize time/ops)
-      - name: Download STORE + PRICE files (3 networks)
-        env:
-          PRICE_TYPES: ${{ steps.discover.outputs.price_types }}
+      # =========================
+      # STORES (כמו היום)
+      # =========================
+      - name: Download STORE files (RAMI_LEVY + SHUFERSAL + YOHANANOF)
+        if: ${{ inputs.run_mode == 'stores' }}
         run: |
           set -e
-          echo "Using PRICE file types: $PRICE_TYPES"
           docker run --rm \
             -v "${{ github.workspace }}/dumps:/usr/src/app/dumps" \
             -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL,YOHANANOF" \
-            -e ENABLED_FILE_TYPES="STORE_FILE,${PRICE_TYPES}" \
-            -e LIMIT=120 \
+            -e ENABLED_FILE_TYPES="STORE_FILE" \
+            -e LIMIT=500 \
             erlichsefi/israeli-supermarket-scarpers:latest
 
-      # 3) Build ONE payload (stores up to 30 + records real) and POST to Make (ONE POST)
-      - name: Build payload and POST to Make (ONE POST)
+      - name: Build ONE payload (stores) and POST to Make
+        if: ${{ inputs.run_mode == 'stores' }}
         env:
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
           MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
@@ -143,14 +72,254 @@ PY)"
           import xml.etree.ElementTree as ET
           from datetime import datetime, timezone
 
-          # ====== HARD DEFAULTS (safe, no DB calls) ======
-          # Use only barcodes that already exist in your DB (examples you gave)
+          TARGET_TOKENS = [
+              "הוד השרון", "כפר סבא", "רעננה", "הרצליה",
+              "רמת השרון", "פתח תקווה", "תל אביב", "אחוזה"
+          ]
+
+          CHAINID_TO_RETAILER = {
+              "7290027600007": "ramilevy",
+              "7290058140886": "shufersal",
+          }
+
+          LIMIT_RAMI_SHUF_TOTAL = 30
+          PER_RETAILER_YOH = 15
+
+          DUMMY_BARCODE = "7290000000011"
+          DUMMY_PRICE = 9.9
+
+          def norm(s: str) -> str:
+              return re.sub(r"\s+", " ", (s or "").strip())
+
+          def localname(tag: str) -> str:
+              return tag.split("}")[-1] if "}" in tag else tag
+
+          def looks_numeric(s: str) -> bool:
+              return bool(re.fullmatch(r"\d{1,12}", (s or "").strip()))
+
+          def find_first_text_anywhere(root, wanted_lower: str) -> str:
+              for el in root.iter():
+                  if localname(el.tag).lower() == wanted_lower and (el.text or "").strip():
+                      return norm(el.text)
+              return ""
+
+          def text_in_subtree(elem, wanted_lower_set):
+              for x in elem.iter():
+                  if localname(x.tag).lower() in wanted_lower_set and (x.text or "").strip():
+                      return norm(x.text)
+              return ""
+
+          def retailer_from_chain(chain_id: str, chain_name: str):
+              if chain_id and chain_id in CHAINID_TO_RETAILER:
+                  return CHAINID_TO_RETAILER[chain_id]
+              cn = chain_name or ""
+              if "שופרסל" in cn:
+                  return "shufersal"
+              if "רמי" in cn:
+                  return "ramilevy"
+              if "יוחננוף" in cn:
+                  return "yohananof"
+              return None
+
+          def score(city, address, name):
+              hay = norm(f"{city or ''} {address or ''} {name or ''}")
+              hay2 = re.sub(r"[\s\-]", "", hay)
+              for tok in TARGET_TOKENS:
+                  if tok in hay:
+                      return True
+                  if re.sub(r"[\s\-]", "", tok) in hay2:
+                      return True
+              return False
+
+          def city_from_shufersal_store_name(name: str) -> str:
+              n = norm(name)
+              if not n:
+                  return ""
+              parts = n.split(" ")
+              if len(parts) >= 2:
+                  last2 = " ".join(parts[-2:])
+                  if re.search(r"[א-ת]", last2):
+                      return last2
+              last1 = parts[-1]
+              if re.search(r"[א-ת]", last1):
+                  return last1
+              return ""
+
+          def parse_store_file(path):
+              root = ET.parse(path).getroot()
+              chain_id = find_first_text_anywhere(root, "chainid")
+              chain_name = find_first_text_anywhere(root, "chainname")
+
+              stores = []
+              for el in root.iter():
+                  if localname(el.tag).lower() != "store":
+                      continue
+
+                  store_id = text_in_subtree(el, {"storeid"})
+                  if not store_id:
+                      continue
+
+                  name = text_in_subtree(el, {"storename"}) or ""
+
+                  address = text_in_subtree(el, {"address"}) or ""
+                  if address.lower() == "unknown":
+                      address = ""
+
+                  city = text_in_subtree(el, {"city"}) or ""
+                  if (not city) or city.lower() == "unknown" or looks_numeric(city):
+                      city = ""
+
+                  stores.append((store_id, city, address, name))
+              return chain_id, chain_name, stores
+
+          candidates = {"ramilevy": [], "shufersal": [], "yohananof": []}
+          for path in glob.glob("dumps/**/*.xml", recursive=True):
+              base = os.path.basename(path).lower()
+              if not base.startswith("stores"):
+                  continue
+              chain_id, chain_name, stores = parse_store_file(path)
+              retailer = retailer_from_chain(chain_id, chain_name)
+              if retailer in candidates and stores:
+                  candidates[retailer].extend(stores)
+
+          if not candidates["ramilevy"] and not candidates["shufersal"] and not candidates["yohananof"]:
+              raise SystemExit("No parsable STORE records found in dumps.")
+
+          def build_selected_for(retailer, limit):
+              items = candidates.get(retailer, [])
+              preferred, fallback = [], []
+              for store_id, city, address, name in items:
+                  if retailer == "shufersal" and (not city or looks_numeric(city) or city.lower() == "unknown"):
+                      city = city_from_shufersal_store_name(name)
+                  (preferred if score(city, address, name) else fallback).append((store_id, city, address, name))
+              out = preferred[:limit]
+              if len(out) < limit:
+                  out.extend(fallback[: (limit - len(out))])
+              return out
+
+          def make_store_obj(retailer, store_id, city, address, name):
+              store_key = f"{retailer}:{store_id}"
+              return {
+                  "retailer": retailer,
+                  "store_id": str(store_id),
+                  "store_key": store_key,
+                  "store_name": name or "",
+                  "city": city or "",
+                  "address": address or "",
+                  "area": "",
+                  "store_type": ""
+              }
+
+          def add_unique(selected, seen_keys, obj):
+              sk = obj["store_key"]
+              if sk in seen_keys:
+                  return False
+              seen_keys.add(sk)
+              selected.append(obj)
+              return True
+
+          per = 15
+          sel_rami = build_selected_for("ramilevy", per) if candidates["ramilevy"] else []
+          sel_shuf = build_selected_for("shufersal", per) if candidates["shufersal"] else []
+
+          combined_raw = [("ramilevy", *x) for x in sel_rami] + [("shufersal", *x) for x in sel_shuf]
+          if len(combined_raw) < LIMIT_RAMI_SHUF_TOTAL:
+              for retailer in ("ramilevy", "shufersal"):
+                  for store_id, city, address, name in candidates.get(retailer, []):
+                      if retailer == "shufersal" and (not city or looks_numeric(city) or city.lower() == "unknown"):
+                          city = city_from_shufersal_store_name(name)
+                      combined_raw.append((retailer, store_id, city, address, name))
+                      if len(combined_raw) >= LIMIT_RAMI_SHUF_TOTAL:
+                          break
+                  if len(combined_raw) >= LIMIT_RAMI_SHUF_TOTAL:
+                      break
+
+          selected, seen = [], set()
+          for retailer, store_id, city, address, name in combined_raw:
+              add_unique(selected, seen, make_store_obj(retailer, store_id, city, address, name))
+              if len(selected) >= LIMIT_RAMI_SHUF_TOTAL:
+                  break
+
+          sel_yoh = build_selected_for("yohananof", PER_RETAILER_YOH) if candidates["yohananof"] else []
+          yoh_added = 0
+          for store_id, city, address, name in sel_yoh:
+              if add_unique(selected, seen, make_store_obj("yohananof", store_id, city, address, name)):
+                  yoh_added += 1
+              if yoh_added >= PER_RETAILER_YOH:
+                  break
+
+          if not selected:
+              raise SystemExit("No stores selected for payload.")
+
+          now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+          dummy_store_key = selected[0]["store_key"]
+
+          payload = {
+              "source": "mvp_bootstrap_stores_3networks",
+              "generated_at": now,
+              "stores": selected,
+              "records": [{
+                  "price_key": f"{DUMMY_BARCODE}:{dummy_store_key}",
+                  "barcode": DUMMY_BARCODE,
+                  "store_key": dummy_store_key,
+                  "price": DUMMY_PRICE,
+                  "updated_at": now
+              }]
+          }
+
+          print(json.dumps(payload, ensure_ascii=False))
+          PY
+
+      # =========================================
+      # STORES + PRICES (POST אחד, בלי לפצל)
+      # =========================================
+
+      - name: Discover PRICE file type strings (safe: python -c, no heredoc)
+        if: ${{ inputs.run_mode == 'stores_prices' }}
+        id: discover
+        run: |
+          set -euo pipefail
+          PRICE_TYPES="$(docker run --rm --entrypoint python3 erlichsefi/israeli-supermarket-scarpers:latest -c 'import re,sys; from pathlib import Path; p=Path("il_supermarket_scraper/utils/file_types.py"); 
+if not p.exists(): 
+  print("ERROR:FILE_TYPES_NOT_FOUND"); sys.exit(2)
+txt=p.read_text(encoding="utf-8", errors="ignore")
+pairs=re.findall(r"^\\s*([A-Z0-9_]+)\\s*=\\s*[\\x27\\x22]([^\\x27\\x22]+)[\\x27\\x22]\\s*$", txt, flags=re.M)
+tokens=sorted({v for k,v in pairs if (("PRICE" in k.upper()) or ("PRICE" in v.upper()) or ("PROMO" in k.upper()) or ("PROMO" in v.upper()) or ("FULL" in k.upper()) or ("FULL" in v.upper())) and v.upper()!="STORE_FILE"})
+if not tokens: 
+  print("ERROR:NO_PRICE_FILE_TYPES_FOUND"); sys.exit(2)
+print(",".join(tokens))')"
+          echo "Discovered PRICE types: $PRICE_TYPES"
+          echo "$PRICE_TYPES" | grep -qE '^ERROR:' && exit 2
+          echo "price_types=$PRICE_TYPES" >> "$GITHUB_OUTPUT"
+
+      - name: Download STORE + PRICE files (3 networks)
+        if: ${{ inputs.run_mode == 'stores_prices' }}
+        run: |
+          set -e
+          echo "Using PRICE file types: ${{ steps.discover.outputs.price_types }}"
+          docker run --rm \
+            -v "${{ github.workspace }}/dumps:/usr/src/app/dumps" \
+            -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL,YOHANANOF" \
+            -e ENABLED_FILE_TYPES="STORE_FILE,${{ steps.discover.outputs.price_types }}" \
+            -e LIMIT=120 \
+            erlichsefi/israeli-supermarket-scarpers:latest
+
+      - name: Build ONE payload (stores + prices allowlist) and POST to Make (ONE POST)
+        if: ${{ inputs.run_mode == 'stores_prices' }}
+        env:
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+          MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
+        run: |
+          set -e
+          python3 - << 'PY' > payload.json
+          import os, json, glob, re, sys
+          import xml.etree.ElementTree as ET
+          from datetime import datetime, timezone
+
+          # allowlist חסכוני (קיים אצלך ב-public.products לפי המידע שנתת)
           ALLOWLIST_BARCODES = {
               "7290000000011","7290000000028","7290000000035","7290000000042","7290000000059","7290000000066"
           }
-          MAX_STORES_TOTAL = 30
-          MAX_RECORDS_TOTAL = 200   # keep payload small
-          MIN_RECORDS_TO_SEND = 2   # to satisfy your verification rule
 
           TARGET_TOKENS = [
               "הוד השרון", "כפר סבא", "רעננה", "הרצליה",
@@ -161,6 +330,13 @@ PY)"
               "7290027600007": "ramilevy",
               "7290058140886": "shufersal",
           }
+
+          MAX_STORES_TOTAL = 30
+          MAX_RECORDS_TOTAL = 200
+          MIN_RECORDS_TO_SEND = 2
+
+          def now_z():
+              return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
 
           def norm(s: str) -> str:
               return re.sub(r"\s+", " ", (s or "").strip())
@@ -219,6 +395,7 @@ PY)"
                   return last1
               return ""
 
+          # -------- STORES --------
           def parse_store_file(path):
               root = ET.parse(path).getroot()
               chain_id = find_first_text_anywhere(root, "chainid")
@@ -240,6 +417,22 @@ PY)"
                   stores.append((store_id, city, address, name))
               return chain_id, chain_name, stores
 
+          candidates = {"ramilevy": [], "shufersal": [], "yohananof": []}
+          for path in glob.glob("dumps/**/*.xml", recursive=True):
+              base = os.path.basename(path).lower()
+              if not base.startswith("stores"):
+                  continue
+              try:
+                  chain_id, chain_name, stores = parse_store_file(path)
+              except Exception:
+                  continue
+              retailer = retailer_from_chain(chain_id, chain_name)
+              if retailer in candidates and stores:
+                  candidates[retailer].extend(stores)
+
+          if not any(candidates.values()):
+              raise SystemExit("No parsable STORE records found (stores_prices).")
+
           def make_store_obj(retailer, store_id, city, address, name):
               store_key = f"{retailer}:{store_id}"
               return {
@@ -253,19 +446,8 @@ PY)"
                   "store_type": ""
               }
 
-          # ====== Select stores up to 30 (existing logic, slightly compact) ======
-          candidates = {"ramilevy": [], "shufersal": [], "yohananof": []}
-          for path in glob.glob("dumps/**/*.xml", recursive=True):
-              base = os.path.basename(path).lower()
-              if not base.startswith("stores"):
-                  continue
-              chain_id, chain_name, stores = parse_store_file(path)
-              retailer = retailer_from_chain(chain_id, chain_name)
-              if retailer in candidates and stores:
-                  candidates[retailer].extend(stores)
+          selected_stores, seen = [], set()
 
-          selected_stores = []
-          seen = set()
           def add_store(retailer, store_id, city, address, name):
               if retailer == "shufersal" and (not city or looks_numeric(city) or city.lower() == "unknown"):
                   city = city_from_shufersal_store_name(name)
@@ -276,10 +458,10 @@ PY)"
               seen.add(sk)
               selected_stores.append(obj)
 
-          # Prefer target-area stores first, then fill
           for retailer in ("ramilevy","shufersal","yohananof"):
+              items = candidates.get(retailer, [])
               preferred, fallback = [], []
-              for store_id, city, address, name in candidates.get(retailer, []):
+              for store_id, city, address, name in items:
                   (preferred if score(city,address,name) else fallback).append((store_id, city, address, name))
               for tup in preferred + fallback:
                   add_store(retailer, *tup)
@@ -288,121 +470,110 @@ PY)"
               if len(selected_stores) >= MAX_STORES_TOTAL:
                   break
 
-          if not selected_stores:
-              raise SystemExit("No stores selected from STORE files; aborting.")
+          store_keys = set(s["store_key"] for s in selected_stores)
 
-          store_keys = [s["store_key"] for s in selected_stores]
-
-          # ====== PRICE parsing (generic + safe) ======
-          PRICE_TAGS_BARCODE = {"itemcode","itemid","code","barcode","gtin"}
+          # -------- PRICES (heuristic parse, allowlist-only) --------
+          PRICE_TAGS_BARCODE = {"itemcode","barcode","gtin","itemid","code"}
           PRICE_TAGS_PRICE   = {"itemprice","price","unitprice","saleprice","priceafterdiscount"}
 
-          DATE_TAGS = {"pricedate","lastupdatedate","updatedate","priceupdatedate","updateDate","lastUpdateDate"}
+          def extract_any(elem, tagset):
+              tagset = {t.lower() for t in tagset}
+              for el in elem.iter():
+                  if localname(el.tag).lower() in tagset and (el.text or "").strip():
+                      return norm(el.text)
+              return ""
 
           def safe_float(x):
               x = (x or "").strip().replace(",", ".")
               try:
                   v = float(x)
-                  if v < 0:
-                      return None
-                  return v
+                  return v if v >= 0 else None
               except Exception:
                   return None
 
-          def extract_any(root, tagset):
-              for el in root.iter():
-                  t = localname(el.tag).lower()
-                  if t in tagset and (el.text or "").strip():
-                      return norm(el.text)
-              return ""
-
-          def iter_item_like_nodes(root):
-              # Try to find repeated "Item" nodes; if none, fall back to whole tree
-              items = []
+          def iter_item_nodes(root):
+              out = []
               for el in root.iter():
                   if localname(el.tag).lower() in {"item","product"}:
-                      items.append(el)
-              return items if items else [root]
+                      out.append(el)
+              return out
 
-          def parse_price_file(path):
-              root = ET.parse(path).getroot()
+          dedup = {}
+          stats = {"price_xml_files_seen": 0, "price_candidates_parsed": 0, "items_scanned": 0, "allowlist_hits": 0}
+
+          for path in glob.glob("dumps/**/*.xml", recursive=True):
+              base = os.path.basename(path).lower()
+              if base.startswith("stores"):
+                  continue
+              stats["price_xml_files_seen"] += 1
+              try:
+                  root = ET.parse(path).getroot()
+              except Exception:
+                  continue
+
               chain_id = extract_any(root, {"chainid"})
               chain_name = extract_any(root, {"chainname"})
               store_id = extract_any(root, {"storeid"})
               retailer = retailer_from_chain(chain_id, chain_name)
               if not retailer or not store_id:
-                  return []
+                  continue
 
               store_key = f"{retailer}:{store_id}"
-              # Only keep prices for the stores we actually loaded (MVP constraint)
-              if store_key not in set(store_keys):
-                  return []
+              if store_key not in store_keys:
+                  continue
 
-              updated_at = extract_any(root, {t.lower() for t in DATE_TAGS})
-              # If date missing/invalid -> use now (safe default)
-              now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
-              if not updated_at:
-                  updated_at = now
+              items = iter_item_nodes(root)
+              if not items:
+                  continue
 
-              out = []
-              for node in iter_item_like_nodes(root):
-                  bc = extract_any(node, PRICE_TAGS_BARCODE)
-                  pr = extract_any(node, PRICE_TAGS_PRICE)
+              stats["price_candidates_parsed"] += 1
+              updated_at = now_z()
 
-                  bc = (bc or "").strip()
+              for node in items:
+                  stats["items_scanned"] += 1
+                  bc = extract_any(node, PRICE_TAGS_BARCODE).strip()
                   if bc not in ALLOWLIST_BARCODES:
                       continue
-
-                  price_val = safe_float(pr)
-                  if price_val is None:
+                  pv = safe_float(extract_any(node, PRICE_TAGS_PRICE))
+                  if pv is None:
                       continue
 
+                  stats["allowlist_hits"] += 1
                   price_key = f"{bc}:{store_key}"
-                  out.append({
+                  dedup[price_key] = {
                       "price_key": price_key,
                       "barcode": bc,
                       "store_key": store_key,
-                      "price": price_val,
+                      "price": pv,
                       "updated_at": updated_at
-                  })
-              return out
-
-          # Identify "non-store" XMLs as price candidates (we don't guess filenames beyond excluding stores*)
-          price_records_raw = []
-          for path in glob.glob("dumps/**/*.xml", recursive=True):
-              base = os.path.basename(path).lower()
-              if base.startswith("stores"):
-                  continue
-              try:
-                  recs = parse_price_file(path)
-                  if recs:
-                      price_records_raw.extend(recs)
-              except Exception:
-                  # If a file isn't parseable as XML, ignore (safe)
-                  continue
-
-          # Dedupe latest-only inside this run by price_key (keep last occurrence)
-          dedup = {}
-          for r in price_records_raw:
-              dedup[r["price_key"]] = r
+                  }
+                  if len(dedup) >= MAX_RECORDS_TOTAL:
+                      break
+              if len(dedup) >= MAX_RECORDS_TOTAL:
+                  break
 
           records = list(dedup.values())
-          # Keep payload bounded
-          records = records[:MAX_RECORDS_TOTAL]
 
-          generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
+          print("== PRICE STATS ==", file=sys.stderr)
+          for k,v in stats.items():
+              print(f"{k}: {v}", file=sys.stderr)
+          print(f"records_after_dedupe: {len(records)}", file=sys.stderr)
+
+          if len(records) < MIN_RECORDS_TO_SEND:
+              raise SystemExit("LOW_RECORDS (<2). Aborting BEFORE Make to save credits.")
 
           payload = {
-              "source": "collector_prices_3networks_autodiscovery",
-              "generated_at": generated_at,
+              "source": "collector_stores_prices_3networks_autodiscovery",
+              "generated_at": now_z(),
               "stores": selected_stores,
               "records": records
           }
 
-          # If we didn't manage to extract enough records, still POST (so you can see import_errors),
-          # but we also add a clear marker in source.
-          if len(records) < MIN_RECORDS_TO_SEND:
-              payload["source"] = "collector_prices_3networks_autodiscovery__LOW_RECORDS"
-
-          print(json.dumps(payload, ensure_ascii=False))
+          with open("payload.json", "w", encoding="utf-8") as f:
+              json.dump(payload, f, ensure_ascii=False)
           PY
+
+          curl -sS -X POST "$MAKE_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-make-apikey: $MAKE_APIKEY" \
+            --data-binary @payload.json
