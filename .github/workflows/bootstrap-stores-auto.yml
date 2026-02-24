@@ -1,66 +1,113 @@
-name: MVP Bootstrap Stores + Prices (3 networks in ONE POST)
+name: GlutiWise Collector (ONE FLOW)
 
 on:
   workflow_dispatch:
     inputs:
       run_mode:
-        description: "inspect (מהיר, בלי Make) | stores (כמו היום) | stores_prices (STORE+PRICE אמיתי)"
+        description: "inspect | stores | seed_products | stores_prices"
         required: true
         default: "inspect"
+      send_to_make:
+        description: "רק עבור stores / stores_prices: לשלוח POST ל-Make (true/false)"
+        required: true
+        default: "false"
+      seed_limit:
+        description: "כמה ברקודים להוציא ל-products_seed.csv (מומלץ 2000)"
+        required: true
+        default: "2000"
 
 jobs:
-  bootstrap:
+  run:
     runs-on: ubuntu-latest
     steps:
       - name: Prepare folders
         run: |
-          mkdir -p dumps
+          mkdir -p dumps out
 
       - name: Pull scraper image
         run: |
           docker pull erlichsefi/israeli-supermarket-scarpers:latest
 
       # =========================
-      # INSPECT (בלי Make בכלל)
+      # INSPECT (no Make)
       # =========================
-      - name: Inspect scraper image (FAST - locate file_types and grep tokens)
+      - name: Inspect image (fast)
         if: ${{ inputs.run_mode == 'inspect' }}
         run: |
           set -e
           docker run --rm --entrypoint sh erlichsefi/israeli-supermarket-scarpers:latest -lc '
             set -e
-
-            echo "== FIND file_types candidates ==";
-            CANDS="$(find . -maxdepth 8 -type f -iname "*file_types*.py" | head -n 50 || true)"
-            if [ -z "$CANDS" ]; then
-              echo "NO *file_types*.py found. Showing hints (grep)..."
-              grep -RIn --line-number --binary-files=without-match -E "ENABLED_FILE_TYPES|STORE_FILE|PRICE|PROMO|FULL|FILE_TYPE" . 2>/dev/null | head -n 200 || true
-              echo "== DONE (inspect finished without failing) =="
-              exit 0
-            fi
-
-            echo "$CANDS"
+            echo "== FIND file_types candidates =="
+            find . -maxdepth 10 -type f -iname "*file_types*.py" | head -n 80 || true
             echo
-
-            echo "== SHOW + GREP first candidate (source-of-truth guess) ==";
-            FT="$(echo "$CANDS" | head -n 1)"
-            echo "Chosen: $FT"
-            echo "--- HEAD 260 lines ---"
-            sed -n "1,260p" "$FT" || true
-            echo
-            echo "--- GREP TOKENS ---"
-            grep -nE "STORE_FILE|PRICE|PROMO|FULL|FILE" "$FT" | head -n 200 || true
-
-            echo "== DONE (inspect finished) =="
+            echo "== GREP hints =="
+            grep -RIn --line-number --binary-files=without-match -E "ENABLED_FILE_TYPES|STORE_FILE|PRICE|PROMO|FULL|FILE_TYPE" . 2>/dev/null | head -n 200 || true
+            echo "== DONE =="
           '
 
       # =========================
-      # STORES (כמו היום)
+      # DISCOVER PRICE TYPES (no heredoc, no import assumptions)
       # =========================
-      - name: Download STORE files (RAMI_LEVY + SHUFERSAL + YOHANANOF)
+      - name: Discover PRICE file types (SAFE - heredoc to file, no multiline in -c, no command-substitution)
+        if: ${{ inputs.run_mode != 'inspect' }}
+        id: discover
+        run: |
+          set -euo pipefail
+
+          # Write result to a file (no fragile quoting)
+          docker run --rm --entrypoint python3 erlichsefi/israeli-supermarket-scarpers:latest - <<'PY' > price_types.txt
+          import re, sys, glob
+
+          # 1) Try API if available (preferred)
+          try:
+              from il_supermarket_scarper import FileTypesFilters
+              types = FileTypesFilters.all_types()
+              price = [t for t in types if re.search(r"(PRICE|PROMO|FULL)", t, re.I)]
+              out = ",".join(sorted(set(price)))
+              if out:
+                  print(out)
+                  sys.exit(0)
+          except Exception:
+              pass
+
+          # 2) Fallback: scan *file_types*.py inside the image filesystem
+          paths = [p for p in glob.glob("**/*file_types*.py", recursive=True) if "site-packages" not in p.lower()]
+          p = paths[0] if paths else None
+          if not p:
+              print("ERROR:NO_FILE_TYPES_CANDIDATES")
+              sys.exit(2)
+
+          txt = open(p, "r", encoding="utf-8", errors="ignore").read()
+          pairs = re.findall(r'^\s*([A-Z0-9_]+)\s*=\s*["\']([^"\']+)["\']\s*$', txt, flags=re.M)
+
+          tokens = sorted({
+              v for k, v in pairs
+              if v.upper() != "STORE_FILE" and (
+                  ("PRICE" in k.upper()) or ("PRICE" in v.upper()) or
+                  ("PROMO" in k.upper()) or ("PROMO" in v.upper()) or
+                  ("FULL" in k.upper()) or ("FULL" in v.upper())
+              )
+          })
+
+          if not tokens:
+              print("ERROR:NO_PRICE_FILE_TYPES_FOUND")
+              sys.exit(2)
+
+          print(",".join(tokens))
+          PY
+
+          PRICE_TYPES="$(cat price_types.txt | tr -d '\r\n')"
+          echo "Discovered PRICE types: $PRICE_TYPES"
+          echo "$PRICE_TYPES" | grep -qE '^ERROR:' && exit 2
+          echo "price_types=$PRICE_TYPES" >> "$GITHUB_OUTPUT"
+
+      # =========================
+      # DOWNLOADS
+      # =========================
+      - name: Download STORE files (stores mode)
         if: ${{ inputs.run_mode == 'stores' }}
         run: |
-          set -e
+          set -euo pipefail
           docker run --rm \
             -v "${{ github.workspace }}/dumps:/usr/src/app/dumps" \
             -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL,YOHANANOF" \
@@ -68,235 +115,8 @@ jobs:
             -e LIMIT=500 \
             erlichsefi/israeli-supermarket-scarpers:latest
 
-      - name: Build ONE payload (stores) and POST to Make
-        if: ${{ inputs.run_mode == 'stores' }}
-        env:
-          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
-          MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
-        run: |
-          set -e
-          python3 - << 'PY' | curl -sS -X POST "$MAKE_WEBHOOK_URL" \
-              -H "Content-Type: application/json" \
-              -H "x-make-apikey: $MAKE_APIKEY" \
-              --data-binary @-
-          import os, json, glob, re
-          import xml.etree.ElementTree as ET
-          from datetime import datetime, timezone
-
-          TARGET_TOKENS = [
-              "הוד השרון", "כפר סבא", "רעננה", "הרצליה",
-              "רמת השרון", "פתח תקווה", "תל אביב", "אחוזה"
-          ]
-
-          CHAINID_TO_RETAILER = {
-              "7290027600007": "ramilevy",
-              "7290058140886": "shufersal",
-          }
-
-          LIMIT_RAMI_SHUF_TOTAL = 30
-          PER_RETAILER_YOH = 15
-
-          DUMMY_BARCODE = "7290000000011"
-          DUMMY_PRICE = 9.9
-
-          def norm(s: str) -> str:
-              return re.sub(r"\s+", " ", (s or "").strip())
-
-          def localname(tag: str) -> str:
-              return tag.split("}")[-1] if "}" in tag else tag
-
-          def looks_numeric(s: str) -> bool:
-              return bool(re.fullmatch(r"\d{1,12}", (s or "").strip()))
-
-          def find_first_text_anywhere(root, wanted_lower: str) -> str:
-              for el in root.iter():
-                  if localname(el.tag).lower() == wanted_lower and (el.text or "").strip():
-                      return norm(el.text)
-              return ""
-
-          def text_in_subtree(elem, wanted_lower_set):
-              for x in elem.iter():
-                  if localname(x.tag).lower() in wanted_lower_set and (x.text or "").strip():
-                      return norm(x.text)
-              return ""
-
-          def retailer_from_chain(chain_id: str, chain_name: str):
-              if chain_id and chain_id in CHAINID_TO_RETAILER:
-                  return CHAINID_TO_RETAILER[chain_id]
-              cn = chain_name or ""
-              if "שופרסל" in cn:
-                  return "shufersal"
-              if "רמי" in cn:
-                  return "ramilevy"
-              if "יוחננוף" in cn:
-                  return "yohananof"
-              return None
-
-          def score(city, address, name):
-              hay = norm(f"{city or ''} {address or ''} {name or ''}")
-              hay2 = re.sub(r"[\s\-]", "", hay)
-              for tok in TARGET_TOKENS:
-                  if tok in hay:
-                      return True
-                  if re.sub(r"[\s\-]", "", tok) in hay2:
-                      return True
-              return False
-
-          def city_from_shufersal_store_name(name: str) -> str:
-              n = norm(name)
-              if not n:
-                  return ""
-              parts = n.split(" ")
-              if len(parts) >= 2:
-                  last2 = " ".join(parts[-2:])
-                  if re.search(r"[א-ת]", last2):
-                      return last2
-              last1 = parts[-1]
-              if re.search(r"[א-ת]", last1):
-                  return last1
-              return ""
-
-          def parse_store_file(path):
-              root = ET.parse(path).getroot()
-              chain_id = find_first_text_anywhere(root, "chainid")
-              chain_name = find_first_text_anywhere(root, "chainname")
-
-              stores = []
-              for el in root.iter():
-                  if localname(el.tag).lower() != "store":
-                      continue
-
-                  store_id = text_in_subtree(el, {"storeid"})
-                  if not store_id:
-                      continue
-
-                  name = text_in_subtree(el, {"storename"}) or ""
-
-                  address = text_in_subtree(el, {"address"}) or ""
-                  if address.lower() == "unknown":
-                      address = ""
-
-                  city = text_in_subtree(el, {"city"}) or ""
-                  if (not city) or city.lower() == "unknown" or looks_numeric(city):
-                      city = ""
-
-                  stores.append((store_id, city, address, name))
-              return chain_id, chain_name, stores
-
-          candidates = {"ramilevy": [], "shufersal": [], "yohananof": []}
-          for path in glob.glob("dumps/**/*.xml", recursive=True):
-              base = os.path.basename(path).lower()
-              if not base.startswith("stores"):
-                  continue
-              chain_id, chain_name, stores = parse_store_file(path)
-              retailer = retailer_from_chain(chain_id, chain_name)
-              if retailer in candidates and stores:
-                  candidates[retailer].extend(stores)
-
-          if not candidates["ramilevy"] and not candidates["shufersal"] and not candidates["yohananof"]:
-              raise SystemExit("No parsable STORE records found in dumps.")
-
-          def build_selected_for(retailer, limit):
-              items = candidates.get(retailer, [])
-              preferred, fallback = [], []
-              for store_id, city, address, name in items:
-                  if retailer == "shufersal" and (not city or looks_numeric(city) or city.lower() == "unknown"):
-                      city = city_from_shufersal_store_name(name)
-                  (preferred if score(city, address, name) else fallback).append((store_id, city, address, name))
-              out = preferred[:limit]
-              if len(out) < limit:
-                  out.extend(fallback[: (limit - len(out))])
-              return out
-
-          def make_store_obj(retailer, store_id, city, address, name):
-              store_key = f"{retailer}:{store_id}"
-              return {
-                  "retailer": retailer,
-                  "store_id": str(store_id),
-                  "store_key": store_key,
-                  "store_name": name or "",
-                  "city": city or "",
-                  "address": address or "",
-                  "area": "",
-                  "store_type": ""
-              }
-
-          def add_unique(selected, seen_keys, obj):
-              sk = obj["store_key"]
-              if sk in seen_keys:
-                  return False
-              seen_keys.add(sk)
-              selected.append(obj)
-              return True
-
-          per = 15
-          sel_rami = build_selected_for("ramilevy", per) if candidates["ramilevy"] else []
-          sel_shuf = build_selected_for("shufersal", per) if candidates["shufersal"] else []
-
-          combined_raw = [("ramilevy", *x) for x in sel_rami] + [("shufersal", *x) for x in sel_shuf]
-          if len(combined_raw) < LIMIT_RAMI_SHUF_TOTAL:
-              for retailer in ("ramilevy", "shufersal"):
-                  for store_id, city, address, name in candidates.get(retailer, []):
-                      if retailer == "shufersal" and (not city or looks_numeric(city) or city.lower() == "unknown"):
-                          city = city_from_shufersal_store_name(name)
-                      combined_raw.append((retailer, store_id, city, address, name))
-                      if len(combined_raw) >= LIMIT_RAMI_SHUF_TOTAL:
-                          break
-                  if len(combined_raw) >= LIMIT_RAMI_SHUF_TOTAL:
-                      break
-
-          selected, seen = [], set()
-          for retailer, store_id, city, address, name in combined_raw:
-              add_unique(selected, seen, make_store_obj(retailer, store_id, city, address, name))
-              if len(selected) >= LIMIT_RAMI_SHUF_TOTAL:
-                  break
-
-          sel_yoh = build_selected_for("yohananof", PER_RETAILER_YOH) if candidates["yohananof"] else []
-          yoh_added = 0
-          for store_id, city, address, name in sel_yoh:
-              if add_unique(selected, seen, make_store_obj("yohananof", store_id, city, address, name)):
-                  yoh_added += 1
-              if yoh_added >= PER_RETAILER_YOH:
-                  break
-
-          if not selected:
-              raise SystemExit("No stores selected for payload.")
-
-          now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-          dummy_store_key = selected[0]["store_key"]
-
-          payload = {
-              "source": "mvp_bootstrap_stores_3networks",
-              "generated_at": now,
-              "stores": selected,
-              "records": [{
-                  "price_key": f"{DUMMY_BARCODE}:{dummy_store_key}",
-                  "barcode": DUMMY_BARCODE,
-                  "store_key": dummy_store_key,
-                  "price": DUMMY_PRICE,
-                  "updated_at": now
-              }]
-          }
-
-          print(json.dumps(payload, ensure_ascii=False))
-          PY
-
-      # =========================================
-      # STORES + PRICES (POST אחד, בלי לפצל)
-      # =========================================
-
-      - name: Discover PRICE file type strings (stable - FileTypesFilters, no heredoc)
-        if: ${{ inputs.run_mode == 'stores_prices' }}
-        id: discover
-        run: |
-          set -euo pipefail
-          PRICE_TYPES="$(docker run --rm --entrypoint python3 erlichsefi/israeli-supermarket-scarpers:latest -c "import re; from il_supermarket_scarper import FileTypesFilters; types=FileTypesFilters.all_types(); price=[t for t in types if re.search(r'(PRICE|PROMO|FULL)', t, re.I)]; print(','.join(sorted(set(price))))")"
-          echo "Discovered PRICE types: $PRICE_TYPES"
-          [ -z "$PRICE_TYPES" ] && echo "ERROR:NO_PRICE_FILE_TYPES_FOUND" && exit 2
-          echo "price_types=$PRICE_TYPES" >> "$GITHUB_OUTPUT"
-
-      - name: Download STORE + PRICE files (3 networks)
-        if: ${{ inputs.run_mode == 'stores_prices' }}
+      - name: Download STORE + PRICE files (seed_products / stores_prices)
+        if: ${{ inputs.run_mode == 'seed_products' || inputs.run_mode == 'stores_prices' }}
         run: |
           set -euo pipefail
           echo "Using PRICE file types: ${{ steps.discover.outputs.price_types }}"
@@ -307,276 +127,455 @@ jobs:
             -e LIMIT=120 \
             erlichsefi/israeli-supermarket-scarpers:latest
 
-      - name: Build ONE payload (stores + prices allowlist) and POST to Make (ONE POST)
-        if: ${{ inputs.run_mode == 'stores_prices' }}
-        env:
-          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
-          MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
+      # =========================
+      # BUILD (stores mode): out/payload.json
+      # =========================
+      - name: Build payload (stores + dummy record) -> out/payload.json
+        if: ${{ inputs.run_mode == 'stores' }}
         run: |
-          set -e
-          python3 - << 'PY' > payload.json
-          import os, json, glob, re, sys
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, json, glob, re
           import xml.etree.ElementTree as ET
           from datetime import datetime, timezone
 
-          # allowlist חסכוני (קיים אצלך ב-public.products לפי המידע שנתת)
-          ALLOWLIST_BARCODES = {
-              "7290000000011","7290000000028","7290000000035","7290000000042","7290000000059","7290000000066"
-          }
+          TARGET_TOKENS = ["הוד השרון","כפר סבא","רעננה","הרצליה","רמת השרון","פתח תקווה","תל אביב","אחוזה"]
+          CHAINID_TO_RETAILER = {"7290027600007":"ramilevy","7290058140886":"shufersal"}
 
-          TARGET_TOKENS = [
-              "הוד השרון", "כפר סבא", "רעננה", "הרצליה",
-              "רמת השרון", "פתח תקווה", "תל אביב", "אחוזה"
-          ]
+          LIMIT_RAMI_SHUF_TOTAL = 30
+          PER_RETAILER_YOH = 15
 
-          CHAINID_TO_RETAILER = {
-              "7290027600007": "ramilevy",
-              "7290058140886": "shufersal",
-          }
-
-          MAX_STORES_TOTAL = 30
-          MAX_RECORDS_TOTAL = 200
-          MIN_RECORDS_TO_SEND = 2
+          DUMMY_BARCODE = "7290000000011"
+          DUMMY_PRICE = 9.9
 
           def now_z():
               return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
 
-          def norm(s: str) -> str:
-              return re.sub(r"\s+", " ", (s or "").strip())
+          def norm(s): return re.sub(r"\s+"," ",(s or "").strip())
+          def localname(tag): return tag.split("}")[-1] if "}" in tag else tag
+          def looks_numeric(s): return bool(re.fullmatch(r"\d{1,12}", (s or "").strip()))
 
-          def localname(tag: str) -> str:
-              return tag.split("}")[-1] if "}" in tag else tag
-
-          def looks_numeric(s: str) -> bool:
-              return bool(re.fullmatch(r"\d{1,18}", (s or "").strip()))
-
-          def find_first_text_anywhere(root, wanted_lower: str) -> str:
+          def find_first(root, wanted):
+              wl=wanted.lower()
               for el in root.iter():
-                  if localname(el.tag).lower() == wanted_lower and (el.text or "").strip():
+                  if localname(el.tag).lower()==wl and (el.text or "").strip():
                       return norm(el.text)
               return ""
 
-          def text_in_subtree(elem, wanted_lower_set):
+          def text_in(elem, wanted_set):
+              wanted={x.lower() for x in wanted_set}
               for x in elem.iter():
-                  if localname(x.tag).lower() in wanted_lower_set and (x.text or "").strip():
+                  if localname(x.tag).lower() in wanted and (x.text or "").strip():
                       return norm(x.text)
               return ""
 
-          def retailer_from_chain(chain_id: str, chain_name: str):
-              if chain_id and chain_id in CHAINID_TO_RETAILER:
-                  return CHAINID_TO_RETAILER[chain_id]
-              cn = chain_name or ""
-              if "שופרסל" in cn:
-                  return "shufersal"
-              if "רמי" in cn:
-                  return "ramilevy"
-              if "יוחננוף" in cn:
-                  return "yohananof"
+          def retailer_from(chain_id, chain_name):
+              if chain_id in CHAINID_TO_RETAILER: return CHAINID_TO_RETAILER[chain_id]
+              cn=chain_name or ""
+              if "שופרסל" in cn: return "shufersal"
+              if "רמי" in cn: return "ramilevy"
+              if "יוחננוף" in cn: return "yohananof"
               return None
 
-          def score(city, address, name):
-              hay = norm(f"{city or ''} {address or ''} {name or ''}")
-              hay2 = re.sub(r"[\s\-]", "", hay)
+          def score(city,address,name):
+              hay=norm(f"{city or ''} {address or ''} {name or ''}")
+              hay2=re.sub(r"[\s\-]","",hay)
               for tok in TARGET_TOKENS:
-                  if tok in hay:
-                      return True
-                  if re.sub(r"[\s\-]", "", tok) in hay2:
-                      return True
+                  if tok in hay: return True
+                  if re.sub(r"[\s\-]","",tok) in hay2: return True
               return False
 
-          def city_from_shufersal_store_name(name: str) -> str:
-              n = norm(name)
-              if not n:
-                  return ""
-              parts = n.split(" ")
-              if len(parts) >= 2:
-                  last2 = " ".join(parts[-2:])
-                  if re.search(r"[א-ת]", last2):
-                      return last2
-              last1 = parts[-1]
-              if re.search(r"[א-ת]", last1):
-                  return last1
+          def city_from_shuf_name(name):
+              n=norm(name)
+              if not n: return ""
+              parts=n.split(" ")
+              if len(parts)>=2:
+                  last2=" ".join(parts[-2:])
+                  if re.search(r"[א-ת]", last2): return last2
+              last1=parts[-1]
+              if re.search(r"[א-ת]", last1): return last1
               return ""
 
-          # -------- STORES --------
           def parse_store_file(path):
-              root = ET.parse(path).getroot()
-              chain_id = find_first_text_anywhere(root, "chainid")
-              chain_name = find_first_text_anywhere(root, "chainname")
-              stores = []
+              root=ET.parse(path).getroot()
+              chain_id=find_first(root,"chainid")
+              chain_name=find_first(root,"chainname")
+              stores=[]
               for el in root.iter():
-                  if localname(el.tag).lower() != "store":
-                      continue
-                  store_id = text_in_subtree(el, {"storeid"})
-                  if not store_id:
-                      continue
-                  name = text_in_subtree(el, {"storename"}) or ""
-                  address = text_in_subtree(el, {"address"}) or ""
-                  if address.lower() == "unknown":
-                      address = ""
-                  city = text_in_subtree(el, {"city"}) or ""
-                  if (not city) or city.lower() == "unknown" or looks_numeric(city):
-                      city = ""
+                  if localname(el.tag).lower()!="store": continue
+                  store_id=text_in(el,{"storeid"})
+                  if not store_id: continue
+                  name=text_in(el,{"storename"}) or ""
+                  address=text_in(el,{"address"}) or ""
+                  if address.lower()=="unknown": address=""
+                  city=text_in(el,{"city"}) or ""
+                  if (not city) or city.lower()=="unknown" or looks_numeric(city): city=""
                   stores.append((store_id, city, address, name))
               return chain_id, chain_name, stores
 
-          candidates = {"ramilevy": [], "shufersal": [], "yohananof": []}
+          candidates={"ramilevy":[],"shufersal":[],"yohananof":[]}
           for path in glob.glob("dumps/**/*.xml", recursive=True):
-              base = os.path.basename(path).lower()
-              if not base.startswith("stores"):
-                  continue
+              base=os.path.basename(path).lower()
+              if not base.startswith("stores"): continue
               try:
-                  chain_id, chain_name, stores = parse_store_file(path)
+                  chain_id, chain_name, stores=parse_store_file(path)
               except Exception:
                   continue
-              retailer = retailer_from_chain(chain_id, chain_name)
-              if retailer in candidates and stores:
-                  candidates[retailer].extend(stores)
+              retailer=retailer_from(chain_id, chain_name)
+              if retailer in candidates and stores: candidates[retailer].extend(stores)
 
           if not any(candidates.values()):
-              raise SystemExit("No parsable STORE records found (stores_prices).")
+              raise SystemExit("No parsable STORE records found.")
 
           def make_store_obj(retailer, store_id, city, address, name):
-              store_key = f"{retailer}:{store_id}"
-              return {
-                  "retailer": retailer,
-                  "store_id": str(store_id),
-                  "store_key": store_key,
-                  "store_name": name or "",
-                  "city": city or "",
-                  "address": address or "",
-                  "area": "",
-                  "store_type": ""
-              }
+              obj={"retailer":retailer, "store_id":str(store_id), "store_key":f"{retailer}:{store_id}"}
+              if name: obj["store_name"]=name
+              if city: obj["city"]=city
+              if address: obj["address"]=address
+              return obj
 
-          selected_stores, seen = [], set()
+          selected=[]; seen=set()
+          def add_unique(obj):
+              sk=obj["store_key"]
+              if sk in seen: return
+              seen.add(sk); selected.append(obj)
 
-          def add_store(retailer, store_id, city, address, name):
-              if retailer == "shufersal" and (not city or looks_numeric(city) or city.lower() == "unknown"):
-                  city = city_from_shufersal_store_name(name)
-              obj = make_store_obj(retailer, store_id, city, address, name)
-              sk = obj["store_key"]
-              if sk in seen:
-                  return
-              seen.add(sk)
-              selected_stores.append(obj)
-
-          for retailer in ("ramilevy","shufersal","yohananof"):
-              items = candidates.get(retailer, [])
-              preferred, fallback = [], []
+          def pick(retailer, limit):
+              items=candidates.get(retailer, [])
+              preferred=[]; fallback=[]
               for store_id, city, address, name in items:
-                  (preferred if score(city,address,name) else fallback).append((store_id, city, address, name))
-              for tup in preferred + fallback:
-                  add_store(retailer, *tup)
-                  if len(selected_stores) >= MAX_STORES_TOTAL:
-                      break
-              if len(selected_stores) >= MAX_STORES_TOTAL:
-                  break
+                  if retailer=="shufersal" and (not city or looks_numeric(city) or city.lower()=="unknown"):
+                      city=city_from_shuf_name(name)
+                  (preferred if score(city,address,name) else fallback).append((store_id,city,address,name))
+              out=preferred[:limit]
+              if len(out)<limit: out.extend(fallback[:(limit-len(out))])
+              return out
 
-          store_keys = set(s["store_key"] for s in selected_stores)
+          per=15
+          for store_id, city, address, name in pick("ramilevy", per):
+              add_unique(make_store_obj("ramilevy", store_id, city, address, name))
+          for store_id, city, address, name in pick("shufersal", per):
+              add_unique(make_store_obj("shufersal", store_id, city, address, name))
 
-          # -------- PRICES (heuristic parse, allowlist-only) --------
-          PRICE_TAGS_BARCODE = {"itemcode","barcode","gtin","itemid","code"}
-          PRICE_TAGS_PRICE   = {"itemprice","price","unitprice","saleprice","priceafterdiscount"}
+          # fill up to 30
+          combined=[]
+          for retailer in ("ramilevy","shufersal"):
+              for tup in candidates.get(retailer, []):
+                  combined.append((retailer, *tup))
+          for retailer, store_id, city, address, name in combined:
+              if len(selected) >= LIMIT_RAMI_SHUF_TOTAL: break
+              if retailer=="shufersal" and (not city or looks_numeric(city) or city.lower()=="unknown"):
+                  city=city_from_shuf_name(name)
+              add_unique(make_store_obj(retailer, store_id, city, address, name))
+
+          # yohananof up to 15
+          y_added=0
+          for store_id, city, address, name in pick("yohananof", PER_RETAILER_YOH):
+              if y_added >= PER_RETAILER_YOH: break
+              before=len(selected)
+              add_unique(make_store_obj("yohananof", store_id, city, address, name))
+              if len(selected)>before: y_added += 1
+
+          if not selected:
+              raise SystemExit("No stores selected.")
+
+          now=now_z()
+          dummy_store_key=selected[0]["store_key"]
+
+          payload={
+              "source":"mvp_bootstrap_stores_3networks",
+              "generated_at":now,
+              "stores":selected,
+              "records":[{
+                  "price_key":f"{DUMMY_BARCODE}:{dummy_store_key}",
+                  "barcode":DUMMY_BARCODE,
+                  "store_key":dummy_store_key,
+                  "price":DUMMY_PRICE,
+                  "updated_at":now
+              }]
+          }
+
+          os.makedirs("out", exist_ok=True)
+          with open("out/payload.json","w",encoding="utf-8") as f:
+              json.dump(payload,f,ensure_ascii=False)
+          print("Wrote out/payload.json")
+          PY
+
+      # =========================
+      # BUILD (seed_products / stores_prices): out/products_seed.csv + out/payload.json
+      # =========================
+      - name: Build products_seed.csv + payload.json (seed_products / stores_prices)
+        if: ${{ inputs.run_mode == 'seed_products' || inputs.run_mode == 'stores_prices' }}
+        env:
+          SEED_LIMIT: ${{ inputs.seed_limit }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, json, glob, re, gzip, zipfile
+          import xml.etree.ElementTree as ET
+          from datetime import datetime, timezone
+
+          SEED_LIMIT=int(os.environ.get("SEED_LIMIT","2000"))
+          MAX_STORES_TOTAL=30
+          MAX_RECORDS_TOTAL=4000
+
+          TARGET_TOKENS=["הוד השרון","כפר סבא","רעננה","הרצליה","רמת השרון","פתח תקווה","תל אביב","אחוזה"]
+          CHAINID_TO_RETAILER={"7290027600007":"ramilevy","7290058140886":"shufersal"}
+
+          def now_z():
+              return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
+          def norm(s): return re.sub(r"\s+"," ",(s or "").strip())
+          def localname(tag): return tag.split("}")[-1] if "}" in tag else tag
+          def looks_numeric(s): return bool(re.fullmatch(r"\d{1,18}", (s or "").strip()))
+
+          def load_xml_roots(path):
+              lp=path.lower()
+              if lp.endswith(".zip"):
+                  roots=[]
+                  with zipfile.ZipFile(path,"r") as z:
+                      for nm in z.namelist():
+                          if nm.lower().endswith(".xml"):
+                              roots.append(ET.fromstring(z.read(nm)))
+                  return roots
+              if lp.endswith(".xml.gz") or lp.endswith(".gz"):
+                  with gzip.open(path,"rb") as f:
+                      return [ET.fromstring(f.read())]
+              return [ET.parse(path).getroot()]
+
+          def iter_dump_paths():
+              for p in glob.glob("dumps/**/*", recursive=True):
+                  if os.path.isfile(p) and p.lower().endswith((".xml",".gz",".zip",".xml.gz")):
+                      yield p
 
           def extract_any(elem, tagset):
-              tagset = {t.lower() for t in tagset}
+              tagset={t.lower() for t in tagset}
               for el in elem.iter():
                   if localname(el.tag).lower() in tagset and (el.text or "").strip():
                       return norm(el.text)
+              # fallback attributes
+              for el in elem.iter():
+                  for k,v in (el.attrib or {}).items():
+                      kk=str(k).lower()
+                      if any(t in kk for t in ["barcode","gtin","itemcode","ean","code"]):
+                          vv=(v or "").strip()
+                          if vv: return norm(vv)
               return ""
 
-          def safe_float(x):
-              x = (x or "").strip().replace(",", ".")
+          def retailer_from(chain_id, chain_name):
+              if chain_id in CHAINID_TO_RETAILER: return CHAINID_TO_RETAILER[chain_id]
+              cn=chain_name or ""
+              if "שופרסל" in cn: return "shufersal"
+              if "רמי" in cn: return "ramilevy"
+              if "יוחננוף" in cn or "YOHANANOF" in cn.upper(): return "yohananof"
+              return None
+
+          def score(city,address,name):
+              hay=norm(f"{city or ''} {address or ''} {name or ''}")
+              hay2=re.sub(r"[\s\-]","",hay)
+              for tok in TARGET_TOKENS:
+                  if tok in hay: return True
+                  if re.sub(r"[\s\-]","",tok) in hay2: return True
+              return False
+
+          def city_from_shuf_name(name):
+              n=norm(name)
+              if not n: return ""
+              parts=n.split(" ")
+              if len(parts)>=2:
+                  last2=" ".join(parts[-2:])
+                  if re.search(r"[א-ת]", last2): return last2
+              last1=parts[-1]
+              if re.search(r"[א-ת]", last1): return last1
+              return ""
+
+          # --- pick up to 30 stores ---
+          candidates={"ramilevy":[],"shufersal":[],"yohananof":[]}
+
+          for path in iter_dump_paths():
+              base=os.path.basename(path).lower()
+              if not base.startswith("stores"): continue
               try:
-                  v = float(x)
-                  return v if v >= 0 else None
+                  for root in load_xml_roots(path):
+                      chain_id=extract_any(root, {"chainid"})
+                      chain_name=extract_any(root, {"chainname"})
+                      retailer=retailer_from(chain_id, chain_name)
+                      if retailer not in candidates: 
+                          continue
+                      for el in root.iter():
+                          if localname(el.tag).lower()!="store": 
+                              continue
+                          store_id=extract_any(el, {"storeid"})
+                          if not store_id: 
+                              continue
+                          name=extract_any(el, {"storename"}) or ""
+                          address=extract_any(el, {"address"}) or ""
+                          if address.lower()=="unknown": address=""
+                          city=extract_any(el, {"city"}) or ""
+                          if (not city) or city.lower()=="unknown" or looks_numeric(city): city=""
+                          candidates[retailer].append((store_id, city, address, name))
+              except Exception:
+                  continue
+
+          if not any(candidates.values()):
+              raise SystemExit("No STORE records parsed (needed to build store_key).")
+
+          def make_store_obj(retailer, store_id, city, address, name):
+              obj={"retailer":retailer, "store_id":str(store_id), "store_key":f"{retailer}:{store_id}"}
+              if name: obj["store_name"]=name
+              if city: obj["city"]=city
+              if address: obj["address"]=address
+              return obj
+
+          selected=[]; seen=set()
+          def add_store(retailer, store_id, city, address, name):
+              if retailer=="shufersal" and (not city or looks_numeric(city) or city.lower()=="unknown"):
+                  city=city_from_shuf_name(name)
+              obj=make_store_obj(retailer, store_id, city, address, name)
+              sk=obj["store_key"]
+              if sk in seen: return
+              seen.add(sk); selected.append(obj)
+
+          for retailer in ("ramilevy","shufersal","yohananof"):
+              items=candidates.get(retailer, [])
+              preferred=[]; fallback=[]
+              for store_id, city, address, name in items:
+                  (preferred if score(city,address,name) else fallback).append((store_id,city,address,name))
+              for tup in preferred + fallback:
+                  add_store(retailer, *tup)
+                  if len(selected) >= MAX_STORES_TOTAL: break
+              if len(selected) >= MAX_STORES_TOTAL: break
+
+          store_keys=set(s["store_key"] for s in selected)
+
+          # --- seed + records ---
+          BARCODE_TAGS={"itemcode","barcode","gtin","ean","code","itemid","itemnumber"}
+          NAME_TAGS={"itemname","itemdescription","productname","description","name"}
+          PRICE_TAGS={"itemprice","price","unitprice","saleprice","priceafterdiscount","priceinclvat"}
+
+          def safe_float(x):
+              x=(x or "").strip().replace(",", ".")
+              try:
+                  v=float(x)
+                  return v if v>=0 else None
               except Exception:
                   return None
 
           def iter_item_nodes(root):
-              out = []
+              out=[]
               for el in root.iter():
                   if localname(el.tag).lower() in {"item","product"}:
                       out.append(el)
               return out
 
-          dedup = {}
-          stats = {"price_xml_files_seen": 0, "price_candidates_parsed": 0, "items_scanned": 0, "allowlist_hits": 0}
+          seed_map={}
+          dedup={}
+          stats={"price_files_seen":0,"price_candidates_parsed":0,"items_scanned":0,"seed_unique":0,"records_built":0}
 
-          for path in glob.glob("dumps/**/*.xml", recursive=True):
-              base = os.path.basename(path).lower()
-              if base.startswith("stores"):
-                  continue
-              stats["price_xml_files_seen"] += 1
+          for path in iter_dump_paths():
+              base=os.path.basename(path).lower()
+              if base.startswith("stores"): continue
+              stats["price_files_seen"] += 1
               try:
-                  root = ET.parse(path).getroot()
+                  roots=load_xml_roots(path)
               except Exception:
                   continue
 
-              chain_id = extract_any(root, {"chainid"})
-              chain_name = extract_any(root, {"chainname"})
-              store_id = extract_any(root, {"storeid"})
-              retailer = retailer_from_chain(chain_id, chain_name)
-              if not retailer or not store_id:
-                  continue
-
-              store_key = f"{retailer}:{store_id}"
-              if store_key not in store_keys:
-                  continue
-
-              items = iter_item_nodes(root)
-              if not items:
-                  continue
-
-              stats["price_candidates_parsed"] += 1
-              updated_at = now_z()
-
-              for node in items:
-                  stats["items_scanned"] += 1
-                  bc = extract_any(node, PRICE_TAGS_BARCODE).strip()
-                  if bc not in ALLOWLIST_BARCODES:
-                      continue
-                  pv = safe_float(extract_any(node, PRICE_TAGS_PRICE))
-                  if pv is None:
+              for root in roots:
+                  chain_id=extract_any(root, {"chainid"})
+                  chain_name=extract_any(root, {"chainname"})
+                  store_id=extract_any(root, {"storeid"})
+                  retailer=retailer_from(chain_id, chain_name)
+                  if not retailer or not store_id:
                       continue
 
-                  stats["allowlist_hits"] += 1
-                  price_key = f"{bc}:{store_key}"
-                  dedup[price_key] = {
-                      "price_key": price_key,
-                      "barcode": bc,
-                      "store_key": store_key,
-                      "price": pv,
-                      "updated_at": updated_at
-                  }
+                  items=iter_item_nodes(root)
+                  if not items:
+                      continue
+
+                  stats["price_candidates_parsed"] += 1
+                  store_key=f"{retailer}:{store_id}"
+                  updated_at=now_z()
+
+                  for node in items:
+                      stats["items_scanned"] += 1
+                      bc=extract_any(node, BARCODE_TAGS).strip()
+                      if not bc: 
+                          continue
+
+                      if bc not in seed_map and len(seed_map) < SEED_LIMIT:
+                          nm=extract_any(node, NAME_TAGS).strip()
+                          seed_map[bc]=nm
+                          stats["seed_unique"]=len(seed_map)
+
+                      if store_key not in store_keys:
+                          continue
+                      if bc not in seed_map:
+                          continue
+
+                      pv=safe_float(extract_any(node, PRICE_TAGS))
+                      if pv is None:
+                          continue
+
+                      price_key=f"{bc}:{store_key}"
+                      dedup[price_key]={
+                          "price_key":price_key,
+                          "barcode":bc,
+                          "store_key":store_key,
+                          "price":pv,
+                          "updated_at":updated_at
+                      }
+                      if len(dedup) >= MAX_RECORDS_TOTAL:
+                          break
+
                   if len(dedup) >= MAX_RECORDS_TOTAL:
                       break
               if len(dedup) >= MAX_RECORDS_TOTAL:
                   break
 
-          records = list(dedup.values())
+          records=list(dedup.values())
+          stats["records_built"]=len(records)
 
-          print("== PRICE STATS ==", file=sys.stderr)
-          for k,v in stats.items():
-              print(f"{k}: {v}", file=sys.stderr)
-          print(f"records_after_dedupe: {len(records)}", file=sys.stderr)
+          os.makedirs("out", exist_ok=True)
 
-          if len(records) < MIN_RECORDS_TO_SEND:
-              raise SystemExit("LOW_RECORDS (<2). Aborting BEFORE Make to save credits.")
+          with open("out/products_seed.csv","w",encoding="utf-8") as f:
+              f.write("barcode,name\n")
+              for bc, nm in seed_map.items():
+                  f.write(f"{bc},{(nm or '').replace(',', ' ')}\n")
 
-          payload = {
-              "source": "collector_stores_prices_3networks_autodiscovery",
-              "generated_at": now_z(),
-              "stores": selected_stores,
-              "records": records
+          payload={
+              "source":"collector_seed_and_prices_3networks",
+              "generated_at":now_z(),
+              "stores":selected,
+              "records":records
           }
+          with open("out/payload.json","w",encoding="utf-8") as f:
+              json.dump(payload,f,ensure_ascii=False)
 
-          with open("payload.json", "w", encoding="utf-8") as f:
-              json.dump(payload, f, ensure_ascii=False)
+          print("== STATS ==")
+          for k,v in stats.items():
+              print(f"{k}: {v}")
+          print("Wrote out/products_seed.csv and out/payload.json")
           PY
 
+      - name: Upload artifacts (out/)
+        if: ${{ inputs.run_mode != 'inspect' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: glutiwise-out
+          path: out/
+
+      # =========================
+      # POST TO MAKE (only if requested)
+      # =========================
+      - name: POST out/payload.json to Make (ONE POST)
+        if: ${{ (inputs.run_mode == 'stores' || inputs.run_mode == 'stores_prices') && inputs.send_to_make == 'true' }}
+        env:
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+          MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
+        run: |
+          set -euo pipefail
+          test -f out/payload.json
           curl -sS -X POST "$MAKE_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -H "x-make-apikey: $MAKE_APIKEY" \
-            --data-binary @payload.json
+            --data-binary @out/payload.json
