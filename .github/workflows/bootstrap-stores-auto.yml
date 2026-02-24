@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       run_mode:
-        description: "stores (כמו היום) | inspect (לגלות PRICE file types בלי ניחוש)"
+        description: "stores (כמו היום) | inspect (מהיר: לגלות PRICE file types בלי ניחוש)"
         required: true
         default: "stores"
       price_file_type:
-        description: "לא בשימוש בשלב 1. ימולא בהמשך אחרי inspect (למשל PRICE_FILE וכו')"
+        description: "לא בשימוש כרגע. ימולא רק אחרי inspect (למשל PRICE_FILE וכו')"
         required: false
         default: ""
 
@@ -24,18 +24,22 @@ jobs:
         run: |
           docker pull erlichsefi/israeli-supermarket-scarpers:latest
 
-      - name: Inspect scraper image (discover PRICE file type strings)
+      # ✅ FAST INSPECT: סורק רק את קבצי הפרויקט הרלוונטיים, לא את כל /
+      - name: Inspect scraper image (FAST - discover PRICE file type strings)
         if: ${{ inputs.run_mode == 'inspect' }}
         run: |
           docker run --rm --entrypoint sh erlichsefi/israeli-supermarket-scarpers:latest -lc '
-            echo "== PWD + LS ==";
-            pwd; ls -la;
+            set -e
+            echo "== LS (project root) ==";
+            ls -la;
 
-            echo "== DISCOVER TOKENS (ENABLED_FILE_TYPES / PRICE / STORE / FULL / FILE_TYPE) ==";
-            for d in /usr/src/app /app /; do
-              if [ -d "$d" ]; then
-                echo "--- scanning $d ---";
-                grep -RIn "ENABLED_FILE_TYPES|STORE_FILE|PRICE|PRICE_FILE|FULL|FILE_TYPE" "$d" 2>/dev/null | head -n 200;
+            echo "== FAST GREP (project only) ==";
+            # אצלך רואים במפורש main.py + il_supermarket_scraper בשורש,
+            # אז אנחנו סורקים רק את הנתיבים האלה ולא את / כולו.
+            for t in ./main.py ./il_supermarket_scraper ./example.py ./README.md ./MANIFEST.in ./setup.py ./setup.cfg; do
+              if [ -e "$t" ]; then
+                echo "--- scanning $t ---";
+                grep -RIn --line-number --binary-files=without-match -E "ENABLED_FILE_TYPES|STORE_FILE|PRICE|PRICE_FILE|FULL|FILE_TYPE" "$t" 2>/dev/null | head -n 200 || true
               fi
             done
 
@@ -131,7 +135,6 @@ jobs:
               if not n:
                   return ""
               parts = n.split(" ")
-              # ננסה 2 מילים אחרונות ("תל אביב") ואז מילה אחרונה ("רעננה")
               if len(parts) >= 2:
                   last2 = " ".join(parts[-2:])
                   if re.search(r"[א-ת]", last2):
@@ -157,12 +160,10 @@ jobs:
 
                   name = text_in_subtree(el, {"storename"}) or ""
 
-                  # כתובת: אם "unknown" -> ריק
                   address = text_in_subtree(el, {"address"}) or ""
                   if address.lower() == "unknown":
                       address = ""
 
-                  # עיר: ברירת מחדל מהתג city (אם יוצא מספרי/ריק -> ריק)
                   city = text_in_subtree(el, {"city"}) or ""
                   if (not city) or city.lower() == "unknown" or looks_numeric(city):
                       city = ""
@@ -187,7 +188,6 @@ jobs:
               items = candidates.get(retailer, [])
               preferred, fallback = [], []
               for store_id, city, address, name in items:
-                  # פתרון C בפועל: רק לשופרסל, אם city חסר -> מפיקים מהשם
                   if retailer == "shufersal" and (not city or looks_numeric(city) or city.lower() == "unknown"):
                       city = city_from_shufersal_store_name(name)
                   (preferred if score(city, address, name) else fallback).append((store_id, city, address, name))
