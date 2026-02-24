@@ -274,20 +274,12 @@ jobs:
       # STORES + PRICES (POST אחד, בלי לפצל)
       # =========================================
 
-      - name: Discover PRICE file type strings (safe: python -c, no heredoc)
+      - name: Discover PRICE file type strings (FIXED - no heredoc, no broken quotes)
         if: ${{ inputs.run_mode == 'stores_prices' }}
         id: discover
         run: |
           set -euo pipefail
-          PRICE_TYPES="$(docker run --rm --entrypoint python3 erlichsefi/israeli-supermarket-scarpers:latest -c 'import re,sys; from pathlib import Path; p=Path("il_supermarket_scraper/utils/file_types.py"); 
-if not p.exists(): 
-  print("ERROR:FILE_TYPES_NOT_FOUND"); sys.exit(2)
-txt=p.read_text(encoding="utf-8", errors="ignore")
-pairs=re.findall(r"^\\s*([A-Z0-9_]+)\\s*=\\s*[\\x27\\x22]([^\\x27\\x22]+)[\\x27\\x22]\\s*$", txt, flags=re.M)
-tokens=sorted({v for k,v in pairs if (("PRICE" in k.upper()) or ("PRICE" in v.upper()) or ("PROMO" in k.upper()) or ("PROMO" in v.upper()) or ("FULL" in k.upper()) or ("FULL" in v.upper())) and v.upper()!="STORE_FILE"})
-if not tokens: 
-  print("ERROR:NO_PRICE_FILE_TYPES_FOUND"); sys.exit(2)
-print(",".join(tokens))')"
+          PRICE_TYPES="$(docker run --rm --entrypoint python3 erlichsefi/israeli-supermarket-scarpers:latest -c "import sys; import il_supermarket_scraper.utils.file_types as ft; tokens=sorted({v for k,v in ft.__dict__.items() if isinstance(v,str) and v.upper()!='STORE_FILE' and (('PRICE' in k.upper()) or ('PRICE' in v.upper()) or ('PROMO' in k.upper()) or ('PROMO' in v.upper()) or ('FULL' in k.upper()) or ('FULL' in v.upper()))}); (not tokens) and (print('ERROR:NO_PRICE_FILE_TYPES_FOUND') or sys.exit(2)); print(','.join(tokens))")"
           echo "Discovered PRICE types: $PRICE_TYPES"
           echo "$PRICE_TYPES" | grep -qE '^ERROR:' && exit 2
           echo "price_types=$PRICE_TYPES" >> "$GITHUB_OUTPUT"
@@ -295,7 +287,7 @@ print(",".join(tokens))')"
       - name: Download STORE + PRICE files (3 networks)
         if: ${{ inputs.run_mode == 'stores_prices' }}
         run: |
-          set -e
+          set -euo pipefail
           echo "Using PRICE file types: ${{ steps.discover.outputs.price_types }}"
           docker run --rm \
             -v "${{ github.workspace }}/dumps:/usr/src/app/dumps" \
