@@ -2,6 +2,15 @@ name: MVP Bootstrap Stores (3 networks in ONE POST)
 
 on:
   workflow_dispatch:
+    inputs:
+      run_mode:
+        description: "stores (כמו היום) | inspect (לגלות PRICE file types בלי ניחוש)"
+        required: true
+        default: "stores"
+      price_file_type:
+        description: "לא בשימוש בשלב 1. ימולא בהמשך אחרי inspect (למשל PRICE_FILE וכו')"
+        required: false
+        default: ""
 
 jobs:
   bootstrap:
@@ -15,7 +24,26 @@ jobs:
         run: |
           docker pull erlichsefi/israeli-supermarket-scarpers:latest
 
+      - name: Inspect scraper image (discover PRICE file type strings)
+        if: ${{ inputs.run_mode == 'inspect' }}
+        run: |
+          docker run --rm --entrypoint sh erlichsefi/israeli-supermarket-scarpers:latest -lc '
+            echo "== PWD + LS ==";
+            pwd; ls -la;
+
+            echo "== DISCOVER TOKENS (ENABLED_FILE_TYPES / PRICE / STORE / FULL / FILE_TYPE) ==";
+            for d in /usr/src/app /app /; do
+              if [ -d "$d" ]; then
+                echo "--- scanning $d ---";
+                grep -RIn "ENABLED_FILE_TYPES|STORE_FILE|PRICE|PRICE_FILE|FULL|FILE_TYPE" "$d" 2>/dev/null | head -n 200;
+              fi
+            done
+
+            echo "== DONE ==";
+          '
+
       - name: Download STORE files (RAMI_LEVY + SHUFERSAL + YOHANANOF)
+        if: ${{ inputs.run_mode == 'stores' }}
         run: |
           docker run --rm \
             -v "${{ github.workspace }}/dumps:/usr/src/app/dumps" \
@@ -25,6 +53,7 @@ jobs:
             erlichsefi/israeli-supermarket-scarpers:latest
 
       - name: Build ONE payload (Rami+Shuf up to 30) + (Yohananof up to 15) and POST to Make
+        if: ${{ inputs.run_mode == 'stores' }}
         env:
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
           MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
