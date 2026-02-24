@@ -285,14 +285,14 @@ jobs:
       # STORES + PRICES (POST אחד, בלי לפצל)
       # =========================================
 
-      - name: Discover PRICE file type strings (FIXED - no heredoc, no broken quotes)
+      - name: Discover PRICE file type strings (stable - FileTypesFilters, no heredoc)
         if: ${{ inputs.run_mode == 'stores_prices' }}
         id: discover
         run: |
           set -euo pipefail
-          PRICE_TYPES="$(docker run --rm --entrypoint python3 erlichsefi/israeli-supermarket-scarpers:latest -c "import sys; import il_supermarket_scraper.utils.file_types as ft; tokens=sorted({v for k,v in ft.__dict__.items() if isinstance(v,str) and v.upper()!='STORE_FILE' and (('PRICE' in k.upper()) or ('PRICE' in v.upper()) or ('PROMO' in k.upper()) or ('PROMO' in v.upper()) or ('FULL' in k.upper()) or ('FULL' in v.upper()))}); (not tokens) and (print('ERROR:NO_PRICE_FILE_TYPES_FOUND') or sys.exit(2)); print(','.join(tokens))")"
+          PRICE_TYPES="$(docker run --rm --entrypoint python3 erlichsefi/israeli-supermarket-scarpers:latest -c "import re; from il_supermarket_scarper import FileTypesFilters; types=FileTypesFilters.all_types(); price=[t for t in types if re.search(r'(PRICE|PROMO|FULL)', t, re.I)]; print(','.join(sorted(set(price))))")"
           echo "Discovered PRICE types: $PRICE_TYPES"
-          echo "$PRICE_TYPES" | grep -qE '^ERROR:' && exit 2
+          [ -z "$PRICE_TYPES" ] && echo "ERROR:NO_PRICE_FILE_TYPES_FOUND" && exit 2
           echo "price_types=$PRICE_TYPES" >> "$GITHUB_OUTPUT"
 
       - name: Download STORE + PRICE files (3 networks)
