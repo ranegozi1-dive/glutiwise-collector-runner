@@ -1,4 +1,4 @@
-name: GlutiWise Collector (Hardcoded STORE+PRICE types, SAFE)
+name: GlutiWise Collector (STORE+PRICE hardcoded, Route A to satisfy store_key FK)
 
 on:
   workflow_dispatch:
@@ -27,6 +27,10 @@ on:
         description: "תקרת records ל-payload.json (מומלץ 3000)"
         required: true
         default: "3000"
+      max_stores:
+        description: "כמה סניפים לשלוח במקסימום (MVP=30)"
+        required: true
+        default: "30"
 
 jobs:
   run:
@@ -178,14 +182,14 @@ jobs:
           PY
 
       # =========================
-      # STORES_PRICES: records-only payload (bounded + dedupe), self-seeded
-      # writes out/products_seed.csv too (matching the seed used)
+      # STORES_PRICES: build stores+records payload (Route A) to satisfy store_key FK
       # =========================
-      - name: Build prices payload (records-only, bounded, self-seeded)
+      - name: Build payload (stores + records, bounded, Route A)
         if: ${{ inputs.run_mode == 'stores_prices' }}
         env:
           SEED_LIMIT: ${{ inputs.seed_limit }}
           MAX_RECORDS: ${{ inputs.max_records }}
+          MAX_STORES: ${{ inputs.max_stores }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -195,11 +199,21 @@ jobs:
 
           SEED_LIMIT = int(os.environ.get("SEED_LIMIT","2000"))
           MAX_RECORDS_TOTAL = int(os.environ.get("MAX_RECORDS","3000"))
+          MAX_STORES_TOTAL = int(os.environ.get("MAX_STORES","30"))
 
           def now_z():
               return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
           def localname(tag): return tag.split("}")[-1] if "}" in tag else tag
           def norm(s): return re.sub(r"\s+"," ",(s or "").strip())
+
+          def canon_store_id(s: str) -> str:
+              s=(s or "").strip()
+              if re.fullmatch(r"\d+", s or ""):
+                  try:
+                      return str(int(s))
+                  except Exception:
+                      return s
+              return s
 
           def load_xml_roots(path):
               lp=path.lower()
@@ -220,22 +234,100 @@ jobs:
                   if os.path.isfile(p) and p.lower().endswith((".xml",".gz",".zip",".xml.gz")):
                       yield p
 
-          BARCODE_KEYS={"itemcode","barcode","gtin","ean","code","itemid","itemnumber"}
-          NAME_KEYS={"itemname","itemdescription","productname","description","name"}
-          PRICE_KEYS={"itemprice","price","unitprice","saleprice","priceafterdiscount","priceinclvat"}
-
           def extract_any(elem, keys):
               keys={k.lower() for k in keys}
               for el in elem.iter():
                   if localname(el.tag).lower() in keys and (el.text or "").strip():
                       return norm(el.text)
-              for el in elem.iter():
-                  for k,v in (el.attrib or {}).items():
-                      kk=str(k).lower()
-                      if any(x in kk for x in ["barcode","gtin","itemcode","ean","code"]):
-                          vv=(v or "").strip()
-                          if vv: return norm(vv)
               return ""
+
+          CHAINID_TO_RETAILER={"7290027600007":"ramilevy","7290058140886":"shufersal"}
+          def retailer_from(chain_id, chain_name):
+              if (chain_id or "") in CHAINID_TO_RETAILER: return CHAINID_TO_RETAILER[chain_id]
+              cn=chain_name or ""
+              if "שופרסל" in cn: return "shufersal"
+              if "רמי" in cn: return "ramilevy"
+              if "יוחננוף" in cn or "YOHANANOF" in cn.upper(): return "yohananof"
+              return None
+
+          def city_from_shuf_name(name: str) -> str:
+              n=norm(name)
+              if not n:
+                  return ""
+              parts=n.split(" ")
+              if len(parts)>=2:
+                  last2=" ".join(parts[-2:])
+                  if re.search(r"[א-ת]", last2):
+                      return last2
+              last1=parts[-1]
+              if re.search(r"[א-ת]", last1):
+                  return last1
+              return ""
+
+          # ---------- 1) Parse STORE files into dict store_key -> store object ----------
+          store_dict = {}
+          store_files_seen = 0
+          stores_parsed = 0
+
+          for path in iter_dump_paths():
+              base=os.path.basename(path).lower()
+              # store files usually start with "stores", but be robust: try any xml that has <Store> nodes
+              try:
+                  roots=load_xml_roots(path)
+              except Exception:
+                  continue
+
+              for root in roots:
+                  # quick check for store-like structure
+                  has_store = any(localname(el.tag).lower()=="store" for el in root.iter())
+                  if not has_store:
+                      continue
+
+                  store_files_seen += 1
+                  chain_id = extract_any(root, {"chainid"})
+                  chain_name = extract_any(root, {"chainname"})
+                  retailer = retailer_from(chain_id, chain_name)
+                  if not retailer:
+                      continue
+
+                  for el in root.iter():
+                      if localname(el.tag).lower() != "store":
+                          continue
+                      store_id = canon_store_id(extract_any(el, {"storeid"}))
+                      if not store_id:
+                          continue
+                      name = extract_any(el, {"storename"}) or ""
+                      address = extract_any(el, {"address"}) or ""
+                      if address.lower() == "unknown":
+                          address = ""
+                      city = extract_any(el, {"city"}) or ""
+                      if (not city) or city.lower() == "unknown" or re.fullmatch(r"\d+", city or ""):
+                          city = ""
+                      if retailer == "shufersal" and not city:
+                          city = city_from_shuf_name(name)
+
+                      store_key = f"{retailer}:{store_id}"
+
+                      obj = {
+                          "retailer": retailer,
+                          "store_id": store_id,
+                          "store_key": store_key,
+                          "store_name": name,
+                          "city": city,
+                          "address": address,
+                          "area": "",
+                          "store_type": ""
+                      }
+                      store_dict[store_key] = obj
+                      stores_parsed += 1
+
+          if not store_dict:
+              raise SystemExit("No STORE records parsed from downloaded files (unexpected).")
+
+          # ---------- 2) Parse PRICE files: seed barcodes + collect available store_keys ----------
+          BARCODE_KEYS={"itemcode","barcode","gtin","ean","code","itemid","itemnumber"}
+          NAME_KEYS={"itemname","itemdescription","productname","description","name"}
+          PRICE_KEYS={"itemprice","price","unitprice","saleprice","priceafterdiscount","priceinclvat"}
 
           def safe_float(x):
               x=(x or "").strip().replace(",", ".")
@@ -245,57 +337,86 @@ jobs:
               except Exception:
                   return None
 
-          CHAINID_TO_RETAILER={"7290027600007":"ramilevy","7290058140886":"shufersal"}
-          def retailer_from(chain_id, chain_name):
-              if chain_id in CHAINID_TO_RETAILER: return CHAINID_TO_RETAILER[chain_id]
-              cn=chain_name or ""
-              if "שופרסל" in cn: return "shufersal"
-              if "רמי" in cn: return "ramilevy"
-              if "יוחננוף" in cn or "YOHANANOF" in cn.upper(): return "yohananof"
-              return None
+          def extract_barcode(node):
+              bc = extract_any(node, BARCODE_KEYS).strip()
+              if bc:
+                  return bc
+              # attributes fallback for barcode-like
+              for el in node.iter():
+                  for k,v in (el.attrib or {}).items():
+                      kk=str(k).lower()
+                      if any(t in kk for t in ["barcode","gtin","itemcode","ean","code"]):
+                          vv=(v or "").strip()
+                          if vv:
+                              return norm(vv)
+              return ""
 
-          stats = {"price_files_seen":0,"price_candidates_parsed":0,"items_scanned":0,"seed_unique":0,"records_after_dedupe":0}
+          def extract_name(node):
+              nm = extract_any(node, NAME_KEYS).strip()
+              return nm
 
-          # 1) seed_map (bounded)
-          seed_map={}
+          seed_map = {}         # barcode -> name
+          price_store_keys = [] # store_keys that appear in downloaded price files
+          price_files_seen = 0
+          price_candidates = 0
+          items_scanned = 0
+
           for path in iter_dump_paths():
               base=os.path.basename(path).lower()
               if base.startswith("stores"):
                   continue
-              stats["price_files_seen"] += 1
               try:
                   roots=load_xml_roots(path)
               except Exception:
                   continue
+
               for root in roots:
                   chain_id=extract_any(root, {"chainid"})
                   chain_name=extract_any(root, {"chainname"})
-                  store_id=extract_any(root, {"storeid"})
+                  store_id=canon_store_id(extract_any(root, {"storeid"}))
                   retailer=retailer_from(chain_id, chain_name)
                   if not retailer or not store_id:
                       continue
-                  stats["price_candidates_parsed"] += 1
 
-                  for node in root.iter():
-                      if localname(node.tag).lower() not in {"item","product"}:
-                          continue
-                      stats["items_scanned"] += 1
-                      bc=extract_any(node, BARCODE_KEYS).strip()
+                  price_files_seen += 1
+                  store_key = f"{retailer}:{store_id}"
+                  price_store_keys.append(store_key)
+
+                  # scan items for seed
+                  item_nodes = [n for n in root.iter() if localname(n.tag).lower() in {"item","product"}]
+                  if not item_nodes:
+                      continue
+                  price_candidates += 1
+
+                  for node in item_nodes:
+                      items_scanned += 1
+                      bc = extract_barcode(node)
                       if not bc:
                           continue
                       if bc not in seed_map and len(seed_map) < SEED_LIMIT:
-                          nm=extract_any(node, NAME_KEYS).strip()
-                          seed_map[bc]=nm
-                          stats["seed_unique"]=len(seed_map)
+                          seed_map[bc] = extract_name(node)
                       if len(seed_map) >= SEED_LIMIT:
                           break
-                  if len(seed_map) >= SEED_LIMIT:
-                      break
-              if len(seed_map) >= SEED_LIMIT:
+                  # keep going to collect store_keys; seed can stop early safely
+
+          # choose stores based on stores that actually appear in the downloaded price files
+          seen = set()
+          selected_store_keys = []
+          for sk in price_store_keys:
+              if sk in store_dict and sk not in seen:
+                  seen.add(sk)
+                  selected_store_keys.append(sk)
+              if len(selected_store_keys) >= MAX_STORES_TOTAL:
                   break
 
-          # 2) records only for seed_map (bounded + dedupe by price_key)
-          dedup={}
+          # fallback: if for some reason none matched, pick any from store_dict
+          if not selected_store_keys:
+              selected_store_keys = list(store_dict.keys())[:MAX_STORES_TOTAL]
+
+          selected_stores = [store_dict[sk] for sk in selected_store_keys]
+
+          # ---------- 3) Build records only for selected stores + seed barcodes, bounded + dedupe ----------
+          dedup = {}
           for path in iter_dump_paths():
               base=os.path.basename(path).lower()
               if base.startswith("stores"):
@@ -304,32 +425,36 @@ jobs:
                   roots=load_xml_roots(path)
               except Exception:
                   continue
+
               for root in roots:
                   chain_id=extract_any(root, {"chainid"})
                   chain_name=extract_any(root, {"chainname"})
-                  store_id=extract_any(root, {"storeid"})
+                  store_id=canon_store_id(extract_any(root, {"storeid"}))
                   retailer=retailer_from(chain_id, chain_name)
                   if not retailer or not store_id:
                       continue
-                  store_key=f"{retailer}:{store_id}"
-                  updated_at=now_z()
 
+                  store_key=f"{retailer}:{store_id}"
+                  if store_key not in seen:
+                      continue
+
+                  updated_at = now_z()
                   for node in root.iter():
                       if localname(node.tag).lower() not in {"item","product"}:
                           continue
-                      bc=extract_any(node, BARCODE_KEYS).strip()
+                      bc = extract_barcode(node)
                       if not bc or bc not in seed_map:
                           continue
-                      pv=safe_float(extract_any(node, PRICE_KEYS))
+                      pv = safe_float(extract_any(node, PRICE_KEYS))
                       if pv is None:
                           continue
                       price_key=f"{bc}:{store_key}"
                       dedup[price_key]={
-                          "price_key":price_key,
-                          "barcode":bc,
-                          "store_key":store_key,
-                          "price":pv,
-                          "updated_at":updated_at
+                          "price_key": price_key,
+                          "barcode": bc,
+                          "store_key": store_key,
+                          "price": pv,
+                          "updated_at": updated_at
                       }
                       if len(dedup) >= MAX_RECORDS_TOTAL:
                           break
@@ -338,30 +463,41 @@ jobs:
               if len(dedup) >= MAX_RECORDS_TOTAL:
                   break
 
-          records=list(dedup.values())
-          stats["records_after_dedupe"]=len(records)
+          records = list(dedup.values())
 
           os.makedirs("out", exist_ok=True)
 
-          # Always write products_seed.csv matching the exact seed used
+          # write products_seed.csv for transparency (matches seed_map used)
           with open("out/products_seed.csv","w",encoding="utf-8") as f:
               f.write("barcode,name\n")
               for bc,nm in seed_map.items():
                   f.write(f"{bc},{(nm or '').replace(',', ' ')}\n")
 
-          payload={
-              "source":"collector_prices_records_only_bounded",
-              "generated_at":now_z(),
-              "records":records
+          payload = {
+              "source": "collector_stores_prices_routeA_bounded",
+              "generated_at": now_z(),
+              "stores": selected_stores,
+              "records": records
           }
           with open("out/payload.json","w",encoding="utf-8") as f:
               json.dump(payload,f,ensure_ascii=False)
 
+          stats = {
+              "store_files_seen": store_files_seen,
+              "stores_parsed_total": stores_parsed,
+              "store_dict_unique": len(store_dict),
+              "price_files_seen": price_files_seen,
+              "price_candidates": price_candidates,
+              "items_scanned": items_scanned,
+              "seed_unique": len(seed_map),
+              "selected_stores": len(selected_store_keys),
+              "records_after_dedupe": len(records)
+          }
           with open("out/price_stats.txt","w",encoding="utf-8") as f:
               for k,v in stats.items():
                   f.write(f"{k}: {v}\n")
 
-          print(f"seed_unique={stats['seed_unique']}, records_after_dedupe={stats['records_after_dedupe']}")
+          print(json.dumps(stats, ensure_ascii=False))
           PY
 
       - name: Upload artifacts (out/)
@@ -383,12 +519,14 @@ jobs:
           set -euo pipefail
           test -f out/payload.json
 
-          # Safety: avoid burning Make if records are empty
           python3 - <<'PY'
           import json
           p=json.load(open("out/payload.json","r",encoding="utf-8"))
           n=len(p.get("records") or [])
-          print(f"records={n}")
+          s=len(p.get("stores") or [])
+          print(f"stores={s}, records={n}")
+          if s < 1:
+              raise SystemExit("ABORT: stores<1 (would not route to A reliably)")
           if n < 2:
               raise SystemExit("ABORT: records<2 (not sending to Make)")
           PY
