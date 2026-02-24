@@ -1,4 +1,4 @@
-name: GlutiWise Collector (Hardcoded types + ensure products FK + send prices)
+name: GlutiWise Collector (Route A + pre-upsert products)
 
 on:
   workflow_dispatch:
@@ -8,25 +8,21 @@ on:
         required: true
         default: "stores_prices"
       send_to_make:
-        description: "רק עבור stores_prices: לשלוח ל-Make (true/false)"
+        description: "לשלוח ל-Make (true/false)"
         required: true
         default: "true"
-      limit_seed:
-        description: "LIMIT להרצת seed (מומלץ 20)"
-        required: true
-        default: "20"
       limit_prices:
-        description: "LIMIT להרצת מחירים (מומלץ 20 לבדיקה, 120 להרצה מלאה)"
+        description: "LIMIT למחירים (20 לבדיקה, 120 להרצה מלאה)"
         required: true
         default: "20"
-      seed_limit:
-        description: "כמה ברקודים להשתמש בהם (מומלץ 2000)"
-        required: true
-        default: "2000"
       max_records:
-        description: "תקרת records ל-payload.json (מומלץ 3000)"
+        description: "תקרת records ל-payload.json"
         required: true
         default: "3000"
+      max_stores:
+        description: "תקרת stores ל-payload.json (MVP=30)"
+        required: true
+        default: "30"
 
 jobs:
   run:
@@ -40,38 +36,23 @@ jobs:
         run: |
           docker pull erlichsefi/israeli-supermarket-scarpers:latest
 
-      # =========================
-      # INSPECT (no Make)
-      # =========================
       - name: Inspect image (fast hints)
         if: ${{ inputs.run_mode == 'inspect' }}
         run: |
           set -euo pipefail
           docker run --rm --entrypoint sh erlichsefi/israeli-supermarket-scarpers:latest -lc '
             set -e
-            echo "== HINTS (grep) =="
-            grep -RIn --line-number --binary-files=without-match -E "ENABLED_FILE_TYPES|STORE_FILE|PRICE_FILE|PRICE_FULL_FILE|PROMO_FILE|FILE_TYPE" . 2>/dev/null | head -n 200 || true
-            echo "== DONE =="
+            grep -RIn --line-number --binary-files=without-match -E "ENABLED_FILE_TYPES|STORE_FILE|PRICE_FILE|PRICE_FULL_FILE|FILE_TYPE" . 2>/dev/null | head -n 200 || true
           '
 
-      # =========================
-      # DOWNLOAD (hardcoded, no discover)
-      # =========================
       - name: Download STORE + PRICE files (hardcoded types)
-        if: ${{ inputs.run_mode == 'seed_products' || inputs.run_mode == 'stores_prices' }}
+        if: ${{ inputs.run_mode == 'stores_prices' }}
         run: |
           set -euo pipefail
-
           ENABLED_FILE_TYPES="STORE_FILE,PRICE_FILE,PRICE_FULL_FILE"
-          if [ "${{ inputs.run_mode }}" = "seed_products" ]; then
-            LIMIT="${{ inputs.limit_seed }}"
-          else
-            LIMIT="${{ inputs.limit_prices }}"
-          fi
-
+          LIMIT="${{ inputs.limit_prices }}"
           echo "ENABLED_FILE_TYPES=$ENABLED_FILE_TYPES"
           echo "LIMIT=$LIMIT"
-
           docker run --rm \
             -v "${{ github.workspace }}/dumps:/usr/src/app/dumps" \
             -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL,YOHANANOF" \
@@ -79,112 +60,11 @@ jobs:
             -e LIMIT="$LIMIT" \
             erlichsefi/israeli-supermarket-scarpers:latest
 
-      # =========================
-      # SEED: products_seed.csv (PRICE-only)
-      # =========================
-      - name: Build products_seed.csv (PRICE-only)
-        if: ${{ inputs.run_mode == 'seed_products' }}
-        env:
-          SEED_LIMIT: ${{ inputs.seed_limit }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import os, re, glob, gzip, zipfile
-          import xml.etree.ElementTree as ET
-
-          SEED_LIMIT=int(os.environ.get("SEED_LIMIT","2000"))
-
-          def localname(tag): return tag.split("}")[-1] if "}" in tag else tag
-          def norm(s): return re.sub(r"\s+"," ",(s or "").strip())
-
-          def load_xml_roots(path):
-              lp=path.lower()
-              if lp.endswith(".zip"):
-                  roots=[]
-                  with zipfile.ZipFile(path,"r") as z:
-                      for nm in z.namelist():
-                          if nm.lower().endswith(".xml"):
-                              roots.append(ET.fromstring(z.read(nm)))
-                  return roots
-              if lp.endswith(".xml.gz") or lp.endswith(".gz"):
-                  with gzip.open(path,"rb") as f:
-                      return [ET.fromstring(f.read())]
-              return [ET.parse(path).getroot()]
-
-          def iter_dump_paths():
-              for p in glob.glob("dumps/**/*", recursive=True):
-                  if os.path.isfile(p) and p.lower().endswith((".xml",".gz",".zip",".xml.gz")):
-                      yield p
-
-          BARCODE_KEYS = {"itemcode","barcode","gtin","ean","code","itemid","itemnumber"}
-          NAME_KEYS = {"itemname","itemdescription","productname","description","name"}
-
-          def extract_any(elem, keys):
-              keys={k.lower() for k in keys}
-              for el in elem.iter():
-                  if localname(el.tag).lower() in keys and (el.text or "").strip():
-                      return norm(el.text)
-              for el in elem.iter():
-                  for k,v in (el.attrib or {}).items():
-                      kk=str(k).lower()
-                      if any(x in kk for x in ["barcode","gtin","itemcode","ean","code"]):
-                          vv=(v or "").strip()
-                          if vv: return norm(vv)
-              return ""
-
-          seed={}
-          stats={"files_seen":0,"roots_seen":0,"items_seen":0}
-
-          for path in iter_dump_paths():
-              base=os.path.basename(path).lower()
-              if base.startswith("stores"):
-                  continue
-              stats["files_seen"] += 1
-              try:
-                  roots=load_xml_roots(path)
-              except Exception:
-                  continue
-              for root in roots:
-                  stats["roots_seen"] += 1
-                  for node in root.iter():
-                      if localname(node.tag).lower() not in {"item","product"}:
-                          continue
-                      stats["items_seen"] += 1
-                      bc=extract_any(node, BARCODE_KEYS).strip()
-                      if not bc:
-                          continue
-                      if bc not in seed and len(seed) < SEED_LIMIT:
-                          nm=extract_any(node, NAME_KEYS).strip()
-                          seed[bc]=nm
-                      if len(seed) >= SEED_LIMIT:
-                          break
-                  if len(seed) >= SEED_LIMIT:
-                      break
-              if len(seed) >= SEED_LIMIT:
-                  break
-
-          os.makedirs("out", exist_ok=True)
-          with open("out/products_seed.csv","w",encoding="utf-8") as f:
-              f.write("barcode,name\n")
-              for bc,nm in seed.items():
-                  f.write(f"{bc},{(nm or '').replace(',', ' ')}\n")
-
-          with open("out/seed_stats.txt","w",encoding="utf-8") as f:
-              for k,v in stats.items():
-                  f.write(f"{k}: {v}\n")
-              f.write(f"seed_unique: {len(seed)}\n")
-
-          print(f"seed_unique={len(seed)}")
-          PY
-
-      # =========================
-      # STORES_PRICES: build records + products_upsert + payload
-      # =========================
-      - name: Build payload + products_upsert (bounded)
+      - name: Build payload (stores+records) + products_upsert
         if: ${{ inputs.run_mode == 'stores_prices' }}
         env:
-          SEED_LIMIT: ${{ inputs.seed_limit }}
           MAX_RECORDS: ${{ inputs.max_records }}
+          MAX_STORES: ${{ inputs.max_stores }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -192,21 +72,18 @@ jobs:
           import xml.etree.ElementTree as ET
           from datetime import datetime, timezone
 
-          SEED_LIMIT = int(os.environ.get("SEED_LIMIT","2000"))
           MAX_RECORDS_TOTAL = int(os.environ.get("MAX_RECORDS","3000"))
+          MAX_STORES_TOTAL  = int(os.environ.get("MAX_STORES","30"))
 
           def now_z():
               return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
           def localname(tag): return tag.split("}")[-1] if "}" in tag else tag
           def norm(s): return re.sub(r"\s+"," ",(s or "").strip())
-
           def canon_store_id(s: str) -> str:
               s=(s or "").strip()
               if re.fullmatch(r"\d+", s or ""):
-                  try:
-                      return str(int(s))
-                  except Exception:
-                      return s
+                  try: return str(int(s))
+                  except: return s
               return s
 
           def load_xml_roots(path):
@@ -241,15 +118,13 @@ jobs:
 
           def extract_barcode(node):
               bc = extract_any(node, BARCODE_KEYS).strip()
-              if bc:
-                  return bc
+              if bc: return bc
               for el in node.iter():
                   for k,v in (el.attrib or {}).items():
                       kk=str(k).lower()
                       if any(x in kk for x in ["barcode","gtin","itemcode","ean","code"]):
                           vv=(v or "").strip()
-                          if vv:
-                              return norm(vv)
+                          if vv: return norm(vv)
               return ""
 
           def safe_float(x):
@@ -257,7 +132,7 @@ jobs:
               try:
                   v=float(x)
                   return v if v>=0 else None
-              except Exception:
+              except:
                   return None
 
           CHAINID_TO_RETAILER={"7290027600007":"ramilevy","7290058140886":"shufersal"}
@@ -269,41 +144,17 @@ jobs:
               if "יוחננוף" in cn or "YOHANANOF" in cn.upper(): return "yohananof"
               return None
 
-          # --- build store_key map from STORE files to avoid store_key FK mismatch
-          storekey_by_retailer_and_canon = {}
-          for path in iter_dump_paths():
-              try:
-                  roots = load_xml_roots(path)
-              except Exception:
-                  continue
-              for root in roots:
-                  if not any(localname(el.tag).lower()=="store" for el in root.iter()):
-                      continue
-                  chain_id = extract_any(root, {"chainid"})
-                  chain_name = extract_any(root, {"chainname"})
-                  retailer = retailer_from(chain_id, chain_name)
-                  if not retailer:
-                      continue
-                  for el in root.iter():
-                      if localname(el.tag).lower() != "store":
-                          continue
-                      sid_raw = extract_any(el, {"storeid"}).strip()
-                      if not sid_raw:
-                          continue
-                      sid_can = canon_store_id(sid_raw)
-                      store_key = f"{retailer}:{sid_raw}"
-                      storekey_by_retailer_and_canon[(retailer, sid_can)] = store_key
-
-          # --- seed_map from PRICE items + build records (bounded + dedupe)
-          seed_map={}
           dedup={}
+          barcode_to_name={}
+          store_keys_seen=[]
+
           for path in iter_dump_paths():
               base=os.path.basename(path).lower()
               if base.startswith("stores"):
                   continue
               try:
                   roots=load_xml_roots(path)
-              except Exception:
+              except:
                   continue
 
               for root in roots:
@@ -314,25 +165,21 @@ jobs:
                   if not retailer or not store_id:
                       continue
 
-                  store_key = storekey_by_retailer_and_canon.get((retailer, store_id))
-                  if not store_key:
-                      continue
+                  store_key=f"{retailer}:{store_id}"
+                  store_keys_seen.append(store_key)
 
-                  updated_at = now_z()
+                  updated_at=now_z()
                   for node in root.iter():
                       if localname(node.tag).lower() not in {"item","product"}:
                           continue
-                      bc = extract_barcode(node)
+                      bc=extract_barcode(node)
                       if not bc:
                           continue
-                      if bc not in seed_map and len(seed_map) < SEED_LIMIT:
-                          nm = extract_any(node, NAME_KEYS).strip()
-                          seed_map[bc] = nm
+                      nm=extract_any(node, NAME_KEYS).strip()
+                      if bc not in barcode_to_name and nm:
+                          barcode_to_name[bc]=nm
 
-                      if bc not in seed_map:
-                          continue
-
-                      pv = safe_float(extract_any(node, PRICE_KEYS))
+                      pv=safe_float(extract_any(node, PRICE_KEYS))
                       if pv is None:
                           continue
 
@@ -353,38 +200,59 @@ jobs:
 
           records=list(dedup.values())
 
-          os.makedirs("out", exist_ok=True)
+          # select up to MAX_STORES_TOTAL store_keys from records (guaranteed coverage)
+          uniq=[]
+          seen=set()
+          for r in records:
+              sk=r["store_key"]
+              if sk not in seen:
+                  seen.add(sk); uniq.append(sk)
+              if len(uniq) >= MAX_STORES_TOTAL:
+                  break
 
-          # products upsert payload (only barcodes we actually used)
-          products_upsert=[{"barcode": bc, "name": (seed_map.get(bc) or "")} for bc in seed_map.keys()]
+          # filter records to chosen stores (keeps stores+records consistent)
+          records=[r for r in records if r["store_key"] in set(uniq)]
+
+          # build stores objects from store_key itself (no guessing beyond derived split)
+          stores=[]
+          for sk in uniq:
+              parts=sk.split(":",1)
+              retailer=parts[0]
+              store_id=parts[1] if len(parts)>1 else ""
+              stores.append({
+                  "retailer": retailer,
+                  "store_id": store_id,
+                  "store_key": sk,
+                  "store_name": sk,   # derived, not external
+                  "city": "",
+                  "address": "",
+                  "area": "",
+                  "store_type": ""
+              })
+
+          # products upsert only for barcodes actually present in filtered records
+          used_barcodes=sorted(set(r["barcode"] for r in records))
+          products_upsert=[{"barcode": bc, "name": (barcode_to_name.get(bc) or "")} for bc in used_barcodes]
+
+          os.makedirs("out", exist_ok=True)
           with open("out/products_upsert.json","w",encoding="utf-8") as f:
               json.dump(products_upsert,f,ensure_ascii=False)
 
           payload={
-              "source":"collector_prices_records_only_with_products_upsert",
+              "source":"collector_routeA_with_products_upsert",
               "generated_at": now_z(),
+              "stores": stores,
               "records": records
           }
           with open("out/payload.json","w",encoding="utf-8") as f:
               json.dump(payload,f,ensure_ascii=False)
 
-          with open("out/price_stats.txt","w",encoding="utf-8") as f:
-              f.write(f"seed_unique: {len(seed_map)}\n")
-              f.write(f"records_after_dedupe: {len(records)}\n")
+          with open("out/stats.txt","w",encoding="utf-8") as f:
+              f.write(f"stores={len(stores)}\nrecords={len(records)}\nproducts_upsert={len(products_upsert)}\n")
 
-          print(f"seed_unique={len(seed_map)}, records_after_dedupe={len(records)}")
+          print(f"stores={len(stores)}, records={len(records)}, products_upsert={len(products_upsert)}")
           PY
 
-      - name: Upload artifacts (out/)
-        if: ${{ inputs.run_mode != 'inspect' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: glutiwise-out
-          path: out/
-
-      # =========================
-      # UPSERT PRODUCTS to Supabase (ensure barcode FK) - no Make ops
-      # =========================
       - name: Upsert products to Supabase (ensure barcode FK)
         if: ${{ inputs.run_mode == 'stores_prices' && inputs.send_to_make == 'true' }}
         env:
@@ -393,12 +261,6 @@ jobs:
         run: |
           set -euo pipefail
           test -f out/products_upsert.json
-
-          if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_SERVICE_ROLE_JWT:-}" ]; then
-            echo "ERROR: Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_JWT secrets"
-            exit 2
-          fi
-
           curl -sS -X POST "${SUPABASE_URL}/rest/v1/products?on_conflict=barcode" \
             -H "Content-Type: application/json" \
             -H "Prefer: resolution=merge-duplicates,return=minimal" \
@@ -406,10 +268,7 @@ jobs:
             -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_JWT}" \
             --data-binary @out/products_upsert.json
 
-      # =========================
-      # POST TO MAKE (ONE POST)
-      # =========================
-      - name: POST out/payload.json to Make (ONE POST)
+      - name: POST payload to Make (ONE POST)
         if: ${{ inputs.run_mode == 'stores_prices' && inputs.send_to_make == 'true' }}
         env:
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
@@ -417,17 +276,20 @@ jobs:
         run: |
           set -euo pipefail
           test -f out/payload.json
-
           python3 - <<'PY'
           import json
           p=json.load(open("out/payload.json","r",encoding="utf-8"))
-          n=len(p.get("records") or [])
-          print(f"records={n}")
-          if n < 2:
-              raise SystemExit("ABORT: records<2 (not sending to Make)")
+          if len(p.get("stores") or []) < 1: raise SystemExit("ABORT: stores empty")
+          if len(p.get("records") or []) < 2: raise SystemExit("ABORT: records<2")
           PY
-
           curl -sS -X POST "$MAKE_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -H "x-make-apikey: $MAKE_APIKEY" \
             --data-binary @out/payload.json
+
+      - name: Upload artifacts (out/)
+        if: ${{ inputs.run_mode != 'inspect' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: glutiwise-out
+          path: out/
