@@ -1,4 +1,4 @@
-name: GlutiWise Collector (SAFE seed + prices, ONE FLOW)
+name: GlutiWise Collector (Hardcoded STORE+PRICE types, SAFE)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       run_mode:
         description: "inspect | seed_products | stores_prices"
         required: true
-        default: "inspect"
+        default: "seed_products"
       send_to_make:
         description: "רק עבור stores_prices: לשלוח ל-Make (true/false)"
         required: true
@@ -16,9 +16,9 @@ on:
         required: true
         default: "20"
       limit_prices:
-        description: "LIMIT להרצת מחירים (מומלץ 120)"
+        description: "LIMIT להרצת מחירים (מומלץ 20 לבדיקה, 120 להרצה מלאה)"
         required: true
-        default: "120"
+        default: "20"
       seed_limit:
         description: "כמה ברקודים להוציא ל-products_seed.csv (מומלץ 2000)"
         required: true
@@ -43,58 +43,26 @@ jobs:
       # =========================
       # INSPECT (no Make)
       # =========================
-      - name: Inspect image (fast)
+      - name: Inspect image (fast hints)
         if: ${{ inputs.run_mode == 'inspect' }}
         run: |
-          set -e
+          set -euo pipefail
           docker run --rm --entrypoint sh erlichsefi/israeli-supermarket-scarpers:latest -lc '
             set -e
             echo "== HINTS (grep) =="
-            grep -RIn --line-number --binary-files=without-match -E "ENABLED_FILE_TYPES|STORE_FILE|PRICE|PROMO|FULL|FILE_TYPE" . 2>/dev/null | head -n 200 || true
+            grep -RIn --line-number --binary-files=without-match -E "ENABLED_FILE_TYPES|STORE_FILE|PRICE_FILE|PRICE_FULL_FILE|PROMO_FILE|FILE_TYPE" . 2>/dev/null | head -n 200 || true
             echo "== DONE =="
           '
 
       # =========================
-      # DISCOVER PRICE TYPES (SAFE)
+      # DOWNLOAD (hardcoded, no discover)
       # =========================
-      - name: Discover PRICE file types (SAFE - from all_types, never empty)
-        if: ${{ inputs.run_mode != 'inspect' }}
-        id: discover
-        run: |
-          set -euo pipefail
-
-          docker run --rm --entrypoint python3 erlichsefi/israeli-supermarket-scarpers:latest - <<'PY' > ft.out
-          from il_supermarket_scarper.utils.file_types import FileTypesFilters
-          print("ALL=" + ",".join(FileTypesFilters.all_types()))
-          PY
-
-          ALL_TYPES="$(grep '^ALL=' ft.out | cut -d= -f2- | tr -d '\r\n')"
-          echo "All file types in image: $ALL_TYPES"
-
-          # Pick price types deterministically (must be valid per main.py validation)
-          if echo "$ALL_TYPES" | grep -q "PRICE_FILE" && echo "$ALL_TYPES" | grep -q "PRICE_FULL_FILE"; then
-            PRICE_TYPES="PRICE_FILE,PRICE_FULL_FILE"
-          else
-            echo "ERROR:NO_PRICE_TYPES_IN_IMAGE_ALL_TYPES"
-            exit 2
-          fi
-
-          echo "Discovered PRICE types: $PRICE_TYPES"
-          echo "price_types=$PRICE_TYPES" >> "$GITHUB_OUTPUT"
-
-      # =========================
-      # DOWNLOAD STORE+PRICE (seed_products / stores_prices)
-      # =========================
-      - name: Download STORE + PRICE files
+      - name: Download STORE + PRICE files (hardcoded types)
         if: ${{ inputs.run_mode == 'seed_products' || inputs.run_mode == 'stores_prices' }}
         run: |
           set -euo pipefail
 
-          PRICE_TYPES="${{ steps.discover.outputs.price_types }}"
-          ENABLED_FILE_TYPES="STORE_FILE,$PRICE_TYPES"
-          ENABLED_FILE_TYPES="$(echo "$ENABLED_FILE_TYPES" | sed 's/,,*/,/g; s/^,//; s/,$//')"
-          echo "$ENABLED_FILE_TYPES" | grep -q ",," && echo "ERROR:EMPTY_TOKEN_IN_ENABLED_FILE_TYPES" && exit 2
-
+          ENABLED_FILE_TYPES="STORE_FILE,PRICE_FILE,PRICE_FULL_FILE"
           if [ "${{ inputs.run_mode }}" = "seed_products" ]; then
             LIMIT="${{ inputs.limit_seed }}"
           else
@@ -210,8 +178,8 @@ jobs:
           PY
 
       # =========================
-      # STORES_PRICES: records-only payload (bounded + dedupe)
-      # Also writes products_seed.csv again (same seed_map) so import matches payload.
+      # STORES_PRICES: records-only payload (bounded + dedupe), self-seeded
+      # writes out/products_seed.csv too (matching the seed used)
       # =========================
       - name: Build prices payload (records-only, bounded, self-seeded)
         if: ${{ inputs.run_mode == 'stores_prices' }}
@@ -292,7 +260,7 @@ jobs:
           seed_map={}
           for path in iter_dump_paths():
               base=os.path.basename(path).lower()
-              if base.startswith("stores"): 
+              if base.startswith("stores"):
                   continue
               stats["price_files_seen"] += 1
               try:
@@ -330,7 +298,7 @@ jobs:
           dedup={}
           for path in iter_dump_paths():
               base=os.path.basename(path).lower()
-              if base.startswith("stores"): 
+              if base.startswith("stores"):
                   continue
               try:
                   roots=load_xml_roots(path)
@@ -375,7 +343,7 @@ jobs:
 
           os.makedirs("out", exist_ok=True)
 
-          # Always write products_seed.csv matching the exact barcodes used to build records
+          # Always write products_seed.csv matching the exact seed used
           with open("out/products_seed.csv","w",encoding="utf-8") as f:
               f.write("barcode,name\n")
               for bc,nm in seed_map.items():
@@ -414,6 +382,7 @@ jobs:
         run: |
           set -euo pipefail
           test -f out/payload.json
+
           # Safety: avoid burning Make if records are empty
           python3 - <<'PY'
           import json
@@ -423,6 +392,7 @@ jobs:
           if n < 2:
               raise SystemExit("ABORT: records<2 (not sending to Make)")
           PY
+
           curl -sS -X POST "$MAKE_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -H "x-make-apikey: $MAKE_APIKEY" \
