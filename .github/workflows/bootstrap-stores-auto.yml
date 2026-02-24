@@ -48,58 +48,16 @@ jobs:
       # =========================
       # DISCOVER PRICE TYPES (no heredoc, no import assumptions)
       # =========================
-      - name: Discover ENABLED_FILE_TYPES (SAFE - never empty)
+      - name: Discover ENABLED_FILE_TYPES (SAFE - short -c, never empty)
         if: ${{ inputs.run_mode != 'inspect' }}
         id: discover
         run: |
           set -euo pipefail
 
-          docker run --rm --entrypoint python3 erlichsefi/israeli-supermarket-scarpers:latest - <<'PY' > enabled_file_types.txt
-          import re, sys, glob
+          ENABLED_TYPES="$(docker run --rm --entrypoint python3 erlichsefi/israeli-supermarket-scarpers:latest -c 'from il_supermarket_scarper import FileTypesFilters; print(",".join(FileTypesFilters.all_types()))')"
+          ENABLED_TYPES="$(echo "$ENABLED_TYPES" | tr -d "\r\n" | sed 's/,,*/,/g; s/^,//; s/,$//')"
 
-          # 1) Preferred: use library API (if available)
-          try:
-              from il_supermarket_scarper import FileTypesFilters
-              types = FileTypesFilters.all_types()
-              vals = []
-              for t in types:
-                  s = str(t).strip()
-                  if s:
-                      vals.append(s)
-              vals = sorted(set(vals))
-              if vals:
-                  print(",".join(vals))
-                  sys.exit(0)
-          except Exception:
-              pass
-
-          # 2) Fallback: scan file_types*.py and extract any quoted token containing 'FILE'
-          paths = glob.glob("**/*file_types*.py", recursive=True)
-          if not paths:
-              print("ERROR:NO_FILE_TYPES_CANDIDATES")
-              sys.exit(2)
-
-          p = paths[0]
-          txt = open(p, "r", encoding="utf-8", errors="ignore").read()
-
-          # a) CONST="VALUE" style
-          pairs = re.findall(r'^\s*([A-Z0-9_]+)\s*=\s*["\']([^"\']+)["\']\s*$', txt, flags=re.M)
-          vals = [v.strip() for _, v in pairs if v.strip()]
-
-          # b) Any quoted token that contains FILE (e.g., "PRICE_FILE")
-          vals += re.findall(r'["\']([A-Z0-9_]*FILE[A-Z0-9_]*)["\']', txt)
-
-          vals = sorted(set([v for v in vals if v]))
-          if not vals:
-              print("ERROR:NO_FILE_TYPES_FOUND_IN_FILE")
-              sys.exit(2)
-
-          print(",".join(vals))
-          PY
-
-          ENABLED_TYPES="$(cat enabled_file_types.txt | tr -d '\r\n' | sed 's/,,*/,/g; s/^,//; s/,$//')"
           echo "Discovered ENABLED_FILE_TYPES: $ENABLED_TYPES"
-
           if [ -z "$ENABLED_TYPES" ]; then
             echo "ERROR:EMPTY_ENABLED_FILE_TYPES"
             exit 2
