@@ -48,58 +48,64 @@ jobs:
       # =========================
       # DISCOVER PRICE TYPES (no heredoc, no import assumptions)
       # =========================
-      - name: Discover PRICE file types (SAFE - heredoc to file, no multiline in -c, no command-substitution)
+      - name: Discover ENABLED_FILE_TYPES (SAFE - never empty)
         if: ${{ inputs.run_mode != 'inspect' }}
         id: discover
         run: |
           set -euo pipefail
 
-          # Write result to a file (no fragile quoting)
-          docker run --rm --entrypoint python3 erlichsefi/israeli-supermarket-scarpers:latest - <<'PY' > price_types.txt
+          docker run --rm --entrypoint python3 erlichsefi/israeli-supermarket-scarpers:latest - <<'PY' > enabled_file_types.txt
           import re, sys, glob
 
-          # 1) Try API if available (preferred)
+          # 1) Preferred: use library API (if available)
           try:
               from il_supermarket_scarper import FileTypesFilters
               types = FileTypesFilters.all_types()
-              price = [t for t in types if re.search(r"(PRICE|PROMO|FULL)", t, re.I)]
-              out = ",".join(sorted(set(price)))
-              if out:
-                  print(out)
+              vals = []
+              for t in types:
+                  s = str(t).strip()
+                  if s:
+                      vals.append(s)
+              vals = sorted(set(vals))
+              if vals:
+                  print(",".join(vals))
                   sys.exit(0)
           except Exception:
               pass
 
-          # 2) Fallback: scan *file_types*.py inside the image filesystem
-          paths = [p for p in glob.glob("**/*file_types*.py", recursive=True) if "site-packages" not in p.lower()]
-          p = paths[0] if paths else None
-          if not p:
+          # 2) Fallback: scan file_types*.py and extract any quoted token containing 'FILE'
+          paths = glob.glob("**/*file_types*.py", recursive=True)
+          if not paths:
               print("ERROR:NO_FILE_TYPES_CANDIDATES")
               sys.exit(2)
 
+          p = paths[0]
           txt = open(p, "r", encoding="utf-8", errors="ignore").read()
+
+          # a) CONST="VALUE" style
           pairs = re.findall(r'^\s*([A-Z0-9_]+)\s*=\s*["\']([^"\']+)["\']\s*$', txt, flags=re.M)
+          vals = [v.strip() for _, v in pairs if v.strip()]
 
-          tokens = sorted({
-              v for k, v in pairs
-              if v.upper() != "STORE_FILE" and (
-                  ("PRICE" in k.upper()) or ("PRICE" in v.upper()) or
-                  ("PROMO" in k.upper()) or ("PROMO" in v.upper()) or
-                  ("FULL" in k.upper()) or ("FULL" in v.upper())
-              )
-          })
+          # b) Any quoted token that contains FILE (e.g., "PRICE_FILE")
+          vals += re.findall(r'["\']([A-Z0-9_]*FILE[A-Z0-9_]*)["\']', txt)
 
-          if not tokens:
-              print("ERROR:NO_PRICE_FILE_TYPES_FOUND")
+          vals = sorted(set([v for v in vals if v]))
+          if not vals:
+              print("ERROR:NO_FILE_TYPES_FOUND_IN_FILE")
               sys.exit(2)
 
-          print(",".join(tokens))
+          print(",".join(vals))
           PY
 
-          PRICE_TYPES="$(cat price_types.txt | tr -d '\r\n')"
-          echo "Discovered PRICE types: $PRICE_TYPES"
-          echo "$PRICE_TYPES" | grep -qE '^ERROR:' && exit 2
-          echo "price_types=$PRICE_TYPES" >> "$GITHUB_OUTPUT"
+          ENABLED_TYPES="$(cat enabled_file_types.txt | tr -d '\r\n' | sed 's/,,*/,/g; s/^,//; s/,$//')"
+          echo "Discovered ENABLED_FILE_TYPES: $ENABLED_TYPES"
+
+          if [ -z "$ENABLED_TYPES" ]; then
+            echo "ERROR:EMPTY_ENABLED_FILE_TYPES"
+            exit 2
+          fi
+
+          echo "enabled_types=$ENABLED_TYPES" >> "$GITHUB_OUTPUT"
 
       # =========================
       # DOWNLOADS
@@ -119,11 +125,23 @@ jobs:
         if: ${{ inputs.run_mode == 'seed_products' || inputs.run_mode == 'stores_prices' }}
         run: |
           set -euo pipefail
-          echo "Using PRICE file types: ${{ steps.discover.outputs.price_types }}"
+
+          TYPES="${{ steps.discover.outputs.enabled_types }}"
+          echo "Discovered types: $TYPES"
+
+          if echo "$TYPES" | grep -q "STORE_FILE"; then
+            ENABLED_FILE_TYPES="$TYPES"
+          else
+            ENABLED_FILE_TYPES="STORE_FILE,$TYPES"
+          fi
+
+          # Safety: no empty tokens
+          echo "$ENABLED_FILE_TYPES" | grep -q ",," && echo "ERROR:ENABLED_FILE_TYPES_HAS_EMPTY_TOKEN" && exit 2
+
           docker run --rm \
             -v "${{ github.workspace }}/dumps:/usr/src/app/dumps" \
             -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL,YOHANANOF" \
-            -e ENABLED_FILE_TYPES="STORE_FILE,${{ steps.discover.outputs.price_types }}" \
+            -e ENABLED_FILE_TYPES="$ENABLED_FILE_TYPES" \
             -e LIMIT=120 \
             erlichsefi/israeli-supermarket-scarpers:latest
 
