@@ -1,3 +1,50 @@
+name: GlutiWise Collector (Repair stores + load prices in ONE run)
+
+on:
+  workflow_dispatch:
+    inputs:
+      send_to_make:
+        description: "לשלוח ל-Make (true/false)"
+        required: true
+        default: "true"
+      limit_prices:
+        description: "LIMIT למחירים (20 לבדיקה, 120 להרצה מלאה)"
+        required: true
+        default: "20"
+      max_records:
+        description: "תקרת records ל-payload.json"
+        required: true
+        default: "3000"
+      max_stores:
+        description: "תקרת stores ל-payload.json (MVP=30)"
+        required: true
+        default: "30"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare folders
+        run: |
+          mkdir -p dumps out
+
+      - name: Pull scraper image
+        run: |
+          docker pull erlichsefi/israeli-supermarket-scarpers:latest
+
+      - name: Download STORE + PRICE files (hardcoded types)
+        run: |
+          set -euo pipefail
+          ENABLED_FILE_TYPES="STORE_FILE,PRICE_FILE,PRICE_FULL_FILE"
+          LIMIT="${{ inputs.limit_prices }}"
+          echo "ENABLED_FILE_TYPES=$ENABLED_FILE_TYPES"
+          echo "LIMIT=$LIMIT"
+          docker run --rm \
+            -v "${{ github.workspace }}/dumps:/usr/src/app/dumps" \
+            -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL,YOHANANOF" \
+            -e ENABLED_FILE_TYPES="$ENABLED_FILE_TYPES" \
+            -e LIMIT="$LIMIT" \
+            erlichsefi/israeli-supermarket-scarpers:latest
       - name: Build payload (REAL stores from STORE files + records) + products_upsert (ALLOWLIST HoHasharon)
         env:
           MAX_RECORDS: ${{ inputs.max_records }}
@@ -42,67 +89,57 @@
               return re.sub(r"\s+"," ",(s or "").strip())
 
           def load_xml_roots(path):
-              lp = path.lower()
+              lp=path.lower()
               if lp.endswith(".zip"):
-                  roots = []
-                  with zipfile.ZipFile(path, "r") as z:
+                  roots=[]
+                  with zipfile.ZipFile(path,"r") as z:
                       for nm in z.namelist():
                           if nm.lower().endswith(".xml"):
                               roots.append(ET.fromstring(z.read(nm)))
                   return roots
               if lp.endswith(".xml.gz") or lp.endswith(".gz"):
-                  with gzip.open(path, "rb") as f:
+                  with gzip.open(path,"rb") as f:
                       return [ET.fromstring(f.read())]
               return [ET.parse(path).getroot()]
 
           def iter_dump_paths():
               for p in glob.glob("dumps/**/*", recursive=True):
-                  if os.path.isfile(p) and p.lower().endswith((".xml", ".gz", ".zip", ".xml.gz")):
+                  if os.path.isfile(p) and p.lower().endswith((".xml",".gz",".zip",".xml.gz")):
                       yield p
 
           def extract_any(elem, keys):
-              keys = {k.lower() for k in keys}
+              keys={k.lower() for k in keys}
               for el in elem.iter():
                   if localname(el.tag).lower() in keys and (el.text or "").strip():
                       return norm(el.text)
               return ""
 
           def canon_id(s: str) -> str:
-              s = (s or "").strip()
+              s=(s or "").strip()
               if re.fullmatch(r"\d+", s or ""):
-                  try:
-                      return str(int(s))
-                  except:
-                      return s
+                  try: return str(int(s))
+                  except: return s
               return s
 
-          CHAINID_TO_RETAILER = {
-              "7290027600007": "ramilevy",
-              "7290058140886": "shufersal",
-          }
+          CHAINID_TO_RETAILER={"7290027600007":"ramilevy","7290058140886":"shufersal"}
 
           def retailer_from(chain_id, chain_name):
-              if (chain_id or "") in CHAINID_TO_RETAILER:
-                  return CHAINID_TO_RETAILER[chain_id]
-              cn = chain_name or ""
-              if "שופרסל" in cn:
-                  return "shufersal"
-              if "רמי" in cn:
-                  return "ramilevy"
-              if "יוחננוף" in cn or "YOHANANOF" in cn.upper():
-                  return "yohananof"
+              if (chain_id or "") in CHAINID_TO_RETAILER: return CHAINID_TO_RETAILER[chain_id]
+              cn=chain_name or ""
+              if "שופרסל" in cn: return "shufersal"
+              if "רמי" in cn: return "ramilevy"
+              if "יוחננוף" in cn or "YOHANANOF" in cn.upper(): return "yohananof"
               return None
 
           def city_from_shuf_name(name: str) -> str:
-              n = norm(name)
-              if not n:
-                  return ""
-              parts = n.split(" ")
-              if len(parts) >= 2:
-                  last2 = " ".join(parts[-2:])
+              n=norm(name)
+              if not n: return ""
+              parts=n.split(" ")
+              if len(parts)>=2:
+                  last2=" ".join(parts[-2:])
                   if re.search(r"[א-ת]", last2):
                       return last2
-              last1 = parts[-1]
+              last1=parts[-1]
               if re.search(r"[א-ת]", last1):
                   return last1
               return ""
@@ -112,35 +149,25 @@
           store_index = {}
 
           for path in iter_dump_paths():
-              try:
-                  roots = load_xml_roots(path)
-              except Exception:
-                  continue
-
+              try: roots=load_xml_roots(path)
+              except Exception: continue
               for root in roots:
-                  if not any(localname(el.tag).lower() == "store" for el in root.iter()):
+                  if not any(localname(el.tag).lower()=="store" for el in root.iter()):
                       continue
-
                   chain_id = extract_any(root, {"chainid"})
                   chain_name = extract_any(root, {"chainname"})
                   retailer = retailer_from(chain_id, chain_name)
-                  if not retailer:
-                      continue
+                  if not retailer: continue
 
                   for el in root.iter():
-                      if localname(el.tag).lower() != "store":
-                          continue
-
+                      if localname(el.tag).lower() != "store": continue
                       sid_raw = extract_any(el, {"storeid"}).strip()
-                      if not sid_raw:
-                          continue
+                      if not sid_raw: continue
 
                       sid_can = canon_id(sid_raw)
                       name = extract_any(el, {"storename"}) or ""
                       address = extract_any(el, {"address"}) or ""
-                      if address.lower() == "unknown":
-                          address = ""
-
+                      if address.lower() == "unknown": address = ""
                       city = extract_any(el, {"city"}) or ""
                       if (not city) or city.lower() == "unknown" or re.fullmatch(r"\d+", city or ""):
                           city = ""
@@ -151,16 +178,8 @@
                       if store_key not in ALLOWED_STORE_KEYS:
                           continue
 
-                      obj = {
-                          "retailer": retailer,
-                          "store_id": sid_raw,
-                          "store_key": store_key,
-                          "store_name": name,
-                          "city": city,
-                          "address": address,
-                          "area": "",
-                          "store_type": "",
-                      }
+                      obj = {"retailer": retailer,"store_id": sid_raw,"store_key": store_key,
+                             "store_name": name,"city": city,"address": address,"area": "","store_type": ""}
                       store_dict[store_key] = obj
                       store_index[(retailer, sid_can)] = store_key
 
@@ -168,57 +187,47 @@
               raise SystemExit("No STORE records matched ALLOWLIST. Aborting.")
 
           # ---- records from PRICE files (רק סניפים שב-ALLOWLIST) ----
-          BARCODE_KEYS = {"itemcode", "barcode", "gtin", "ean", "code", "itemid", "itemnumber"}
-          NAME_KEYS    = {"itemname", "itemdescription", "productname", "description", "name"}
-          PRICE_KEYS   = {"itemprice", "price", "unitprice", "saleprice", "priceafterdiscount", "priceinclvat"}
+          BARCODE_KEYS={"itemcode","barcode","gtin","ean","code","itemid","itemnumber"}
+          NAME_KEYS={"itemname","itemdescription","productname","description","name"}
+          PRICE_KEYS={"itemprice","price","unitprice","saleprice","priceafterdiscount","priceinclvat"}
 
           def extract_barcode(node):
               bc = extract_any(node, BARCODE_KEYS).strip()
-              if bc:
-                  return bc
+              if bc: return bc
               for el in node.iter():
-                  for k, v in (el.attrib or {}).items():
-                      kk = str(k).lower()
-                      if any(x in kk for x in ["barcode", "gtin", "itemcode", "ean", "code"]):
-                          vv = (v or "").strip()
-                          if vv:
-                              return norm(vv)
+                  for k,v in (el.attrib or {}).items():
+                      kk=str(k).lower()
+                      if any(x in kk for x in ["barcode","gtin","itemcode","ean","code"]):
+                          vv=(v or "").strip()
+                          if vv: return norm(vv)
               return ""
 
           def safe_float(x):
-              x = (x or "").strip().replace(",", ".")
+              x=(x or "").strip().replace(",", ".")
               try:
-                  v = float(x)
-                  return v if v >= 0 else None
-              except:
-                  return None
+                  v=float(x); return v if v>=0 else None
+              except: return None
 
           dedup = {}
           barcode_to_name = {}
           stores_used = []
 
           for path in iter_dump_paths():
-              base = os.path.basename(path).lower()
-              if base.startswith("stores"):
-                  continue
-
-              try:
-                  roots = load_xml_roots(path)
-              except Exception:
-                  continue
+              base=os.path.basename(path).lower()
+              if base.startswith("stores"): continue
+              try: roots=load_xml_roots(path)
+              except Exception: continue
 
               for root in roots:
-                  chain_id = extract_any(root, {"chainid"})
-                  chain_name = extract_any(root, {"chainname"})
+                  chain_id=extract_any(root, {"chainid"})
+                  chain_name=extract_any(root, {"chainname"})
                   store_id_raw = extract_any(root, {"storeid"}).strip()
-                  retailer = retailer_from(chain_id, chain_name)
-                  if not retailer or not store_id_raw:
-                      continue
+                  retailer=retailer_from(chain_id, chain_name)
+                  if not retailer or not store_id_raw: continue
 
                   sk_raw = f"{retailer}:{store_id_raw}"
                   sk_can = store_index.get((retailer, canon_id(store_id_raw)))
                   store_key = sk_raw if sk_raw in store_dict else sk_can
-
                   if not store_key or store_key not in ALLOWED_STORE_KEYS:
                       continue
 
@@ -226,38 +235,22 @@
                   updated_at = now_z()
 
                   for node in root.iter():
-                      if localname(node.tag).lower() not in {"item", "product"}:
-                          continue
-
+                      if localname(node.tag).lower() not in {"item","product"}: continue
                       bc = extract_barcode(node)
-                      if not bc:
-                          continue
-
+                      if not bc: continue
                       nm = extract_any(node, NAME_KEYS).strip()
                       if bc not in barcode_to_name and nm:
-                          barcode_to_name[bc] = nm
-
+                          barcode_to_name[bc]=nm
                       pv = safe_float(extract_any(node, PRICE_KEYS))
-                      if pv is None:
-                          continue
+                      if pv is None: continue
 
                       price_key = f"{bc}:{store_key}"
-                      dedup[price_key] = {
-                          "price_key": price_key,
-                          "barcode": bc,
-                          "store_key": store_key,
-                          "price": pv,
-                          "updated_at": updated_at,
-                      }
+                      dedup[price_key] = {"price_key": price_key,"barcode": bc,"store_key": store_key,
+                                          "price": pv,"updated_at": updated_at}
 
-                      if len(dedup) >= MAX_RECORDS_TOTAL:
-                          break
-
-                  if len(dedup) >= MAX_RECORDS_TOTAL:
-                      break
-
-              if len(dedup) >= MAX_RECORDS_TOTAL:
-                  break
+                      if len(dedup) >= MAX_RECORDS_TOTAL: break
+                  if len(dedup) >= MAX_RECORDS_TOTAL: break
+              if len(dedup) >= MAX_RECORDS_TOTAL: break
 
           if not stores_used:
               raise SystemExit("No PRICE data matched ALLOWLIST stores. Aborting.")
@@ -266,19 +259,17 @@
 
           records = list(dedup.values())
 
-          chosen_keys = []
-          seen = set()
+          chosen_keys=[]
+          seen=set()
           for sk in stores_used:
               if sk in store_dict and sk not in seen:
-                  seen.add(sk)
-                  chosen_keys.append(sk)
-              if len(chosen_keys) >= MAX_STORES_TOTAL:
-                  break
+                  seen.add(sk); chosen_keys.append(sk)
+              if len(chosen_keys) >= MAX_STORES_TOTAL: break
 
           if not chosen_keys:
               raise SystemExit("No chosen stores after filtering. Aborting.")
 
-          chosen_set = set(chosen_keys)
+          chosen_set=set(chosen_keys)
           records = [r for r in records if r["store_key"] in chosen_set]
           stores = [store_dict[sk] for sk in chosen_keys]
 
@@ -286,15 +277,49 @@
           products_upsert = [{"barcode": bc, "name": (barcode_to_name.get(bc) or "")} for bc in used_barcodes]
 
           os.makedirs("out", exist_ok=True)
-          with open("out/products_upsert.json", "w", encoding="utf-8") as f:
+          with open("out/products_upsert.json","w",encoding="utf-8") as f:
               json.dump(products_upsert, f, ensure_ascii=False)
 
-          payload = {
-              "source": "collector_routeA_allowlist_hohasharon",
-              "generated_at": now_z(),
-              "stores": stores,
-              "records": records,
-          }
-          with open("out/payload.json", "w", encoding="utf-8") as f:
+          payload = {"source": "collector_routeA_allowlist_hohasharon","generated_at": now_z(),"stores": stores,"records": records}
+          with open("out/payload.json","w",encoding="utf-8") as f:
               json.dump(payload, f, ensure_ascii=False)
           PY
+      - name: Upsert products to Supabase (ensure barcode FK)
+        if: ${{ inputs.send_to_make == 'true' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
+        run: |
+          set -euo pipefail
+          test -f out/products_upsert.json
+          curl -sS -X POST "${SUPABASE_URL}/rest/v1/products?on_conflict=barcode" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: resolution=merge-duplicates,return=minimal" \
+            -H "apikey: ${SUPABASE_SERVICE_ROLE_JWT}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_JWT}" \
+            --data-binary @out/products_upsert.json
+
+      - name: POST payload to Make (ONE POST)
+        if: ${{ inputs.send_to_make == 'true' }}
+        env:
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+          MAKE_APIKEY: ${{ secrets.MAKE_APIKEY }}
+        run: |
+          set -euo pipefail
+          test -f out/payload.json
+          python3 - <<'PY'
+          import json
+          p=json.load(open("out/payload.json","r",encoding="utf-8"))
+          if len(p.get("stores") or []) < 1: raise SystemExit("ABORT: stores empty")
+          if len(p.get("records") or []) < 2: raise SystemExit("ABORT: records<2")
+          PY
+          curl -sS -X POST "$MAKE_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-make-apikey: $MAKE_APIKEY" \
+            --data-binary @out/payload.json
+
+      - name: Upload artifacts (out/)
+        uses: actions/upload-artifact@v4
+        with:
+          name: glutiwise-out
+          path: out/
