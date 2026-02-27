@@ -45,7 +45,7 @@ jobs:
             -e ENABLED_FILE_TYPES="$ENABLED_FILE_TYPES" \
             -e LIMIT="$LIMIT" \
             erlichsefi/israeli-supermarket-scarpers:latest
-      - name: Build payload (REAL stores from STORE files + records) + products_upsert (ALLOWLIST HoHasharon)
+          - name: Build payload (REAL stores from STORE files + records) + products_upsert (ALLOWLIST HoHasharon, PER-STORE CAP)
         env:
           MAX_RECORDS: ${{ inputs.max_records }}
           MAX_STORES: ${{ inputs.max_stores }}
@@ -59,7 +59,10 @@ jobs:
           MAX_RECORDS_TOTAL = int(os.environ.get("MAX_RECORDS","3000"))
           MAX_STORES_TOTAL  = int(os.environ.get("MAX_STORES","30"))
 
-          # ALLOWLIST (לפי הסניפים שמופיעים בצילום שסיפקת)
+          # פיזור רשומות בין סניפים (כדי שלא ניתקע על סניף אחד)
+          MAX_PER_STORE = max(200, MAX_RECORDS_TOTAL // 4)  # ברירת מחדל: ~750 כש-MAX_RECORDS_TOTAL=3000
+
+          # ALLOWLIST (לפי הסניפים שצילמת)
           ALLOWED_STORE_KEYS = {
               "ramilevy:43",
               "shufersal:714",
@@ -121,6 +124,11 @@ jobs:
                   except: return s
               return s
 
+          # שמירה על חוקי ה-DB: min_len=8, max_len=13 (לא להחזיר ברקודים קצרים)
+          def valid_barcode(bc: str) -> bool:
+              bc = (bc or "").strip()
+              return bool(re.fullmatch(r"\d{8,13}", bc))
+
           CHAINID_TO_RETAILER={"7290027600007":"ramilevy","7290058140886":"shufersal"}
 
           def retailer_from(chain_id, chain_name):
@@ -144,7 +152,7 @@ jobs:
                   return last1
               return ""
 
-          # ---- stores from STORE files (רק סניפים שב-ALLOWLIST) ----
+          # ---- stores from STORE files (רק allowlist) ----
           store_dict = {}
           store_index = {}
 
@@ -165,6 +173,10 @@ jobs:
                       if not sid_raw: continue
 
                       sid_can = canon_id(sid_raw)
+                      store_key = f"{retailer}:{sid_raw}"
+                      if store_key not in ALLOWED_STORE_KEYS:
+                          continue
+
                       name = extract_any(el, {"storename"}) or ""
                       address = extract_any(el, {"address"}) or ""
                       if address.lower() == "unknown": address = ""
@@ -174,19 +186,22 @@ jobs:
                       if retailer == "shufersal" and not city:
                           city = city_from_shuf_name(name)
 
-                      store_key = f"{retailer}:{sid_raw}"
-                      if store_key not in ALLOWED_STORE_KEYS:
-                          continue
-
-                      obj = {"retailer": retailer,"store_id": sid_raw,"store_key": store_key,
-                             "store_name": name,"city": city,"address": address,"area": "","store_type": ""}
-                      store_dict[store_key] = obj
+                      store_dict[store_key] = {
+                          "retailer": retailer,
+                          "store_id": sid_raw,
+                          "store_key": store_key,
+                          "store_name": name,
+                          "city": city,
+                          "address": address,
+                          "area": "",
+                          "store_type": "",
+                      }
                       store_index[(retailer, sid_can)] = store_key
 
           if not store_dict:
               raise SystemExit("No STORE records matched ALLOWLIST. Aborting.")
 
-          # ---- records from PRICE files (רק סניפים שב-ALLOWLIST) ----
+          # ---- records from PRICE files (פיזור פר-סניף) ----
           BARCODE_KEYS={"itemcode","barcode","gtin","ean","code","itemid","itemnumber"}
           NAME_KEYS={"itemname","itemdescription","productname","description","name"}
           PRICE_KEYS={"itemprice","price","unitprice","saleprice","priceafterdiscount","priceinclvat"}
@@ -210,20 +225,26 @@ jobs:
 
           dedup = {}
           barcode_to_name = {}
-          stores_used = []
+          per_store_count = {}
 
+          stop = False
           for path in iter_dump_paths():
+              if stop: break
               base=os.path.basename(path).lower()
-              if base.startswith("stores"): continue
+              if base.startswith("stores"): 
+                  continue
               try: roots=load_xml_roots(path)
-              except Exception: continue
+              except Exception: 
+                  continue
 
               for root in roots:
+                  if stop: break
                   chain_id=extract_any(root, {"chainid"})
                   chain_name=extract_any(root, {"chainname"})
                   store_id_raw = extract_any(root, {"storeid"}).strip()
                   retailer=retailer_from(chain_id, chain_name)
-                  if not retailer or not store_id_raw: continue
+                  if not retailer or not store_id_raw: 
+                      continue
 
                   sk_raw = f"{retailer}:{store_id_raw}"
                   sk_can = store_index.get((retailer, canon_id(store_id_raw)))
@@ -231,47 +252,57 @@ jobs:
                   if not store_key or store_key not in ALLOWED_STORE_KEYS:
                       continue
 
-                  stores_used.append(store_key)
+                  # אם כבר מילאנו מספיק לסניף הזה - ממשיכים הלאה כדי לאסוף מסניפים נוספים
+                  if per_store_count.get(store_key, 0) >= MAX_PER_STORE:
+                      continue
+
                   updated_at = now_z()
 
                   for node in root.iter():
-                      if localname(node.tag).lower() not in {"item","product"}: continue
+                      if localname(node.tag).lower() not in {"item","product"}: 
+                          continue
+
                       bc = extract_barcode(node)
-                      if not bc: continue
+                      if not valid_barcode(bc):
+                          continue
+
+                      # שוב: אם הגענו לתקרה לסניף הזה תוך כדי קובץ, מפסיקים לאסוף ממנו
+                      if per_store_count.get(store_key, 0) >= MAX_PER_STORE:
+                          break
+
+                      pv = safe_float(extract_any(node, PRICE_KEYS))
+                      if pv is None: 
+                          continue
+
                       nm = extract_any(node, NAME_KEYS).strip()
                       if bc not in barcode_to_name and nm:
                           barcode_to_name[bc]=nm
-                      pv = safe_float(extract_any(node, PRICE_KEYS))
-                      if pv is None: continue
 
                       price_key = f"{bc}:{store_key}"
-                      dedup[price_key] = {"price_key": price_key,"barcode": bc,"store_key": store_key,
-                                          "price": pv,"updated_at": updated_at}
+                      if price_key not in dedup:
+                          dedup[price_key] = {
+                              "price_key": price_key,
+                              "barcode": bc,
+                              "store_key": store_key,
+                              "price": pv,
+                              "updated_at": updated_at,
+                          }
+                          per_store_count[store_key] = per_store_count.get(store_key, 0) + 1
 
-                      if len(dedup) >= MAX_RECORDS_TOTAL: break
-                  if len(dedup) >= MAX_RECORDS_TOTAL: break
-              if len(dedup) >= MAX_RECORDS_TOTAL: break
+                          if len(dedup) >= MAX_RECORDS_TOTAL:
+                              stop = True
+                              break
 
-          if not stores_used:
-              raise SystemExit("No PRICE data matched ALLOWLIST stores. Aborting.")
           if not dedup:
               raise SystemExit("No PRICE records produced after filtering. Aborting.")
 
-          records = list(dedup.values())
+          # בוחרים רק סניפים שבאמת יש להם רשומות (עד MAX_STORES_TOTAL)
+          store_keys_with_records = sorted(per_store_count.keys(), key=lambda k: (-per_store_count[k], k))
+          chosen_keys = store_keys_with_records[:MAX_STORES_TOTAL]
+          chosen_set = set(chosen_keys)
 
-          chosen_keys=[]
-          seen=set()
-          for sk in stores_used:
-              if sk in store_dict and sk not in seen:
-                  seen.add(sk); chosen_keys.append(sk)
-              if len(chosen_keys) >= MAX_STORES_TOTAL: break
-
-          if not chosen_keys:
-              raise SystemExit("No chosen stores after filtering. Aborting.")
-
-          chosen_set=set(chosen_keys)
-          records = [r for r in records if r["store_key"] in chosen_set]
-          stores = [store_dict[sk] for sk in chosen_keys]
+          records = [r for r in dedup.values() if r["store_key"] in chosen_set]
+          stores  = [store_dict[sk] for sk in chosen_keys]
 
           used_barcodes = sorted(set(r["barcode"] for r in records))
           products_upsert = [{"barcode": bc, "name": (barcode_to_name.get(bc) or "")} for bc in used_barcodes]
@@ -280,25 +311,15 @@ jobs:
           with open("out/products_upsert.json","w",encoding="utf-8") as f:
               json.dump(products_upsert, f, ensure_ascii=False)
 
-          payload = {"source": "collector_routeA_allowlist_hohasharon","generated_at": now_z(),"stores": stores,"records": records}
+          payload = {
+              "source": "collector_routeA_allowlist_hohasharon_per_store_cap",
+              "generated_at": now_z(),
+              "stores": stores,
+              "records": records,
+          }
           with open("out/payload.json","w",encoding="utf-8") as f:
               json.dump(payload, f, ensure_ascii=False)
           PY
-      - name: Upsert products to Supabase (ensure barcode FK)
-        if: ${{ inputs.send_to_make == 'true' }}
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
-        run: |
-          set -euo pipefail
-          test -f out/products_upsert.json
-          curl -sS -X POST "${SUPABASE_URL}/rest/v1/products?on_conflict=barcode" \
-            -H "Content-Type: application/json" \
-            -H "Prefer: resolution=merge-duplicates,return=minimal" \
-            -H "apikey: ${SUPABASE_SERVICE_ROLE_JWT}" \
-            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_JWT}" \
-            --data-binary @out/products_upsert.json
-
       - name: POST payload to Make (ONE POST)
         if: ${{ inputs.send_to_make == 'true' }}
         env:
