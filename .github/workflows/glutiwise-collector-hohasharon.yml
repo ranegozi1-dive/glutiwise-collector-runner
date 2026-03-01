@@ -44,7 +44,7 @@ jobs:
             -e LIMIT="$LIMIT" \
             erlichsefi/israeli-supermarket-scarpers:latest
 
-      - name: Build payload (REAL stores + records) + products_upsert (ALLOWLIST HoHasharon, PER-STORE CAP)
+      - name: Build payload (REAL stores + records) + products_upsert (ALLOWLIST HoHasharon + Yohananof, ROBUST MAP)
         env:
           MAX_RECORDS: ${{ inputs.max_records }}
           MAX_STORES: ${{ inputs.max_stores }}
@@ -54,36 +54,20 @@ jobs:
           import os, re, json, glob, gzip, zipfile
           import xml.etree.ElementTree as ET
           from datetime import datetime, timezone
+          from collections import defaultdict
 
-          MAX_RECORDS_TOTAL = int(os.environ.get("MAX_RECORDS","3000"))
+          MAX_RECORDS_TOTAL = int(os.environ.get("MAX_RECORDS","30000"))
           MAX_STORES_TOTAL  = int(os.environ.get("MAX_STORES","30"))
 
+          # Allowlist (כולל יוחננוף)
           ALLOWED_STORE_KEYS = {
-              "ramilevy:43",
-              "shufersal:714",
-              "ramilevy:51",
-              "ramilevy:374",
-              "ramilevy:615",
-              "ramilevy:171",
-              "shufersal:033",
-              "shufersal:719",
-              "shufersal:034",
-              "shufersal:724",
-              "shufersal:726",
-              "shufersal:725",
-              "ramilevy:244",
-              "ramilevy:57",
-              "ramilevy:27",
-              "shufersal:046",
-              "yohananof:032",
-              "yohananof:024",
-              "yohananof:021",
-              "yohananof:026",
-              "yohananof:053",
-              "yohananof:035",
+              "ramilevy:43","shufersal:714","ramilevy:51","ramilevy:374","ramilevy:615","ramilevy:171",
+              "shufersal:033","shufersal:719","shufersal:034","shufersal:724","shufersal:726","shufersal:725",
+              "ramilevy:244","ramilevy:57","ramilevy:27","shufersal:046",
+              "yohananof:032","yohananof:024","yohananof:021","yohananof:026","yohananof:053","yohananof:035",
           }
 
-          # פיזור records בין כל הסניפים ב-allowlist (כדי שלא ניתקע על 1–4 סניפים)
+          # פיזור records בין כל הסניפים (כדי לא להיתקע על 1–2 סניפים)
           MAX_PER_STORE = max(50, MAX_RECORDS_TOTAL // max(1, min(MAX_STORES_TOTAL, len(ALLOWED_STORE_KEYS))))
 
           def now_z():
@@ -128,14 +112,30 @@ jobs:
                   except: return s
               return s
 
-          # חוק DB: min_len=8, max_len=13 (לא להחזיר ברקודים קצרים)
           def valid_barcode(bc: str) -> bool:
               return bool(re.fullmatch(r"\d{8,13}", (bc or "").strip()))
 
-          CHAINID_TO_RETAILER={"7290027600007":"ramilevy","7290058140886":"shufersal"}
+          # --- אינדקס מה-ALLOWLIST בלבד (לא תלוי בקבצי STORE) ---
+          allow_index = defaultdict(set)  # (retailer, canon_store_id) -> {store_key,...}
+          allow_index_any = defaultdict(set)  # canon_store_id -> {store_key,...}
+          for sk in ALLOWED_STORE_KEYS:
+              if ":" not in sk:
+                  continue
+              r, sid = sk.split(":", 1)
+              c = canon_id(sid)
+              allow_index[(r, c)].add(sk)
+              allow_index_any[c].add(sk)
+
+          # מיפוי ChainID -> retailer (רק כשיש ודאות)
+          CHAINID_TO_RETAILER={
+              "7290027600007":"ramilevy",
+              "7290058140886":"shufersal",
+              "7290803800003":"yohananof",  # לפי מה שפתחת בפורטל
+          }
 
           def retailer_from(chain_id, chain_name):
-              if (chain_id or "") in CHAINID_TO_RETAILER: return CHAINID_TO_RETAILER[chain_id]
+              if (chain_id or "") in CHAINID_TO_RETAILER:
+                  return CHAINID_TO_RETAILER[chain_id]
               cn=chain_name or ""
               if "שופרסל" in cn: return "shufersal"
               if "רמי" in cn: return "ramilevy"
@@ -155,10 +155,8 @@ jobs:
                   return last1
               return ""
 
-          # ---- stores from STORE files (רק allowlist) ----
-          store_dict = {}
-          store_index = {}
-
+          # ---- stores from STORE files (רק אמיתי; לא ממציאים) ----
+          store_dict = {}  # store_key -> store obj (רק אם נמצא ב-STORE)
           for path in iter_dump_paths():
               try: roots=load_xml_roots(path)
               except Exception: continue
@@ -168,16 +166,23 @@ jobs:
                   chain_id = extract_any(root, {"chainid"})
                   chain_name = extract_any(root, {"chainname"})
                   retailer = retailer_from(chain_id, chain_name)
-                  if not retailer: continue
-
+                  if not retailer:
+                      continue
                   for el in root.iter():
-                      if localname(el.tag).lower() != "store": continue
+                      if localname(el.tag).lower() != "store":
+                          continue
                       sid_raw = extract_any(el, {"storeid"}).strip()
-                      if not sid_raw: continue
-
-                      sid_can = canon_id(sid_raw)
-                      store_key = f"{retailer}:{sid_raw}"
-                      if store_key not in ALLOWED_STORE_KEYS:
+                      if not sid_raw:
+                          continue
+                      sk = f"{retailer}:{sid_raw}"
+                      # אם יש הבדל אפסים מובילים, נשתמש באינדקס allowlist כדי להגיע ל-store_key המדויק
+                      cand = allow_index.get((retailer, canon_id(sid_raw)), set())
+                      if sk not in ALLOWED_STORE_KEYS:
+                          if len(cand) == 1:
+                              sk = next(iter(cand))
+                          else:
+                              continue
+                      if sk not in ALLOWED_STORE_KEYS:
                           continue
 
                       name = extract_any(el, {"storename"}) or ""
@@ -189,22 +194,18 @@ jobs:
                       if retailer == "shufersal" and not city:
                           city = city_from_shuf_name(name)
 
-                      store_dict[store_key] = {
+                      store_dict[sk] = {
                           "retailer": retailer,
                           "store_id": sid_raw,
-                          "store_key": store_key,
+                          "store_key": sk,
                           "store_name": name,
                           "city": city,
                           "address": address,
                           "area": "",
                           "store_type": "",
                       }
-                      store_index[(retailer, sid_can)] = store_key
 
-          if not store_dict:
-              raise SystemExit("No STORE records matched ALLOWLIST. Aborting.")
-
-          # ---- records from PRICE files (per-store cap) ----
+          # ---- records from PRICE files ----
           BARCODE_KEYS={"itemcode","barcode","gtin","ean","code","itemid","itemnumber"}
           NAME_KEYS={"itemname","itemdescription","productname","description","name"}
           PRICE_KEYS={"itemprice","price","unitprice","saleprice","priceafterdiscount","priceinclvat"}
@@ -228,16 +229,35 @@ jobs:
 
           dedup = {}
           barcode_to_name = {}
-          per_store_count = {}
+          per_store_count = defaultdict(int)
+          unknown_chain_ids = defaultdict(int)
+
+          def pick_store_key(chain_id, chain_name, store_id_raw):
+              """לא מנחש:
+              - אם מזהים retailer בוודאות -> נבחר לפי (retailer, canon_id(store_id)) אם יש בדיוק 1 התאמה ב-allowlist
+              - אחרת -> נבחר רק אם יש בדיוק 1 התאמה לכל הריטיילרים יחד לפי canon_id(store_id)
+              """
+              rid = canon_id(store_id_raw)
+              retailer = retailer_from(chain_id, chain_name)
+              if retailer:
+                  cands = allow_index.get((retailer, rid), set())
+                  if len(cands) == 1:
+                      return next(iter(cands))
+                  return None
+              # לא הצלחנו לזהות retailer: נבחר רק אם חד-משמעי בכל ה-allowlist
+              cands_any = allow_index_any.get(rid, set())
+              if len(cands_any) == 1:
+                  return next(iter(cands_any))
+              return None
 
           stop = False
           for path in iter_dump_paths():
               if stop: break
               base=os.path.basename(path).lower()
-              if base.startswith("stores"): 
+              if base.startswith("stores"):
                   continue
               try: roots=load_xml_roots(path)
-              except Exception: 
+              except Exception:
                   continue
 
               for root in roots:
@@ -245,53 +265,49 @@ jobs:
                   chain_id=extract_any(root, {"chainid"})
                   chain_name=extract_any(root, {"chainname"})
                   store_id_raw = extract_any(root, {"storeid"}).strip()
-                  retailer=retailer_from(chain_id, chain_name)
-                  if not retailer or not store_id_raw: 
+                  if not store_id_raw:
                       continue
 
-                  sk_raw = f"{retailer}:{store_id_raw}"
-                  sk_can = store_index.get((retailer, canon_id(store_id_raw)))
-                  store_key = sk_raw if sk_raw in store_dict else sk_can
-                  if not store_key:
-                      continue
-                  if store_key not in ALLOWED_STORE_KEYS:
+                  sk = pick_store_key(chain_id, chain_name, store_id_raw)
+                  if not sk:
+                      if chain_id:
+                          unknown_chain_ids[chain_id] += 1
                       continue
 
-                  if per_store_count.get(store_key, 0) >= MAX_PER_STORE:
+                  if per_store_count[sk] >= MAX_PER_STORE:
                       continue
 
                   updated_at = now_z()
 
                   for node in root.iter():
-                      if localname(node.tag).lower() not in {"item","product"}: 
+                      if localname(node.tag).lower() not in {"item","product"}:
                           continue
 
                       bc = extract_barcode(node)
                       if not valid_barcode(bc):
                           continue
 
-                      if per_store_count.get(store_key, 0) >= MAX_PER_STORE:
+                      if per_store_count[sk] >= MAX_PER_STORE:
                           break
 
                       pv = safe_float(extract_any(node, PRICE_KEYS))
-                      if pv is None: 
+                      if pv is None:
                           continue
 
                       nm = extract_any(node, NAME_KEYS).strip()
                       if bc not in barcode_to_name and nm:
                           barcode_to_name[bc]=nm
 
-                      price_key = f"{bc}:{store_key}"
+                      price_key = f"{bc}:{sk}"
                       if price_key not in dedup:
                           dedup[price_key] = {
                               "price_key": price_key,
                               "barcode": bc,
-                              "store_key": store_key,
+                              "store_key": sk,
                               "price": pv,
                               "updated_at": updated_at,
                           }
-                          per_store_count[store_key] = per_store_count.get(store_key, 0) + 1
-
+                          per_store_count[sk] += 1
                           if len(dedup) >= MAX_RECORDS_TOTAL:
                               stop = True
                               break
@@ -304,7 +320,10 @@ jobs:
           chosen_set = set(chosen_keys)
 
           records = [r for r in dedup.values() if r["store_key"] in chosen_set]
-          stores  = [store_dict[sk] for sk in chosen_keys]
+
+          # stores שולחים רק אם יש לנו נתוני STORE אמיתיים (לא ממציאים).
+          # זה בסדר: אם stores כבר קיימים ב-DB, FK יעבור גם בלי upsert שלהם.
+          stores = [store_dict[sk] for sk in chosen_keys if sk in store_dict]
 
           used_barcodes = sorted(set(r["barcode"] for r in records))
           products_upsert = [{"barcode": bc, "name": (barcode_to_name.get(bc) or "")} for bc in used_barcodes]
@@ -313,11 +332,25 @@ jobs:
           with open("out/products_upsert.json","w",encoding="utf-8") as f:
               json.dump(products_upsert, f, ensure_ascii=False)
 
-          payload = {"source": "collector_routeA_allowlist_hohasharon_per_store_cap","generated_at": now_z(),"stores": stores,"records": records}
+          payload = {
+              "source": "collector_routeA_allowlist_hahasharon_plus_yohananof_robust",
+              "generated_at": now_z(),
+              "stores": stores,
+              "records": records,
+          }
           with open("out/payload.json","w",encoding="utf-8") as f:
               json.dump(payload, f, ensure_ascii=False)
-          PY
 
+          # תקציר ללוג (לא משנה DB/Make, רק עוזר לאבחון בלי עוד הרצות)
+          by_retailer = defaultdict(int)
+          for sk in chosen_keys:
+              by_retailer[sk.split(":",1)[0]] += 1
+          print("SUMMARY chosen_stores=", len(chosen_keys), "records=", len(records), "MAX_PER_STORE=", MAX_PER_STORE)
+          print("SUMMARY stores_by_retailer=", dict(sorted(by_retailer.items())))
+          if unknown_chain_ids:
+              top = sorted(unknown_chain_ids.items(), key=lambda x: -x[1])[:10]
+              print("SUMMARY unknown_chain_ids(top10)=", top)
+          PY
       - name: Upsert products to Supabase (ensure barcode FK)
         if: ${{ inputs.send_to_make == 'true' }}
         env:
