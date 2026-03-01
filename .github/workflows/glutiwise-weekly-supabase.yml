@@ -51,7 +51,7 @@ jobs:
             -e LIMIT="$LIMIT" \
             erlichsefi/israeli-supermarket-scarpers:latest
 
-      - name: Build payload (ALLOWLIST) + products/stores/records json (keys uniform)
+      - name: Build payload (ALLOWLIST) + products/stores/records json (keys uniform) [ROBUST BARCODE]
         env:
           MAX_RECORDS: ${{ env.MAX_RECORDS }}
           MAX_STORES: ${{ env.MAX_STORES }}
@@ -73,7 +73,7 @@ jobs:
               "yohananof:032","yohananof:024","yohananof:021","yohananof:026","yohananof:053","yohananof:035",
           }
 
-          # לא “חונקים” סניף אחד: תקרה פר-סניף נגזרת מהתקציב הכולל
+          # תקרה פר-סניף נגזרת מהתקציב הכולל
           MAX_PER_STORE = max(5000, MAX_RECORDS_TOTAL // max(1, len(ALLOWED_STORE_KEYS)))
 
           def now_z():
@@ -81,12 +81,14 @@ jobs:
 
           def localname(tag): return tag.split("}")[-1] if "}" in tag else tag
           def norm(s): return re.sub(r"\s+"," ",(s or "").strip())
+
           def canon_id(s: str) -> str:
               s=(s or "").strip()
               if re.fullmatch(r"\d+", s or ""):
                   try: return str(int(s))
                   except: return s
               return s
+
           def valid_barcode(bc: str) -> bool:
               return bool(re.fullmatch(r"\d{8,13}", (bc or "").strip()))
 
@@ -130,6 +132,7 @@ jobs:
               "7290058140886":"shufersal",
               "7290803800003":"yohananof",
           }
+
           def retailer_from(chain_id, chain_name):
               if (chain_id or "") in CHAINID_TO_RETAILER:
                   return CHAINID_TO_RETAILER[chain_id]
@@ -154,6 +157,38 @@ jobs:
               n = (name or "").strip()
               nl = n.lower()
               return ("ללא גלוטן" in n) or ("gluten free" in nl) or ("gluten-free" in nl)
+
+          # ✅ חילוץ ברקוד “חסין”: מנסה כמה שדות לפי עדיפות, ומחזיר הראשון שעובר 8–13 ספרות
+          def extract_barcode(node):
+              BARCODE_KEYS_ORDER = ["barcode", "gtin", "ean", "itemcode", "itemid", "itemnumber", "code"]
+              keys_set = set(BARCODE_KEYS_ORDER)
+
+              def digits_only(s: str) -> str:
+                  return re.sub(r"\D", "", (s or ""))
+
+              found = {k: [] for k in BARCODE_KEYS_ORDER}
+              found["attr"] = []
+
+              for el in node.iter():
+                  t = localname(el.tag).lower()
+                  if t in keys_set:
+                      v = (el.text or "").strip()
+                      if v:
+                          found[t].append(digits_only(norm(v)))
+
+              for el in node.iter():
+                  for k, v in (el.attrib or {}).items():
+                      kk = str(k).lower()
+                      if any(x in kk for x in ["barcode", "gtin", "ean", "itemcode", "code"]):
+                          vv = (v or "").strip()
+                          if vv:
+                              found["attr"].append(digits_only(norm(vv)))
+
+              for k in BARCODE_KEYS_ORDER + ["attr"]:
+                  for cand in found.get(k, []):
+                      if valid_barcode(cand):
+                          return cand
+              return ""
 
           # stores אמיתיים רק מקבצי STORE
           store_dict = {}
@@ -206,21 +241,8 @@ jobs:
                           "store_type": "",
                       }
 
-          # PRICE
-          BARCODE_KEYS={"itemcode","barcode","gtin","ean","code","itemid","itemnumber"}
-          NAME_KEYS={"itemname","itemdescription","productname","description","name"}
           PRICE_KEYS={"itemprice","price","unitprice","saleprice","priceafterdiscount","priceinclvat"}
-
-          def extract_barcode(node):
-              bc = extract_any(node, BARCODE_KEYS).strip()
-              if bc: return bc
-              for el in node.iter():
-                  for k,v in (el.attrib or {}).items():
-                      kk=str(k).lower()
-                      if any(x in kk for x in ["barcode","gtin","itemcode","ean","code"]):
-                          vv=(v or "").strip()
-                          if vv: return norm(vv)
-              return ""
+          NAME_KEYS={"itemname","itemdescription","productname","description","name"}
 
           def safe_float(x):
               x=(x or "").strip().replace(",", ".")
@@ -259,9 +281,11 @@ jobs:
                   for node in root.iter():
                       if localname(node.tag).lower() not in {"item","product"}:
                           continue
+
                       bc = extract_barcode(node)
-                      if not valid_barcode(bc):
+                      if not bc:
                           continue
+
                       pv = safe_float(extract_any(node, PRICE_KEYS))
                       if pv is None:
                           continue
@@ -290,7 +314,6 @@ jobs:
           if not dedup:
               raise SystemExit("No PRICE records produced after filtering. Aborting.")
 
-          # בוחרים רק סניפים שיש להם records בפועל
           stores_with_records = sorted(per_store_count.keys(), key=lambda k: (-per_store_count[k], k))
           chosen_keys = stores_with_records[:MAX_STORES_TOTAL]
           chosen_set = set(chosen_keys)
@@ -299,7 +322,6 @@ jobs:
           stores  = [store_dict[sk] for sk in chosen_keys if sk in store_dict]
           used_barcodes = sorted(set(r["barcode"] for r in records))
 
-          # ✅ מפתחות אחידים לכל האובייקטים (מונע PGRST102)
           now = now_z()
           products_upsert = []
           for bc in used_barcodes:
