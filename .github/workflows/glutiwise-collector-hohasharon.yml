@@ -1,4 +1,4 @@
-name: GlutiWise Collector (Repair stores + load prices in ONE run)
+name: GlutiWise Collector (HoHasharon allowlist, per-store cap)
 
 on:
   workflow_dispatch:
@@ -37,15 +37,14 @@ jobs:
           set -euo pipefail
           ENABLED_FILE_TYPES="STORE_FILE,PRICE_FILE,PRICE_FULL_FILE"
           LIMIT="${{ inputs.limit_prices }}"
-          echo "ENABLED_FILE_TYPES=$ENABLED_FILE_TYPES"
-          echo "LIMIT=$LIMIT"
           docker run --rm \
             -v "${{ github.workspace }}/dumps:/usr/src/app/dumps" \
             -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL,YOHANANOF" \
             -e ENABLED_FILE_TYPES="$ENABLED_FILE_TYPES" \
             -e LIMIT="$LIMIT" \
             erlichsefi/israeli-supermarket-scarpers:latest
-          - name: Build payload (REAL stores from STORE files + records) + products_upsert (ALLOWLIST HoHasharon, PER-STORE CAP)
+
+      - name: Build payload (REAL stores + records) + products_upsert (ALLOWLIST HoHasharon, PER-STORE CAP)
         env:
           MAX_RECORDS: ${{ inputs.max_records }}
           MAX_STORES: ${{ inputs.max_stores }}
@@ -59,9 +58,6 @@ jobs:
           MAX_RECORDS_TOTAL = int(os.environ.get("MAX_RECORDS","3000"))
           MAX_STORES_TOTAL  = int(os.environ.get("MAX_STORES","30"))
 
-          # פיזור רשומות בין סניפים (כדי שלא ניתקע על סניף אחד)
-          MAX_PER_STORE = max(50, MAX_RECORDS_TOTAL // max(1, min(MAX_STORES_TOTAL, len(ALLOWED_STORE_KEYS))))
-          # ALLOWLIST (לפי הסניפים שצילמת)
           ALLOWED_STORE_KEYS = {
               "ramilevy:43",
               "shufersal:714",
@@ -80,6 +76,9 @@ jobs:
               "ramilevy:27",
               "shufersal:046",
           }
+
+          # פיזור records בין כל הסניפים ב-allowlist (כדי שלא ניתקע על 1–4 סניפים)
+          MAX_PER_STORE = max(50, MAX_RECORDS_TOTAL // max(1, min(MAX_STORES_TOTAL, len(ALLOWED_STORE_KEYS))))
 
           def now_z():
               return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
@@ -123,10 +122,9 @@ jobs:
                   except: return s
               return s
 
-          # שמירה על חוקי ה-DB: min_len=8, max_len=13 (לא להחזיר ברקודים קצרים)
+          # חוק DB: min_len=8, max_len=13 (לא להחזיר ברקודים קצרים)
           def valid_barcode(bc: str) -> bool:
-              bc = (bc or "").strip()
-              return bool(re.fullmatch(r"\d{8,13}", bc))
+              return bool(re.fullmatch(r"\d{8,13}", (bc or "").strip()))
 
           CHAINID_TO_RETAILER={"7290027600007":"ramilevy","7290058140886":"shufersal"}
 
@@ -200,7 +198,7 @@ jobs:
           if not store_dict:
               raise SystemExit("No STORE records matched ALLOWLIST. Aborting.")
 
-          # ---- records from PRICE files (פיזור פר-סניף) ----
+          # ---- records from PRICE files (per-store cap) ----
           BARCODE_KEYS={"itemcode","barcode","gtin","ean","code","itemid","itemnumber"}
           NAME_KEYS={"itemname","itemdescription","productname","description","name"}
           PRICE_KEYS={"itemprice","price","unitprice","saleprice","priceafterdiscount","priceinclvat"}
@@ -248,10 +246,11 @@ jobs:
                   sk_raw = f"{retailer}:{store_id_raw}"
                   sk_can = store_index.get((retailer, canon_id(store_id_raw)))
                   store_key = sk_raw if sk_raw in store_dict else sk_can
-                  if not store_key or store_key not in ALLOWED_STORE_KEYS:
+                  if not store_key:
+                      continue
+                  if store_key not in ALLOWED_STORE_KEYS:
                       continue
 
-                  # אם כבר מילאנו מספיק לסניף הזה - ממשיכים הלאה כדי לאסוף מסניפים נוספים
                   if per_store_count.get(store_key, 0) >= MAX_PER_STORE:
                       continue
 
@@ -265,7 +264,6 @@ jobs:
                       if not valid_barcode(bc):
                           continue
 
-                      # שוב: אם הגענו לתקרה לסניף הזה תוך כדי קובץ, מפסיקים לאסוף ממנו
                       if per_store_count.get(store_key, 0) >= MAX_PER_STORE:
                           break
 
@@ -295,7 +293,6 @@ jobs:
           if not dedup:
               raise SystemExit("No PRICE records produced after filtering. Aborting.")
 
-          # בוחרים רק סניפים שבאמת יש להם רשומות (עד MAX_STORES_TOTAL)
           store_keys_with_records = sorted(per_store_count.keys(), key=lambda k: (-per_store_count[k], k))
           chosen_keys = store_keys_with_records[:MAX_STORES_TOTAL]
           chosen_set = set(chosen_keys)
@@ -310,15 +307,26 @@ jobs:
           with open("out/products_upsert.json","w",encoding="utf-8") as f:
               json.dump(products_upsert, f, ensure_ascii=False)
 
-          payload = {
-              "source": "collector_routeA_allowlist_hohasharon_per_store_cap",
-              "generated_at": now_z(),
-              "stores": stores,
-              "records": records,
-          }
+          payload = {"source": "collector_routeA_allowlist_hohasharon_per_store_cap","generated_at": now_z(),"stores": stores,"records": records}
           with open("out/payload.json","w",encoding="utf-8") as f:
               json.dump(payload, f, ensure_ascii=False)
           PY
+
+      - name: Upsert products to Supabase (ensure barcode FK)
+        if: ${{ inputs.send_to_make == 'true' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
+        run: |
+          set -euo pipefail
+          test -f out/products_upsert.json
+          curl -sS -X POST "${SUPABASE_URL}/rest/v1/products?on_conflict=barcode" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: resolution=merge-duplicates,return=minimal" \
+            -H "apikey: ${SUPABASE_SERVICE_ROLE_JWT}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_JWT}" \
+            --data-binary @out/products_upsert.json
+
       - name: POST payload to Make (ONE POST)
         if: ${{ inputs.send_to_make == 'true' }}
         env:
