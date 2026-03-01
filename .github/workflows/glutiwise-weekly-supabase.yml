@@ -1,0 +1,396 @@
+name: GlutiWise Weekly Collector (Supabase Direct)
+
+on:
+  schedule:
+    # כל יום שני 03:00 UTC (שנה אם תרצה)
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      write_to_supabase:
+        description: "לכתוב ל-Supabase (true/false)"
+        required: true
+        default: "true"
+      limit_prices:
+        description: "LIMIT לקבצים (2000 מומלץ לאזור + יוחננוף)"
+        required: true
+        default: "2000"
+      max_records:
+        description: "תקרת records (30000 מומלץ)"
+        required: true
+        default: "30000"
+      max_stores:
+        description: "תקרת stores (MVP=30)"
+        required: true
+        default: "30"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      LIMIT: ${{ inputs.limit_prices || '2000' }}
+      MAX_RECORDS: ${{ inputs.max_records || '30000' }}
+      MAX_STORES: ${{ inputs.max_stores || '30' }}
+      WRITE_TO_SUPABASE: ${{ inputs.write_to_supabase || 'true' }}
+
+    steps:
+      - name: Prepare folders
+        run: |
+          mkdir -p dumps out
+
+      - name: Pull scraper image
+        run: |
+          docker pull erlichsefi/israeli-supermarket-scarpers:latest
+
+      - name: Download STORE + PRICE files (hardcoded types)
+        run: |
+          set -euo pipefail
+          ENABLED_FILE_TYPES="STORE_FILE,PRICE_FILE,PRICE_FULL_FILE"
+          docker run --rm \
+            -v "${{ github.workspace }}/dumps:/usr/src/app/dumps" \
+            -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL,YOHANANOF" \
+            -e ENABLED_FILE_TYPES="$ENABLED_FILE_TYPES" \
+            -e LIMIT="$LIMIT" \
+            erlichsefi/israeli-supermarket-scarpers:latest
+
+      - name: Build payload (ALLOWLIST HoHasharon + Yohananof) + products_upsert (GF candidates) + split files
+        env:
+          MAX_RECORDS: ${{ env.MAX_RECORDS }}
+          MAX_STORES: ${{ env.MAX_STORES }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, json, glob, gzip, zipfile
+          import xml.etree.ElementTree as ET
+          from datetime import datetime, timezone
+          from collections import defaultdict
+
+          MAX_RECORDS_TOTAL = int(os.environ.get("MAX_RECORDS","30000"))
+          MAX_STORES_TOTAL  = int(os.environ.get("MAX_STORES","30"))
+
+          ALLOWED_STORE_KEYS = {
+              # רמי לוי + שופרסל (האזור)
+              "ramilevy:43","shufersal:714","ramilevy:51","ramilevy:374","ramilevy:615","ramilevy:171",
+              "shufersal:033","shufersal:719","shufersal:034","shufersal:724","shufersal:726","shufersal:725",
+              "ramilevy:244","ramilevy:57","ramilevy:27","shufersal:046",
+              # יוחננוף (לפי מה שהוצאת מה-DB)
+              "yohananof:032","yohananof:024","yohananof:021","yohananof:026","yohananof:053","yohananof:035",
+          }
+
+          MAX_PER_STORE = max(50, MAX_RECORDS_TOTAL // max(1, min(MAX_STORES_TOTAL, len(ALLOWED_STORE_KEYS))))
+
+          def now_z():
+              return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
+
+          def localname(tag):
+              return tag.split("}")[-1] if "}" in tag else tag
+
+          def norm(s):
+              return re.sub(r"\s+"," ",(s or "").strip())
+
+          def load_xml_roots(path):
+              lp=path.lower()
+              if lp.endswith(".zip"):
+                  roots=[]
+                  with zipfile.ZipFile(path,"r") as z:
+                      for nm in z.namelist():
+                          if nm.lower().endswith(".xml"):
+                              roots.append(ET.fromstring(z.read(nm)))
+                  return roots
+              if lp.endswith(".xml.gz") or lp.endswith(".gz"):
+                  with gzip.open(path,"rb") as f:
+                      return [ET.fromstring(f.read())]
+              return [ET.parse(path).getroot()]
+
+          def iter_dump_paths():
+              for p in glob.glob("dumps/**/*", recursive=True):
+                  if os.path.isfile(p) and p.lower().endswith((".xml",".gz",".zip",".xml.gz")):
+                      yield p
+
+          def extract_any(elem, keys):
+              keys={k.lower() for k in keys}
+              for el in elem.iter():
+                  if localname(el.tag).lower() in keys and (el.text or "").strip():
+                      return norm(el.text)
+              return ""
+
+          def canon_id(s: str) -> str:
+              s=(s or "").strip()
+              if re.fullmatch(r"\d+", s or ""):
+                  try: return str(int(s))
+                  except: return s
+              return s
+
+          def valid_barcode(bc: str) -> bool:
+              return bool(re.fullmatch(r"\d{8,13}", (bc or "").strip()))
+
+          # אינדקס allowlist בלבד (לא ממציאים חנויות)
+          allow_index = defaultdict(set)      # (retailer, canon_store_id) -> {store_key}
+          allow_index_any = defaultdict(set)  # canon_store_id -> {store_key}
+          for sk in ALLOWED_STORE_KEYS:
+              r, sid = sk.split(":", 1)
+              c = canon_id(sid)
+              allow_index[(r, c)].add(sk)
+              allow_index_any[c].add(sk)
+
+          # מיפוי ChainID -> retailer (יוחננוף לפי מה שפתחת בפורטל)
+          CHAINID_TO_RETAILER={
+              "7290027600007":"ramilevy",
+              "7290058140886":"shufersal",
+              "7290803800003":"yohananof",
+          }
+
+          def retailer_from(chain_id, chain_name):
+              if (chain_id or "") in CHAINID_TO_RETAILER:
+                  return CHAINID_TO_RETAILER[chain_id]
+              cn=chain_name or ""
+              if "שופרסל" in cn: return "shufersal"
+              if "רמי" in cn: return "ramilevy"
+              if "יוחננוף" in cn or "YOHANANOF" in cn.upper(): return "yohananof"
+              return None
+
+          # stores אמיתיים רק מקבצי STORE (לא ממציאים)
+          store_dict = {}  # store_key -> store obj
+          def city_from_shuf_name(name: str) -> str:
+              n=norm(name)
+              if not n: return ""
+              parts=n.split(" ")
+              if len(parts)>=2:
+                  last2=" ".join(parts[-2:])
+                  if re.search(r"[א-ת]", last2):
+                      return last2
+              last1=parts[-1]
+              if re.search(r"[א-ת]", last1):
+                  return last1
+              return ""
+
+          for path in iter_dump_paths():
+              try: roots=load_xml_roots(path)
+              except Exception: continue
+              for root in roots:
+                  if not any(localname(el.tag).lower()=="store" for el in root.iter()):
+                      continue
+                  chain_id = extract_any(root, {"chainid"})
+                  chain_name = extract_any(root, {"chainname"})
+                  retailer = retailer_from(chain_id, chain_name)
+                  if not retailer:
+                      continue
+                  for el in root.iter():
+                      if localname(el.tag).lower() != "store":
+                          continue
+                      sid_raw = extract_any(el, {"storeid"}).strip()
+                      if not sid_raw:
+                          continue
+                      cand = allow_index.get((retailer, canon_id(sid_raw)), set())
+                      if len(cand) != 1:
+                          continue
+                      sk = next(iter(cand))
+
+                      name = extract_any(el, {"storename"}) or ""
+                      address = extract_any(el, {"address"}) or ""
+                      if address.lower() == "unknown": address = ""
+                      city = extract_any(el, {"city"}) or ""
+                      if (not city) or city.lower() == "unknown" or re.fullmatch(r"\d+", city or ""):
+                          city = ""
+                      if retailer == "shufersal" and not city:
+                          city = city_from_shuf_name(name)
+
+                      store_dict[sk] = {
+                          "retailer": retailer,
+                          "store_id": sid_raw,
+                          "store_key": sk,
+                          "store_name": name,
+                          "city": city,
+                          "address": address,
+                          "area": "",
+                          "store_type": "",
+                      }
+
+          # PRICE records
+          BARCODE_KEYS={"itemcode","barcode","gtin","ean","code","itemid","itemnumber"}
+          NAME_KEYS={"itemname","itemdescription","productname","description","name"}
+          PRICE_KEYS={"itemprice","price","unitprice","saleprice","priceafterdiscount","priceinclvat"}
+
+          def extract_barcode(node):
+              bc = extract_any(node, BARCODE_KEYS).strip()
+              if bc: return bc
+              for el in node.iter():
+                  for k,v in (el.attrib or {}).items():
+                      kk=str(k).lower()
+                      if any(x in kk for x in ["barcode","gtin","itemcode","ean","code"]):
+                          vv=(v or "").strip()
+                          if vv: return norm(vv)
+              return ""
+
+          def safe_float(x):
+              x=(x or "").strip().replace(",", ".")
+              try:
+                  v=float(x); return v if v>0 else None   # מסנן גם 0 ומטה
+              except: return None
+
+          def pick_store_key(chain_id, chain_name, store_id_raw):
+              rid = canon_id(store_id_raw)
+              retailer = retailer_from(chain_id, chain_name)
+              if retailer:
+                  cands = allow_index.get((retailer, rid), set())
+                  if len(cands) == 1:
+                      return next(iter(cands))
+                  return None
+              cands_any = allow_index_any.get(rid, set())
+              if len(cands_any) == 1:
+                  return next(iter(cands_any))
+              return None
+
+          def gf_candidate(name: str) -> bool:
+              n = (name or "").strip()
+              nl = n.lower()
+              return ("ללא גלוטן" in n) or ("gluten free" in nl) or ("gluten-free" in nl)
+
+          dedup = {}
+          barcode_to_name = {}
+          per_store_count = defaultdict(int)
+
+          stop = False
+          for path in iter_dump_paths():
+              if stop: break
+              base=os.path.basename(path).lower()
+              if base.startswith("stores"):
+                  continue
+              try: roots=load_xml_roots(path)
+              except Exception:
+                  continue
+
+              for root in roots:
+                  if stop: break
+                  chain_id=extract_any(root, {"chainid"})
+                  chain_name=extract_any(root, {"chainname"})
+                  store_id_raw = extract_any(root, {"storeid"}).strip()
+                  if not store_id_raw:
+                      continue
+
+                  sk = pick_store_key(chain_id, chain_name, store_id_raw)
+                  if not sk:
+                      continue
+
+                  if per_store_count[sk] >= MAX_PER_STORE:
+                      continue
+
+                  updated_at = now_z()
+
+                  for node in root.iter():
+                      if localname(node.tag).lower() not in {"item","product"}:
+                          continue
+
+                      bc = extract_barcode(node)
+                      if not valid_barcode(bc):
+                          continue
+
+                      if per_store_count[sk] >= MAX_PER_STORE:
+                          break
+
+                      pv = safe_float(extract_any(node, PRICE_KEYS))
+                      if pv is None:
+                          continue
+
+                      nm = extract_any(node, NAME_KEYS).strip()
+                      if bc not in barcode_to_name and nm:
+                          barcode_to_name[bc]=nm
+
+                      price_key = f"{bc}:{sk}"
+                      if price_key not in dedup:
+                          dedup[price_key] = {
+                              "price_key": price_key,
+                              "barcode": bc,
+                              "store_key": sk,
+                              "price": pv,
+                              "updated_at": updated_at,
+                          }
+                          per_store_count[sk] += 1
+                          if len(dedup) >= MAX_RECORDS_TOTAL:
+                              stop = True
+                              break
+
+          if not dedup:
+              raise SystemExit("No PRICE records produced after filtering. Aborting.")
+
+          store_keys_with_records = sorted(per_store_count.keys(), key=lambda k: (-per_store_count[k], k))
+          chosen_keys = store_keys_with_records[:MAX_STORES_TOTAL]
+          chosen_set = set(chosen_keys)
+
+          records = [r for r in dedup.values() if r["store_key"] in chosen_set]
+          stores  = [store_dict[sk] for sk in chosen_keys if sk in store_dict]  # רק STORE אמיתי
+
+          used_barcodes = sorted(set(r["barcode"] for r in records))
+
+          products_upsert = []
+          for bc in used_barcodes:
+              nm = barcode_to_name.get(bc) or ""
+              obj = {"barcode": bc, "name": nm}
+              if gf_candidate(nm):
+                  obj["gf_flag"] = True
+              products_upsert.append(obj)
+
+          os.makedirs("out", exist_ok=True)
+          with open("out/products_upsert.json","w",encoding="utf-8") as f:
+              json.dump(products_upsert, f, ensure_ascii=False)
+
+          with open("out/stores_upsert.json","w",encoding="utf-8") as f:
+              json.dump(stores, f, ensure_ascii=False)
+
+          with open("out/records_upsert.json","w",encoding="utf-8") as f:
+              json.dump(records, f, ensure_ascii=False)
+
+          payload = {"source":"weekly_supabase_direct","generated_at": now_z(),"stores": stores,"records": records}
+          with open("out/payload.json","w",encoding="utf-8") as f:
+              json.dump(payload, f, ensure_ascii=False)
+
+          print("SUMMARY stores=", len(stores), "records=", len(records), "MAX_PER_STORE=", MAX_PER_STORE)
+          PY
+
+      - name: Upsert to Supabase (products -> stores -> prices_current)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
+        run: |
+          set -euo pipefail
+          echo "WRITE_TO_SUPABASE=$WRITE_TO_SUPABASE"
+          test -f out/products_upsert.json
+          test -f out/stores_upsert.json
+          test -f out/records_upsert.json
+
+          if [ "$WRITE_TO_SUPABASE" != "true" ]; then
+            echo "DRY RUN: not writing to Supabase."
+            exit 0
+          fi
+
+          # 1) products (כדי למנוע FK על barcode)
+          curl -sS -X POST "${SUPABASE_URL}/rest/v1/products?on_conflict=barcode" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: resolution=merge-duplicates,return=minimal" \
+            -H "apikey: ${SUPABASE_SERVICE_ROLE_JWT}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_JWT}" \
+            --data-binary @out/products_upsert.json
+
+          # 2) stores (רק אם יש stores אמיתיים בקובץ)
+          python3 -c "import json; import sys; a=json.load(open('out/stores_upsert.json','r',encoding='utf-8')); sys.exit(0 if len(a)>0 else 1)" \
+            && curl -sS -X POST "${SUPABASE_URL}/rest/v1/stores?on_conflict=store_key" \
+              -H "Content-Type: application/json" \
+              -H "Prefer: resolution=merge-duplicates,return=minimal" \
+              -H "apikey: ${SUPABASE_SERVICE_ROLE_JWT}" \
+              -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_JWT}" \
+              --data-binary @out/stores_upsert.json \
+            || echo "No stores_upsert to send (OK)."
+
+          # 3) prices_current
+          curl -sS -X POST "${SUPABASE_URL}/rest/v1/prices_current?on_conflict=price_key" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: resolution=merge-duplicates,return=minimal" \
+            -H "apikey: ${SUPABASE_SERVICE_ROLE_JWT}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_JWT}" \
+            --data-binary @out/records_upsert.json
+
+      - name: Upload artifacts (manual runs only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: glutiwise-out
+          path: out/
