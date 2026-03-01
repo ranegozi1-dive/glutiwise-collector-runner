@@ -60,8 +60,7 @@ jobs:
           MAX_STORES_TOTAL  = int(os.environ.get("MAX_STORES","30"))
 
           # פיזור רשומות בין סניפים (כדי שלא ניתקע על סניף אחד)
-          MAX_PER_STORE = max(200, MAX_RECORDS_TOTAL // 4)  # ברירת מחדל: ~750 כש-MAX_RECORDS_TOTAL=3000
-
+          MAX_PER_STORE = max(50, MAX_RECORDS_TOTAL // max(1, min(MAX_STORES_TOTAL, len(ALLOWED_STORE_KEYS))))
           # ALLOWLIST (לפי הסניפים שצילמת)
           ALLOWED_STORE_KEYS = {
               "ramilevy:43",
