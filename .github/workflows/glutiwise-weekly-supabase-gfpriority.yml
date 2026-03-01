@@ -388,7 +388,7 @@ jobs:
           print("SUMMARY MAX_PER_STORE=", MAX_PER_STORE, "MAX_GF_PER_STORE=", MAX_GF_PER_STORE, "MAX_NON_GF_PER_STORE=", MAX_NON_GF_PER_STORE)
           print("SUMMARY stores=", len(chosen_keys), "records=", len(records), "gf_records=", gf_count)
           PY
-      - name: Upsert to Supabase (products -> stores -> prices_current)
+      - name: Upsert to Supabase (products -> stores -> prices_current) [FAIL HARD + BATCH]
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
@@ -404,31 +404,73 @@ jobs:
             exit 0
           fi
 
-          # 1) products (כדי למנוע FK על barcode)
-          curl -sS -X POST "${SUPABASE_URL}/rest/v1/products?on_conflict=barcode" \
-            -H "Content-Type: application/json" \
-            -H "Prefer: resolution=merge-duplicates,return=minimal" \
-            -H "apikey: ${SUPABASE_SERVICE_ROLE_JWT}" \
-            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_JWT}" \
-            --data-binary @out/products_upsert.json
+          PREFER_HDR="Prefer: resolution=merge-duplicates,return=minimal,missing=default"
 
-          # 2) stores (רק אם יש stores אמיתיים בקובץ)
-          python3 -c "import json; import sys; a=json.load(open('out/stores_upsert.json','r',encoding='utf-8')); sys.exit(0 if len(a)>0 else 1)" \
-            && curl -sS -X POST "${SUPABASE_URL}/rest/v1/stores?on_conflict=store_key" \
+          # --- helper: split big arrays into chunks (avoid huge request bodies) ---
+          mkdir -p out/chunks
+          python3 - <<'PY'
+          import json, os, math
+          def split_json_array(src, prefix, chunk_size):
+              arr = json.load(open(src, "r", encoding="utf-8"))
+              os.makedirs(os.path.dirname(prefix), exist_ok=True)
+              if not isinstance(arr, list):
+                  raise SystemExit(f"{src} is not a JSON array")
+              if not arr:
+                  return 0
+              n = 0
+              for i in range(0, len(arr), chunk_size):
+                  n += 1
+                  part = arr[i:i+chunk_size]
+                  with open(f"{prefix}{n:04d}.json", "w", encoding="utf-8") as f:
+                      json.dump(part, f, ensure_ascii=False)
+              return n
+
+          # מחלקים לגדלים שמרניים (כדי לא להיתקע)
+          n_prod = split_json_array("out/products_upsert.json", "out/chunks/products_", 5000)
+          n_store = split_json_array("out/stores_upsert.json", "out/chunks/stores_", 1000)
+          n_rec = split_json_array("out/records_upsert.json", "out/chunks/records_", 5000)
+
+          print("CHUNKS products=", n_prod, "stores=", n_store, "records=", n_rec)
+          PY
+
+          # --- 1) products (ensure FK) ---
+          for f in out/chunks/products_*.json; do
+            [ -e "$f" ] || break
+            echo "Upserting products chunk: $f"
+            curl --fail-with-body -sS -X POST "${SUPABASE_URL}/rest/v1/products?on_conflict=barcode" \
               -H "Content-Type: application/json" \
-              -H "Prefer: resolution=merge-duplicates,return=minimal" \
+              -H "$PREFER_HDR" \
               -H "apikey: ${SUPABASE_SERVICE_ROLE_JWT}" \
               -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_JWT}" \
-              --data-binary @out/stores_upsert.json \
-            || echo "No stores_upsert to send (OK)."
+              --data-binary @"$f" >/dev/null
+          done
 
-          # 3) prices_current
-          curl -sS -X POST "${SUPABASE_URL}/rest/v1/prices_current?on_conflict=price_key" \
-            -H "Content-Type: application/json" \
-            -H "Prefer: resolution=merge-duplicates,return=minimal" \
-            -H "apikey: ${SUPABASE_SERVICE_ROLE_JWT}" \
-            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_JWT}" \
-            --data-binary @out/records_upsert.json
+          # --- 2) stores (only if we actually have real stores parsed) ---
+          if ls out/chunks/stores_*.json >/dev/null 2>&1; then
+            for f in out/chunks/stores_*.json; do
+              echo "Upserting stores chunk: $f"
+              curl --fail-with-body -sS -X POST "${SUPABASE_URL}/rest/v1/stores?on_conflict=store_key" \
+                -H "Content-Type: application/json" \
+                -H "$PREFER_HDR" \
+                -H "apikey: ${SUPABASE_SERVICE_ROLE_JWT}" \
+                -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_JWT}" \
+                --data-binary @"$f" >/dev/null
+            done
+          else
+            echo "No stores chunks to send (OK)."
+          fi
+
+          # --- 3) prices_current ---
+          for f in out/chunks/records_*.json; do
+            [ -e "$f" ] || break
+            echo "Upserting prices_current chunk: $f"
+            curl --fail-with-body -sS -X POST "${SUPABASE_URL}/rest/v1/prices_current?on_conflict=price_key" \
+              -H "Content-Type: application/json" \
+              -H "$PREFER_HDR" \
+              -H "apikey: ${SUPABASE_SERVICE_ROLE_JWT}" \
+              -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_JWT}" \
+              --data-binary @"$f" >/dev/null
+          done
 
       - name: Upload artifacts (manual runs only)
         if: ${{ github.event_name == 'workflow_dispatch' }}
