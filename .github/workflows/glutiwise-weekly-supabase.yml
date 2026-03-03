@@ -78,9 +78,7 @@ jobs:
               "yohananof:032","yohananof:024","yohananof:021","yohananof:026","yohananof:053","yohananof:035",
           }
 
-          # תקרה פר-סניף נגזרת מהתקציב הכולל
           MAX_PER_STORE = max(5000, MAX_RECORDS_TOTAL // max(1, len(ALLOWED_STORE_KEYS)))
-
           c = Counter()
 
           def dt_to_z(dt: datetime) -> str:
@@ -103,22 +101,15 @@ jobs:
               return bool(re.fullmatch(r"\d{8,13}", (bc or "").strip()))
 
           def source_dt_from_path(path: str) -> datetime:
-              """
-              מנסה לחלץ תאריך/שעה משם הקובץ (אם קיים), אחרת נופל ל-mtime.
-              זה נותן לנו "Latest-only" אמיתי כשיש כמה snapshots לאותו price_key.
-              """
               bn = os.path.basename(path)
-              # 14 digits: YYYYMMDDHHMMSS
               m = re.search(r"(20\d{12})", bn)
               if m:
                   c["src_from_name_14"] += 1
                   return datetime.strptime(m.group(1), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
-              # 12 digits: YYYYMMDDHHMM
               m = re.search(r"(20\d{10})", bn)
               if m:
                   c["src_from_name_12"] += 1
                   return datetime.strptime(m.group(1), "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
-              # 8 digits: YYYYMMDD
               m = re.search(r"(20\d{6})", bn)
               if m:
                   c["src_from_name_8"] += 1
@@ -142,7 +133,6 @@ jobs:
               return [ET.parse(path).getroot()]
 
           def iter_dump_paths():
-              # דטרמיניסטי: כדי ש"latest" יהיה עקבי ריצה-לריצה
               for p in sorted(glob.glob("dumps/**/*", recursive=True)):
                   if os.path.isfile(p) and p.lower().endswith((".xml",".gz",".zip",".xml.gz")):
                       yield p
@@ -154,9 +144,8 @@ jobs:
                       return norm(el.text)
               return ""
 
-          # allowlist index
-          allow_index = defaultdict(set)      # (retailer, canon_store_id)->{store_key}
-          allow_index_any = defaultdict(set)  # canon_store_id->{store_key}
+          allow_index = defaultdict(set)
+          allow_index_any = defaultdict(set)
           for sk in ALLOWED_STORE_KEYS:
               r, sid = sk.split(":", 1)
               cc = canon_id(sid)
@@ -194,7 +183,6 @@ jobs:
               nl = n.lower()
               return ("ללא גלוטן" in n) or ("gluten free" in nl) or ("gluten-free" in nl)
 
-          # ✅ חילוץ ברקוד “חסין”
           def extract_barcode(node):
               BARCODE_KEYS_ORDER = ["barcode", "gtin", "ean", "itemcode", "itemid", "itemnumber", "code"]
               keys_set = set(BARCODE_KEYS_ORDER)
@@ -238,7 +226,6 @@ jobs:
                   c["no_barcode"] += 1
               return ""
 
-          # stores אמיתיים רק מקבצי STORE
           store_dict = {}
 
           def city_from_shuf_name(name: str) -> str:
@@ -252,7 +239,6 @@ jobs:
               if re.search(r"[א-ת]", last1): return last1
               return ""
 
-          # --- STORE SCAN ---
           for path in iter_dump_paths():
               try:
                   roots=load_xml_roots(path)
@@ -332,7 +318,6 @@ jobs:
           roots_matched_per_store = defaultdict(int)
 
           stop = False
-          # --- PRICE SCAN ---
           for path in iter_dump_paths():
               if stop: break
               base=os.path.basename(path).lower()
@@ -410,7 +395,6 @@ jobs:
                       ex = dedup.get(price_key)
                       if ex is not None:
                           c["dup_seen"] += 1
-                          # ✅ Latest-only: אם המקור החדש "יותר חדש" – נחליף
                           if src_ts > ex.get("_src_ts", -1):
                               c["dup_replaced_newer"] += 1
                               dedup[price_key] = rec
@@ -434,7 +418,6 @@ jobs:
           chosen_keys = stores_with_records[:MAX_STORES_TOTAL]
           chosen_set = set(chosen_keys)
 
-          # מסירים שדות פנימיים לפני כתיבה
           records = []
           for r in dedup.values():
               if r["store_key"] not in chosen_set:
@@ -451,21 +434,19 @@ jobs:
           c["final_records"] = len(records)
           c["final_unique_barcodes"] = len(used_barcodes)
 
+          # ✅ שינוי חשוב: לא שולחים gf_verified / לא מאפסים gf_source,
+          # ורק “מדליקים” gf_flag כשמזהים מועמד GF (לא הופכים ל-false אף פעם)
           now = now_z()
           products_upsert = []
           for bc in used_barcodes:
               nm = barcode_to_name.get(bc) or ""
-              gf = bool(is_gf_candidate(nm))
-              products_upsert.append({
-                  "barcode": bc,
-                  "name": nm,
-                  "category": None,
-                  "gf_flag": gf,
-                  "gf_verified": False,
-                  "substitute_group": None,
-                  "gf_source": ("name_heuristic" if gf else None),
-                  "gf_updated_at": (now if gf else None),
-              })
+              row = {"barcode": bc, "name": nm}
+              if is_gf_candidate(nm):
+                  c["gf_candidates"] += 1
+                  row["gf_flag"] = True
+                  row["gf_source"] = "name_heuristic"
+                  row["gf_updated_at"] = now
+              products_upsert.append(row)
 
           os.makedirs("out", exist_ok=True)
           with open("out/products_upsert.json","w",encoding="utf-8") as f:
@@ -475,7 +456,6 @@ jobs:
           with open("out/records_upsert.json","w",encoding="utf-8") as f:
               json.dump(records, f, ensure_ascii=False)
 
-          # TOP 5: כמה roots התאימו לכל store (כדי להבין כמה snapshots יש לכל סניף)
           top_roots = sorted(roots_matched_per_store.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
           top_roots_s = ";".join([f"{k}={v}" for k,v in top_roots]) if top_roots else ""
 
@@ -490,6 +470,7 @@ jobs:
               f"no_price_text={c.get('no_price_text',0)} bad_price={c.get('bad_price',0)} "
               f"dup_seen={c.get('dup_seen',0)} dup_replaced_newer={c.get('dup_replaced_newer',0)} dup_kept_existing={c.get('dup_kept_existing',0)} "
               f"src_name14={c.get('src_from_name_14',0)} src_name12={c.get('src_from_name_12',0)} src_name8={c.get('src_from_name_8',0)} src_mtime={c.get('src_from_mtime',0)} "
+              f"gf_candidates={c.get('gf_candidates',0)} "
               f"hit_max_records={c.get('hit_max_records',0)} stores_with_records={c.get('stores_with_records',0)} chosen_missing_store_rows={c.get('chosen_missing_store_rows',0)} "
               f"| TOP_ROOTS {top_roots_s}"
           )
