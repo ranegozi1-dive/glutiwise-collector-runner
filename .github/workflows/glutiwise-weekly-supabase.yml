@@ -9,16 +9,19 @@ on:
         description: "לכתוב ל-Supabase (true/false)"
         required: true
         default: "true"
+
       limit_prices:
-        description: "LIMIT לקבצים (999999 = כמעט בלי LIMIT)"
+        description: "LIMIT קבצים (מומלץ = 999999 בלי LIMIT)"
         required: true
-        default: "2000"
+        default: "999999"
+
       max_records:
-        description: "תקרת records (למלא סניפים באמת: 700000+)"
+        description: "מגבלת records (מומלץ = 700000)"
         required: true
-        default: "30000"
+        default: "700000"
+
       max_stores:
-        description: "תקרת stores (MVP=30)"
+        description: "מגבלת stores (MVP=30)"
         required: true
         default: "30"
 
