@@ -354,8 +354,9 @@ jobs:
 
       - name: Upsert to Supabase (products -> stores -> prices_current) [FAIL HARD + BATCH + SHOW ERROR]
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
+         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+         SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
+         WRITE_TO_SUPABASE: ${{ github.event.inputs.write_to_supabase || 'true' }}
         run: |
           set -euo pipefail
           echo "WRITE_TO_SUPABASE=$WRITE_TO_SUPABASE"
