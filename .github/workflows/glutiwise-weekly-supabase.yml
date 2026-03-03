@@ -83,8 +83,11 @@ jobs:
 
           c = Counter()
 
+          def dt_to_z(dt: datetime) -> str:
+              return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
+
           def now_z():
-              return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
+              return dt_to_z(datetime.now(timezone.utc))
 
           def localname(tag): return tag.split("}")[-1] if "}" in tag else tag
           def norm(s): return re.sub(r"\s+"," ",(s or "").strip())
@@ -98,6 +101,31 @@ jobs:
 
           def valid_barcode(bc: str) -> bool:
               return bool(re.fullmatch(r"\d{8,13}", (bc or "").strip()))
+
+          def source_dt_from_path(path: str) -> datetime:
+              """
+              מנסה לחלץ תאריך/שעה משם הקובץ (אם קיים), אחרת נופל ל-mtime.
+              זה נותן לנו "Latest-only" אמיתי כשיש כמה snapshots לאותו price_key.
+              """
+              bn = os.path.basename(path)
+              # 14 digits: YYYYMMDDHHMMSS
+              m = re.search(r"(20\d{12})", bn)
+              if m:
+                  c["src_from_name_14"] += 1
+                  return datetime.strptime(m.group(1), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+              # 12 digits: YYYYMMDDHHMM
+              m = re.search(r"(20\d{10})", bn)
+              if m:
+                  c["src_from_name_12"] += 1
+                  return datetime.strptime(m.group(1), "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+              # 8 digits: YYYYMMDD
+              m = re.search(r"(20\d{6})", bn)
+              if m:
+                  c["src_from_name_8"] += 1
+                  return datetime.strptime(m.group(1), "%Y%m%d").replace(tzinfo=timezone.utc)
+
+              c["src_from_mtime"] += 1
+              return datetime.fromtimestamp(os.path.getmtime(path), tz=timezone.utc)
 
           def load_xml_roots(path):
               lp=path.lower()
@@ -114,7 +142,8 @@ jobs:
               return [ET.parse(path).getroot()]
 
           def iter_dump_paths():
-              for p in glob.glob("dumps/**/*", recursive=True):
+              # דטרמיניסטי: כדי ש"latest" יהיה עקבי ריצה-לריצה
+              for p in sorted(glob.glob("dumps/**/*", recursive=True)):
                   if os.path.isfile(p) and p.lower().endswith((".xml",".gz",".zip",".xml.gz")):
                       yield p
 
@@ -165,7 +194,7 @@ jobs:
               nl = n.lower()
               return ("ללא גלוטן" in n) or ("gluten free" in nl) or ("gluten-free" in nl)
 
-          # ✅ חילוץ ברקוד “חסין”: מנסה כמה שדות לפי עדיפות, ומחזיר הראשון שעובר 8–13 ספרות
+          # ✅ חילוץ ברקוד “חסין”
           def extract_barcode(node):
               BARCODE_KEYS_ORDER = ["barcode", "gtin", "ean", "itemcode", "itemid", "itemnumber", "code"]
               keys_set = set(BARCODE_KEYS_ORDER)
@@ -203,7 +232,6 @@ jobs:
                       if cand and valid_barcode(cand):
                           return cand
 
-              # אין ברקוד תקין — נבדיל בין "לא מצאתי בכלל" לבין "מצאתי משהו אבל לא עומד בתנאי"
               if any_digits_candidate:
                   c["invalid_barcode"] += 1
               else:
@@ -301,6 +329,7 @@ jobs:
           dedup = {}
           per_store_count = defaultdict(int)
           barcode_to_name = {}
+          roots_matched_per_store = defaultdict(int)
 
           stop = False
           # --- PRICE SCAN ---
@@ -309,6 +338,9 @@ jobs:
               base=os.path.basename(path).lower()
               if base.startswith("stores"):
                   continue
+
+              src_dt = source_dt_from_path(path)
+              src_ts = int(src_dt.timestamp())
 
               try:
                   roots=load_xml_roots(path)
@@ -338,7 +370,8 @@ jobs:
                       c["price_root_store_cap_skip"] += 1
                       continue
 
-                  updated_at = now_z()
+                  roots_matched_per_store[sk] += 1
+                  updated_at = dt_to_z(src_dt)
 
                   for node in root.iter():
                       if localname(node.tag).lower() not in {"item","product"}:
@@ -348,7 +381,7 @@ jobs:
 
                       bc = extract_barcode(node)
                       if not bc:
-                          continue  # counters updated inside extract_barcode
+                          continue
 
                       raw_price = extract_any(node, PRICE_KEYS)
                       if not (raw_price or "").strip():
@@ -365,17 +398,27 @@ jobs:
                           barcode_to_name[bc]=nm
 
                       price_key = f"{bc}:{sk}"
-                      if price_key in dedup:
-                          c["dedup_skip"] += 1
-                          continue
-
-                      dedup[price_key] = {
+                      rec = {
                           "price_key": price_key,
                           "barcode": bc,
                           "store_key": sk,
                           "price": pv,
                           "updated_at": updated_at,
+                          "_src_ts": src_ts,
                       }
+
+                      ex = dedup.get(price_key)
+                      if ex is not None:
+                          c["dup_seen"] += 1
+                          # ✅ Latest-only: אם המקור החדש "יותר חדש" – נחליף
+                          if src_ts > ex.get("_src_ts", -1):
+                              c["dup_replaced_newer"] += 1
+                              dedup[price_key] = rec
+                          else:
+                              c["dup_kept_existing"] += 1
+                          continue
+
+                      dedup[price_key] = rec
                       per_store_count[sk] += 1
                       c["records_kept"] += 1
 
@@ -391,11 +434,16 @@ jobs:
           chosen_keys = stores_with_records[:MAX_STORES_TOTAL]
           chosen_set = set(chosen_keys)
 
-          records = [r for r in dedup.values() if r["store_key"] in chosen_set]
+          # מסירים שדות פנימיים לפני כתיבה
+          records = []
+          for r in dedup.values():
+              if r["store_key"] not in chosen_set:
+                  continue
+              records.append({k:v for k,v in r.items() if not k.startswith("_")})
+
           stores  = [store_dict[sk] for sk in chosen_keys if sk in store_dict]
           used_barcodes = sorted(set(r["barcode"] for r in records))
 
-          # אבחון: כמה סניפים נבחרו אבל אין להם STORE row
           missing_store_rows = sum(1 for sk in chosen_keys if sk not in store_dict)
           c["chosen_missing_store_rows"] = missing_store_rows
           c["stores_with_records"] = len(per_store_count)
@@ -427,7 +475,10 @@ jobs:
           with open("out/records_upsert.json","w",encoding="utf-8") as f:
               json.dump(records, f, ensure_ascii=False)
 
-          # ✅ שורת SUMMARY מורחבת אחת (אבחון בלי לנחש)
+          # TOP 5: כמה roots התאימו לכל store (כדי להבין כמה snapshots יש לכל סניף)
+          top_roots = sorted(roots_matched_per_store.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+          top_roots_s = ";".join([f"{k}={v}" for k,v in top_roots]) if top_roots else ""
+
           summary = (
               f"SUMMARY stores={len(chosen_keys)} records={len(records)} unique_barcodes={len(used_barcodes)} "
               f"MAX_PER_STORE={MAX_PER_STORE} "
@@ -436,8 +487,11 @@ jobs:
               f"price_files={c.get('price_files',0)} price_roots={c.get('price_roots',0)} "
               f"root_no_storeid={c.get('price_root_no_storeid',0)} root_not_allowlisted={c.get('price_root_not_allowlisted_or_ambiguous',0)} root_store_cap_skip={c.get('price_root_store_cap_skip',0)} "
               f"item_nodes={c.get('item_nodes',0)} no_barcode={c.get('no_barcode',0)} invalid_barcode={c.get('invalid_barcode',0)} "
-              f"no_price_text={c.get('no_price_text',0)} bad_price={c.get('bad_price',0)} dedup_skip={c.get('dedup_skip',0)} "
-              f"hit_max_records={c.get('hit_max_records',0)} stores_with_records={c.get('stores_with_records',0)} chosen_missing_store_rows={c.get('chosen_missing_store_rows',0)}"
+              f"no_price_text={c.get('no_price_text',0)} bad_price={c.get('bad_price',0)} "
+              f"dup_seen={c.get('dup_seen',0)} dup_replaced_newer={c.get('dup_replaced_newer',0)} dup_kept_existing={c.get('dup_kept_existing',0)} "
+              f"src_name14={c.get('src_from_name_14',0)} src_name12={c.get('src_from_name_12',0)} src_name8={c.get('src_from_name_8',0)} src_mtime={c.get('src_from_mtime',0)} "
+              f"hit_max_records={c.get('hit_max_records',0)} stores_with_records={c.get('stores_with_records',0)} chosen_missing_store_rows={c.get('chosen_missing_store_rows',0)} "
+              f"| TOP_ROOTS {top_roots_s}"
           )
           print(summary)
           PY
