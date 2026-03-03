@@ -72,9 +72,9 @@ jobs:
           MAX_STORES_TOTAL  = int(os.environ.get("MAX_STORES","30"))
 
           ALLOWED_STORE_KEYS = {
-          "shufersal:046","shufersal:033","shufersal:034",
+          "shufersal:046","shufersal:033","shufersal:034","shufersal:714",
           "yohananof:024","yohananof:026","yohananof:021",
-          "ramilevy:269","ramilevy:144","ramilevy:151","ramilevy:244","ramilevy:259",
+          "ramilevy:269","ramilevy:144","ramilevy:151","ramilevy:244","ramilevy:259","ramilevy:43",
           }
 
           # תקרה פר-סניף נגזרת מהתקציב הכולל
