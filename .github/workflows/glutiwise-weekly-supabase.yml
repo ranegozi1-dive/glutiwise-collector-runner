@@ -78,6 +78,7 @@ jobs:
               "yohananof:032","yohananof:024","yohananof:021","yohananof:026","yohananof:053","yohananof:035",
           }
 
+          # תקרה פר-סניף נגזרת מהתקציב הכולל
           MAX_PER_STORE = max(5000, MAX_RECORDS_TOTAL // max(1, len(ALLOWED_STORE_KEYS)))
           c = Counter()
 
@@ -101,15 +102,22 @@ jobs:
               return bool(re.fullmatch(r"\d{8,13}", (bc or "").strip()))
 
           def source_dt_from_path(path: str) -> datetime:
+              """
+              מנסה לחלץ תאריך/שעה מהשם (אם קיים),
+              אחרת נופל ל-mtime. זה מאפשר Latest-only אמיתי.
+              """
               bn = os.path.basename(path)
+              # YYYYMMDDHHMMSS
               m = re.search(r"(20\d{12})", bn)
               if m:
                   c["src_from_name_14"] += 1
                   return datetime.strptime(m.group(1), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+              # YYYYMMDDHHMM
               m = re.search(r"(20\d{10})", bn)
               if m:
                   c["src_from_name_12"] += 1
                   return datetime.strptime(m.group(1), "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+              # YYYYMMDD
               m = re.search(r"(20\d{6})", bn)
               if m:
                   c["src_from_name_8"] += 1
@@ -133,6 +141,7 @@ jobs:
               return [ET.parse(path).getroot()]
 
           def iter_dump_paths():
+              # דטרמיניסטי: כדי ש"latest" יהיה עקבי ריצה-לריצה
               for p in sorted(glob.glob("dumps/**/*", recursive=True)):
                   if os.path.isfile(p) and p.lower().endswith((".xml",".gz",".zip",".xml.gz")):
                       yield p
@@ -144,8 +153,9 @@ jobs:
                       return norm(el.text)
               return ""
 
-          allow_index = defaultdict(set)
-          allow_index_any = defaultdict(set)
+          # allowlist index
+          allow_index = defaultdict(set)      # (retailer, canon_store_id)->{store_key}
+          allow_index_any = defaultdict(set)  # canon_store_id->{store_key}
           for sk in ALLOWED_STORE_KEYS:
               r, sid = sk.split(":", 1)
               cc = canon_id(sid)
@@ -183,6 +193,7 @@ jobs:
               nl = n.lower()
               return ("ללא גלוטן" in n) or ("gluten free" in nl) or ("gluten-free" in nl)
 
+          # חילוץ ברקוד “חסין”
           def extract_barcode(node):
               BARCODE_KEYS_ORDER = ["barcode", "gtin", "ean", "itemcode", "itemid", "itemnumber", "code"]
               keys_set = set(BARCODE_KEYS_ORDER)
@@ -226,6 +237,7 @@ jobs:
                   c["no_barcode"] += 1
               return ""
 
+          # stores אמיתיים רק מקבצי STORE
           store_dict = {}
 
           def city_from_shuf_name(name: str) -> str:
@@ -239,6 +251,7 @@ jobs:
               if re.search(r"[א-ת]", last1): return last1
               return ""
 
+          # --- STORE SCAN ---
           for path in iter_dump_paths():
               try:
                   roots=load_xml_roots(path)
@@ -318,6 +331,7 @@ jobs:
           roots_matched_per_store = defaultdict(int)
 
           stop = False
+          # --- PRICE SCAN ---
           for path in iter_dump_paths():
               if stop: break
               base=os.path.basename(path).lower()
@@ -395,6 +409,7 @@ jobs:
                       ex = dedup.get(price_key)
                       if ex is not None:
                           c["dup_seen"] += 1
+                          # Latest-only: מחליפים אם המקור החדש יותר
                           if src_ts > ex.get("_src_ts", -1):
                               c["dup_replaced_newer"] += 1
                               dedup[price_key] = rec
@@ -418,6 +433,7 @@ jobs:
           chosen_keys = stores_with_records[:MAX_STORES_TOTAL]
           chosen_set = set(chosen_keys)
 
+          # מסירים שדות פנימיים לפני כתיבה
           records = []
           for r in dedup.values():
               if r["store_key"] not in chosen_set:
@@ -434,19 +450,25 @@ jobs:
           c["final_records"] = len(records)
           c["final_unique_barcodes"] = len(used_barcodes)
 
-          # ✅ שינוי חשוב: לא שולחים gf_verified / לא מאפסים gf_source,
-          # ורק “מדליקים” gf_flag כשמזהים מועמד GF (לא הופכים ל-false אף פעם)
+          # ✅ products עם מפתחות אחידים (uniform keys) כדי לא לשבור bulk insert
+          # ואת ההגנה על gf_verified נעשה בשלב ה-Upsert (INSERT-ONLY ל-products).
           now = now_z()
           products_upsert = []
           for bc in used_barcodes:
               nm = barcode_to_name.get(bc) or ""
-              row = {"barcode": bc, "name": nm}
-              if is_gf_candidate(nm):
+              gf = bool(is_gf_candidate(nm))
+              if gf:
                   c["gf_candidates"] += 1
-                  row["gf_flag"] = True
-                  row["gf_source"] = "name_heuristic"
-                  row["gf_updated_at"] = now
-              products_upsert.append(row)
+              products_upsert.append({
+                  "barcode": bc,
+                  "name": nm,
+                  "category": None,
+                  "gf_flag": gf,
+                  "gf_verified": False,
+                  "substitute_group": None,
+                  "gf_source": ("name_heuristic" if gf else None),
+                  "gf_updated_at": (now if gf else None),
+              })
 
           os.makedirs("out", exist_ok=True)
           with open("out/products_upsert.json","w",encoding="utf-8") as f:
@@ -456,6 +478,7 @@ jobs:
           with open("out/records_upsert.json","w",encoding="utf-8") as f:
               json.dump(records, f, ensure_ascii=False)
 
+          # TOP 5: כמה roots התאימו לכל store (כדי להבין כמה snapshots יש לכל סניף)
           top_roots = sorted(roots_matched_per_store.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
           top_roots_s = ";".join([f"{k}={v}" for k,v in top_roots]) if top_roots else ""
 
@@ -476,12 +499,12 @@ jobs:
           )
           print(summary)
           PY
-          
+
       - name: Upsert to Supabase (products -> stores -> prices_current) [FAIL HARD + BATCH + SHOW ERROR]
         env:
-         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-         SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
-         WRITE_TO_SUPABASE: ${{ github.event.inputs.write_to_supabase || 'true' }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
+          WRITE_TO_SUPABASE: ${{ env.WRITE_TO_SUPABASE }}
         run: |
           set -euo pipefail
           echo "WRITE_TO_SUPABASE=$WRITE_TO_SUPABASE"
@@ -494,7 +517,11 @@ jobs:
             exit 0
           fi
 
-          PREFER_HDR="Prefer: resolution=merge-duplicates,return=minimal,missing=default"
+          # products: INSERT-ONLY כדי לא לדרוס gf_verified/שדות אחרים בעתיד
+          PREFER_HDR_PRODUCTS="Prefer: resolution=ignore-duplicates,return=minimal,missing=default"
+          # stores/prices_current: upsert רגיל
+          PREFER_HDR_MERGE="Prefer: resolution=merge-duplicates,return=minimal,missing=default"
+
           mkdir -p out/chunks
 
           python3 - <<'PY'
@@ -523,32 +550,36 @@ jobs:
           post_chunk () {
             local url="$1"
             local file="$2"
+            local prefer="$3"
             echo "POST $url  file=$file"
             curl --fail-with-body -sS -o /tmp/supabase_resp.txt -X POST "$url" \
               -H "Content-Type: application/json" \
-              -H "$PREFER_HDR" \
+              -H "$prefer" \
               -H "apikey: ${SUPABASE_SERVICE_ROLE_JWT}" \
               -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_JWT}" \
               --data-binary @"$file" \
               || { echo "❌ Supabase error body:"; sed -n '1,200p' /tmp/supabase_resp.txt; exit 1; }
           }
 
+          # products: INSERT-ONLY
           for f in out/chunks/products_*.json; do
             [ -e "$f" ] || break
-            post_chunk "${SUPABASE_URL}/rest/v1/products?on_conflict=barcode" "$f"
+            post_chunk "${SUPABASE_URL}/rest/v1/products?on_conflict=barcode" "$f" "$PREFER_HDR_PRODUCTS"
           done
 
+          # stores: MERGE
           if ls out/chunks/stores_*.json >/dev/null 2>&1; then
             for f in out/chunks/stores_*.json; do
-              post_chunk "${SUPABASE_URL}/rest/v1/stores?on_conflict=store_key" "$f"
+              post_chunk "${SUPABASE_URL}/rest/v1/stores?on_conflict=store_key" "$f" "$PREFER_HDR_MERGE"
             done
           else
             echo "No stores chunks to send (OK)."
           fi
 
+          # prices_current: MERGE
           for f in out/chunks/records_*.json; do
             [ -e "$f" ] || break
-            post_chunk "${SUPABASE_URL}/rest/v1/prices_current?on_conflict=price_key" "$f"
+            post_chunk "${SUPABASE_URL}/rest/v1/prices_current?on_conflict=price_key" "$f" "$PREFER_HDR_MERGE"
           done
 
       - name: Upload artifacts (manual runs only)
