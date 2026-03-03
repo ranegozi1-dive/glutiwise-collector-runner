@@ -512,20 +512,37 @@ jobs:
           test -f out/stores_upsert.json
           test -f out/records_upsert.json
 
-          if [ "$WRITE_TO_SUPABASE" != "true" ]; then
-            echo "DRY RUN: not writing to Supabase."
-            exit 0
-          fi
-
-          # products: INSERT-ONLY כדי לא לדרוס gf_verified/שדות אחרים בעתיד
-          PREFER_HDR_PRODUCTS="Prefer: resolution=ignore-duplicates,return=minimal,missing=default"
-          # stores/prices_current: upsert רגיל
-          PREFER_HDR_MERGE="Prefer: resolution=merge-duplicates,return=minimal,missing=default"
-
           mkdir -p out/chunks
 
+          # 1) נרמול products_upsert.json למפתחות אחידים (ממלא חסרים ב-null)
+          # 2) יצירת chunks + הדפסת CHUNKS תמיד (גם ב-DRY RUN)
           python3 - <<'PY'
           import json, os
+
+          def normalize_uniform_keys(path: str):
+              arr = json.load(open(path, "r", encoding="utf-8"))
+              if not isinstance(arr, list):
+                  raise SystemExit(f"{path} is not a JSON array")
+              if not arr:
+                  return 0, 0, 0
+              keys = set()
+              for obj in arr:
+                  if not isinstance(obj, dict):
+                      raise SystemExit(f"{path} contains non-object item")
+                  keys.update(obj.keys())
+              keys = sorted(keys)
+              filled = 0
+              for obj in arr:
+                  for k in keys:
+                      if k not in obj:
+                          obj[k] = None
+                          filled += 1
+              json.dump(arr, open(path, "w", encoding="utf-8"), ensure_ascii=False)
+              return len(arr), len(keys), filled
+
+          rows, nkeys, filled = normalize_uniform_keys("out/products_upsert.json")
+          print(f"NORMALIZE products rows={rows} uniform_keys={nkeys} filled_missing_fields={filled}")
+
           def split_json_array(src, prefix, chunk_size):
               arr = json.load(open(src, "r", encoding="utf-8"))
               if not isinstance(arr, list):
@@ -541,11 +558,21 @@ jobs:
                       json.dump(part, f, ensure_ascii=False)
               return n
 
-          n_prod = split_json_array("out/products_upsert.json", "out/chunks/products_", 5000)
+          n_prod  = split_json_array("out/products_upsert.json", "out/chunks/products_", 5000)
           n_store = split_json_array("out/stores_upsert.json",   "out/chunks/stores_",   1000)
-          n_rec  = split_json_array("out/records_upsert.json",  "out/chunks/records_",  5000)
+          n_rec   = split_json_array("out/records_upsert.json",  "out/chunks/records_",  5000)
           print("CHUNKS products=", n_prod, "stores=", n_store, "records=", n_rec)
           PY
+
+          if [ "$WRITE_TO_SUPABASE" != "true" ]; then
+            echo "DRY RUN: not writing to Supabase."
+            exit 0
+          fi
+
+          # products: INSERT-ONLY (לא מעדכנים מוצר קיים)
+          PREFER_HDR_PRODUCTS="Prefer: resolution=ignore-duplicates,return=minimal,missing=default"
+          # stores / prices_current: upsert רגיל
+          PREFER_HDR_MERGE="Prefer: resolution=merge-duplicates,return=minimal,missing=default"
 
           post_chunk () {
             local url="$1"
@@ -581,7 +608,6 @@ jobs:
             [ -e "$f" ] || break
             post_chunk "${SUPABASE_URL}/rest/v1/prices_current?on_conflict=price_key" "$f" "$PREFER_HDR_MERGE"
           done
-
       - name: Upload artifacts (manual runs only)
         if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/upload-artifact@v4
