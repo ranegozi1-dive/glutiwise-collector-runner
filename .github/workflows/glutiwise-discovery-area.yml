@@ -1,0 +1,330 @@
+name: GlutiWise Discovery - Area Coverage (No DB)
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit_files:
+        description: "LIMIT קבצים להורדה (999999 = בלי LIMIT)"
+        required: true
+        default: "999999"
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    env:
+      LIMIT: ${{ inputs.limit_files || '999999' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare folders
+        run: |
+          mkdir -p dumps out
+
+      - name: Pull scraper image
+        run: |
+          docker pull erlichsefi/israeli-supermarket-scarpers:latest
+
+      - name: Download STORE + PRICE_FULL files
+        run: |
+          set -euo pipefail
+          ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE"
+          docker run --rm \
+            -v "${{ github.workspace }}/dumps:/usr/src/app/dumps" \
+            -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL,YOHANANOF" \
+            -e ENABLED_FILE_TYPES="$ENABLED_FILE_TYPES" \
+            -e LIMIT="$LIMIT" \
+            erlichsefi/israeli-supermarket-scarpers:latest
+
+      - name: Analyze coverage (area) and export report
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, csv, json, glob, gzip, zipfile
+          import xml.etree.ElementTree as ET
+          from collections import defaultdict, Counter
+
+          TARGET_CITIES = [
+              "הוד השרון", "כפר סבא", "רעננה",
+              "הרצליה", "רמת השרון", "פתח תקווה"
+          ]
+
+          CITY_PATTERNS = {
+              "הוד השרון": [r"הוד\s*השרון", r"הודהשרון"],
+              "כפר סבא": [r"כפר\s*סבא", r"כפר-סבא", r"כפרסבא", r'כפ\"ס', r"כפס"],
+              "רעננה": [r"רעננה"],
+              "הרצליה": [r"הרצליה"],
+              "רמת השרון": [r"רמת\s*השרון", r"רמת-השרון", r"רמה\"ש", r"רמש"],
+              "פתח תקווה": [r"פתח\s*תקו?וה", r"פתח-תקו?וה", r'פ\"ת'],
+          }
+
+          CHAINID_TO_RETAILER = {
+              "7290027600007": "ramilevy",
+              "7290058140886": "shufersal",
+              "7290803800003": "yohananof",
+          }
+
+          def localname(tag): return tag.split("}")[-1] if "}" in tag else tag
+          def norm(s): return re.sub(r"\s+"," ", (s or "").strip())
+          def digits_only(s): return re.sub(r"\D", "", (s or ""))
+
+          def canon_id(s: str) -> str:
+              s = (s or "").strip()
+              if re.fullmatch(r"\d+", s or ""):
+                  try: return str(int(s))
+                  except: return s
+              return s
+
+          def retailer_from(chain_id, chain_name):
+              if (chain_id or "") in CHAINID_TO_RETAILER:
+                  return CHAINID_TO_RETAILER[chain_id]
+              cn = chain_name or ""
+              if "שופרסל" in cn: return "shufersal"
+              if "רמי" in cn: return "ramilevy"
+              if "יוחננוף" in cn or "YOHANANOF" in cn.upper(): return "yohananof"
+              return None
+
+          def load_xml_roots(path):
+              lp = path.lower()
+              if lp.endswith(".zip"):
+                  roots=[]
+                  with zipfile.ZipFile(path,"r") as z:
+                      for nm in z.namelist():
+                          if nm.lower().endswith(".xml"):
+                              roots.append(ET.fromstring(z.read(nm)))
+                  return roots
+              if lp.endswith(".xml.gz") or lp.endswith(".gz"):
+                  with gzip.open(path,"rb") as f:
+                      return [ET.fromstring(f.read())]
+              return [ET.parse(path).getroot()]
+
+          def iter_dump_paths():
+              for p in sorted(glob.glob("dumps/**/*", recursive=True)):
+                  if os.path.isfile(p) and p.lower().endswith((".xml",".gz",".zip",".xml.gz")):
+                      yield p
+
+          def extract_any(elem, keys):
+              keys = {k.lower() for k in keys}
+              for el in elem.iter():
+                  if localname(el.tag).lower() in keys and (el.text or "").strip():
+                      return norm(el.text)
+              return ""
+
+          def infer_city(city, store_name, address):
+              c = norm(city)
+              if c and c.lower() != "unknown" and not re.fullmatch(r"\d+", c):
+                  # אם העיר בדיוק אחת מהיעד – יופי; אם לא, נשאיר את המקור
+                  return c
+              hay = " ".join([norm(store_name), norm(address)])
+              for city_name, pats in CITY_PATTERNS.items():
+                  for pat in pats:
+                      if re.search(pat, hay):
+                          return city_name
+              return ""
+
+          # --- 1) Parse STORE files to build metadata ---
+          stores = {}  # (retailer, store_id_raw) -> meta
+          store_files = 0
+          store_nodes = 0
+
+          for path in iter_dump_paths():
+              try:
+                  roots = load_xml_roots(path)
+              except Exception:
+                  continue
+
+              # quick check: has <Store>
+              has_store = False
+              for root in roots:
+                  if any(localname(el.tag).lower() == "store" for el in root.iter()):
+                      has_store = True
+                      break
+              if not has_store:
+                  continue
+
+              store_files += 1
+              for root in roots:
+                  chain_id = extract_any(root, {"chainid"})
+                  chain_name = extract_any(root, {"chainname"})
+                  retailer = retailer_from(chain_id, chain_name)
+                  if not retailer:
+                      continue
+
+                  for el in root.iter():
+                      if localname(el.tag).lower() != "store":
+                          continue
+                      store_nodes += 1
+                      sid_raw = extract_any(el, {"storeid"}).strip()
+                      if not sid_raw:
+                          continue
+
+                      store_name = extract_any(el, {"storename"}) or ""
+                      address = extract_any(el, {"address"}) or ""
+                      city = extract_any(el, {"city"}) or ""
+                      city_inf = infer_city(city, store_name, address)
+
+                      stores[(retailer, sid_raw)] = {
+                          "retailer": retailer,
+                          "store_id_raw": sid_raw,
+                          "store_id_canon": canon_id(sid_raw),
+                          "store_key_raw": f"{retailer}:{sid_raw}",
+                          "store_key_canon": f"{retailer}:{canon_id(sid_raw)}",
+                          "store_name": store_name,
+                          "city": city,
+                          "city_inferred": city_inf,
+                          "address": address,
+                      }
+
+          # --- 2) Scan PRICE_FULL files and count per store ---
+          BARCODE_KEYS_ORDER = ["barcode", "gtin", "ean", "itemcode", "itemid", "itemnumber", "code"]
+          PRICE_TAGS = {"item", "product"}  # tags to consider as product nodes
+
+          per_store = defaultdict(lambda: Counter())
+          valid_sets = defaultdict(set)     # (retailer, store_id_raw) -> set(barcode 8-13)
+          short_sets = defaultdict(set)     # (retailer, store_id_raw) -> set(code <8 digits)
+          scanned_price_files = 0
+          scanned_price_roots = 0
+
+          def extract_barcode(node):
+              found = []
+              for el in node.iter():
+                  t = localname(el.tag).lower()
+                  if t in BARCODE_KEYS_ORDER:
+                      v = digits_only(el.text or "")
+                      if v:
+                          found.append(v)
+              # attrs fallback
+              for el in node.iter():
+                  for k, v in (el.attrib or {}).items():
+                      kk = str(k).lower()
+                      if any(x in kk for x in ["barcode","gtin","ean","itemcode","code"]):
+                          vv = digits_only(v or "")
+                          if vv:
+                              found.append(vv)
+              for cand in found:
+                  if cand:
+                      return cand
+              return ""
+
+          for path in iter_dump_paths():
+              base = os.path.basename(path).lower()
+              if base.startswith("stores"):
+                  continue
+              try:
+                  roots = load_xml_roots(path)
+              except Exception:
+                  continue
+
+              scanned_price_files += 1
+              for root in roots:
+                  scanned_price_roots += 1
+                  chain_id = extract_any(root, {"chainid"})
+                  chain_name = extract_any(root, {"chainname"})
+                  retailer = retailer_from(chain_id, chain_name)
+                  if not retailer:
+                      continue
+                  sid_raw = extract_any(root, {"storeid"}).strip()
+                  if not sid_raw:
+                      continue
+
+                  meta = stores.get((retailer, sid_raw))
+                  # אם אין STORE meta, לא נדע עיר => לא נכניס לדוח אזורי
+                  if not meta:
+                      continue
+                  if meta.get("city_inferred") not in TARGET_CITIES:
+                      continue
+
+                  per_store[(retailer, sid_raw)]["price_roots"] += 1
+
+                  for node in root.iter():
+                      if localname(node.tag).lower() not in PRICE_TAGS:
+                          continue
+                      per_store[(retailer, sid_raw)]["item_nodes"] += 1
+
+                      bc = extract_barcode(node)
+                      if not bc:
+                          per_store[(retailer, sid_raw)]["no_code"] += 1
+                          continue
+
+                      if not bc.isdigit():
+                          per_store[(retailer, sid_raw)]["non_digit_code"] += 1
+                          continue
+
+                      L = len(bc)
+                      if 8 <= L <= 13:
+                          per_store[(retailer, sid_raw)]["valid_8_13"] += 1
+                          valid_sets[(retailer, sid_raw)].add(bc)
+                      elif L < 8:
+                          per_store[(retailer, sid_raw)]["short_lt8"] += 1
+                          short_sets[(retailer, sid_raw)].add(bc)
+                      else:
+                          per_store[(retailer, sid_raw)]["long_gt13"] += 1
+
+          # --- 3) Build report rows ---
+          rows = []
+          for (retailer, sid_raw), meta in stores.items():
+              if meta.get("city_inferred") not in TARGET_CITIES:
+                  continue
+
+              cnt = per_store[(retailer, sid_raw)]
+              rows.append({
+                  **meta,
+                  "price_roots": int(cnt.get("price_roots", 0)),
+                  "item_nodes": int(cnt.get("item_nodes", 0)),
+                  "valid_8_13": int(cnt.get("valid_8_13", 0)),
+                  "distinct_valid_8_13": len(valid_sets[(retailer, sid_raw)]),
+                  "short_lt8": int(cnt.get("short_lt8", 0)),
+                  "distinct_short_lt8": len(short_sets[(retailer, sid_raw)]),
+                  "long_gt13": int(cnt.get("long_gt13", 0)),
+                  "no_code": int(cnt.get("no_code", 0)),
+                  "non_digit_code": int(cnt.get("non_digit_code", 0)),
+              })
+
+          rows.sort(key=lambda r: (r["distinct_valid_8_13"], r["price_roots"]), reverse=True)
+
+          os.makedirs("out", exist_ok=True)
+          csv_path = "out/discovery_area_coverage.csv"
+          json_path = "out/discovery_area_coverage.json"
+
+          fieldnames = [
+              "city_inferred","retailer","store_key_raw","store_key_canon",
+              "store_id_raw","store_id_canon","store_name","city","address",
+              "price_roots","item_nodes",
+              "valid_8_13","distinct_valid_8_13",
+              "short_lt8","distinct_short_lt8",
+              "long_gt13","no_code","non_digit_code"
+          ]
+
+          with open(csv_path, "w", newline="", encoding="utf-8") as f:
+              w = csv.DictWriter(f, fieldnames=fieldnames)
+              w.writeheader()
+              for r in rows:
+                  w.writerow({k: r.get(k, "") for k in fieldnames})
+
+          with open(json_path, "w", encoding="utf-8") as f:
+              json.dump(rows, f, ensure_ascii=False, indent=2)
+
+          # --- 4) Print TOP candidates (10 overall, and per retailer) ---
+          print(f"DISCOVERY SUMMARY: store_files={store_files} store_nodes={store_nodes} price_files_scanned={scanned_price_files} price_roots_scanned={scanned_price_roots}")
+          print(f"AREA STORES FOUND: {len(rows)}")
+
+          print("TOP 10 (overall) by distinct_valid_8_13:")
+          for r in rows[:10]:
+              print(f"- {r['city_inferred']} | {r['retailer']} | {r['store_key_raw']} | {r['store_name']} | distinct_valid_8_13={r['distinct_valid_8_13']} | short_distinct={r['distinct_short_lt8']} | price_roots={r['price_roots']}")
+
+          by_retailer = defaultdict(list)
+          for r in rows:
+              by_retailer[r["retailer"]].append(r)
+          for ret, lst in by_retailer.items():
+              lst.sort(key=lambda r: r["distinct_valid_8_13"], reverse=True)
+              print(f"TOP 5 for retailer={ret}:")
+              for r in lst[:5]:
+                  print(f"  - {r['city_inferred']} | {r['store_key_raw']} | {r['store_name']} | distinct_valid_8_13={r['distinct_valid_8_13']} | short_distinct={r['distinct_short_lt8']}")
+          PY
+
+      - name: Upload discovery artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glutiwise-discovery-area
+          path: out/
