@@ -29,10 +29,12 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      LIMIT: ${{ inputs.limit_prices || '2000' }}
-      MAX_RECORDS: ${{ inputs.max_records || '30000' }}
-      MAX_STORES: ${{ inputs.max_stores || '30' }}
-      WRITE_TO_SUPABASE: ${{ inputs.write_to_supabase || 'true' }}
+      # אם זו הרצה ידנית (workflow_dispatch) – קח מה-inputs,
+      # אחרת (schedule) – תן ברירות מחדל “גדולות” כמו שצריך.
+      LIMIT: ${{ (github.event_name == 'workflow_dispatch' && inputs.limit_prices) || '999999' }}
+      MAX_RECORDS: ${{ (github.event_name == 'workflow_dispatch' && inputs.max_records) || '700000' }}
+      MAX_STORES: ${{ (github.event_name == 'workflow_dispatch' && inputs.max_stores) || '30' }}
+      WRITE_TO_SUPABASE: ${{ (github.event_name == 'workflow_dispatch' && inputs.write_to_supabase) || 'true' }}
 
     steps:
       - name: Prepare folders
@@ -46,7 +48,7 @@ jobs:
       - name: Download STORE + PRICE files (hardcoded types)
         run: |
           set -euo pipefail
-          ENABLED_FILE_TYPES="STORE_FILE,PRICE_FILE,PRICE_FULL_FILE"
+          ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE"
           docker run --rm \
             -v "${{ github.workspace }}/dumps:/usr/src/app/dumps" \
             -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL,YOHANANOF" \
