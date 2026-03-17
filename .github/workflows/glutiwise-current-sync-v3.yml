@@ -1,4 +1,4 @@
-name: GlutiWise Current Sync to Supabase v2
+name: GlutiWise Current Sync to Supabase v3
 
 on:
   # Uncomment the 2 lines below only after the first successful manual run.
@@ -16,8 +16,11 @@ on:
         default: ""
 
 concurrency:
-  group: glutiwise-current-sync-v2
+  group: glutiwise-current-sync-v3
   cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   sync:
@@ -30,7 +33,7 @@ jobs:
       SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Prepare folders
         run: |
@@ -1234,7 +1237,7 @@ jobs:
 
       - name: Upload run artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: glutiwise-current-sync-${{ github.run_id }}
           path: out
