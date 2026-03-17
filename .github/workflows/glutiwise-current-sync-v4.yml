@@ -1,4 +1,4 @@
-name: GlutiWise Current Sync to Supabase v3
+name: GlutiWise Current Sync to Supabase v4
 
 on:
   # Uncomment the 2 lines below only after the first successful manual run.
@@ -16,7 +16,7 @@ on:
         default: ""
 
 concurrency:
-  group: glutiwise-current-sync-v3
+  group: glutiwise-current-sync-v4
   cancel-in-progress: false
 
 permissions:
@@ -241,32 +241,22 @@ jobs:
               retailer, store_id_raw = split_store_key(store_key)
               digits = re.sub(r"\D", "", clean_text(store_id_raw))
               keys = []
-
-              def add_for(ret: str):
-                  if not ret:
-                      return
-                  seen_local = set(keys)
-                  if digits:
-                      variants = [digits, digits.zfill(3)]
-                      try:
-                          variants.append(str(int(digits)))
-                      except Exception:
-                          pass
-                      for variant in variants:
-                          key = f"{ret}:{variant}"
-                          if key not in seen_local:
-                              keys.append(key)
-                              seen_local.add(key)
-                  else:
-                      key = f"{ret}:{clean_text(store_id_raw)}"
+              seen_local = set()
+              if digits:
+                  variants = [digits, digits.zfill(3)]
+                  try:
+                      variants.append(str(int(digits)))
+                  except Exception:
+                      pass
+                  for variant in variants:
+                      key = f"{retailer}:{variant}"
                       if key not in seen_local:
                           keys.append(key)
-
-              add_for(retailer)
-              if retailer == 'shufersal':
-                  add_for('ramilevy')
-              elif retailer == 'ramilevy':
-                  add_for('shufersal')
+                          seen_local.add(key)
+              else:
+                  key = f"{retailer}:{clean_text(store_id_raw)}"
+                  if key not in seen_local:
+                      keys.append(key)
               return keys
 
           def detect_city(*values):
@@ -687,10 +677,19 @@ jobs:
               product_candidates = defaultdict(lambda: defaultdict(list))
               parse_errors = []
               file_updated_candidates = []
+              coverage = {
+                  "store_key": store_key,
+                  "valid_price_rows": 0,
+                  "unique_barcodes": set(),
+                  "name_present": 0,
+                  "brand_present": 0,
+                  "manufacturer_present": 0,
+                  "category_present": 0,
+              }
               try:
                   roots = load_xml_roots(path)
               except Exception as exc:
-                  return None, None, [{"store_key": store_key, "file": str(path), "error": str(exc)}]
+                  return None, None, coverage, [{"store_key": store_key, "file": str(path), "error": str(exc)}]
               for root in roots:
                   root_updated = parse_datetime_value(extract_any(root, {"PriceUpdateDate", "UpdateDate", "LastUpdateDate"}))
                   if root_updated:
@@ -727,6 +726,16 @@ jobs:
                               "last_seen_at": RUN_TS_ISO,
                               "_name_candidate": item_name,
                           }
+                      coverage["valid_price_rows"] += 1
+                      coverage["unique_barcodes"].add(barcode)
+                      if clean_text(item_name) and not text_is_placeholder(item_name):
+                          coverage["name_present"] += 1
+                      if clean_text(brand) and not text_is_placeholder(brand):
+                          coverage["brand_present"] += 1
+                      if clean_text(manufacturer) and not text_is_placeholder(manufacturer):
+                          coverage["manufacturer_present"] += 1
+                      if clean_text(category) and not text_is_placeholder(category):
+                          coverage["category_present"] += 1
                       product_candidates[barcode]["name"].append(item_name)
                       product_candidates[barcode]["brand"].append(brand)
                       product_candidates[barcode]["manufacturer"].append(manufacturer)
@@ -734,7 +743,8 @@ jobs:
               items = list(items_by_key.values())
               for item in items:
                   item.pop("_name_candidate", None)
-              return items, product_candidates, parse_errors
+              coverage["unique_barcodes"] = len(coverage["unique_barcodes"])
+              return items, product_candidates, coverage, parse_errors
 
           def parse_promo_file(path: Path, store_key: str):
               promo_headers = {}
@@ -849,41 +859,20 @@ jobs:
 
           existing_target_chain_rows = fetch_existing_target_chain_stores()
           existing_target_chain_by_key = {row["store_key"]: row for row in existing_target_chain_rows}
-
-          def target_hint_from_row(row):
-              target_city, reasons = detect_city(
-                  ("city", row.get("city", "")),
-                  ("address", row.get("address", "")),
-                  ("store_name", row.get("store_name", "")),
-              )
-              if target_city in TARGET_CITIES:
-                  return {"target_city": target_city, "reasons": reasons}
-              return None
-
-          existing_target_hints_by_discovered_key = {}
           legacy_store_key_aliases = {}
           unresolved_existing_target_rows = []
 
           for row in existing_target_chain_rows:
-              hint = target_hint_from_row(row)
-              if not hint:
+              raw_key = clean_text(row.get("store_key", ""))
+              if not raw_key:
                   continue
-              raw_key = row["store_key"]
-              matched_discovered_key = None
-              for candidate_key in equivalent_store_keys(raw_key):
-                  if candidate_key in discovered_stores_map:
-                      matched_discovered_key = candidate_key
-                      break
-              if matched_discovered_key:
-                  existing_target_hints_by_discovered_key.setdefault(matched_discovered_key, []).append({
-                      "raw_store_key": raw_key,
-                      "target_city": hint["target_city"],
-                      "reasons": hint["reasons"],
-                      "row": row,
-                  })
-                  if raw_key != matched_discovered_key:
-                      legacy_store_key_aliases[raw_key] = matched_discovered_key
-              else:
+              retailer, store_id_raw = split_store_key(raw_key)
+              if retailer not in TARGET_RETAILERS:
+                  continue
+              canonical_key = canonical_store_key(retailer, store_id_raw)
+              if raw_key != canonical_key and canonical_key in discovered_stores_map:
+                  legacy_store_key_aliases[raw_key] = canonical_key
+              if row.get("mvp_active") and canonical_key not in discovered_stores_map:
                   unresolved_existing_target_rows.append({
                       "store_key": raw_key,
                       "retailer": row.get("retailer", ""),
@@ -891,32 +880,21 @@ jobs:
                       "store_name": row.get("store_name", ""),
                       "city": row.get("city", ""),
                       "address": row.get("address", ""),
-                      "target_city_hint": hint["target_city"],
-                      "reason": " | ".join(hint["reasons"]),
+                      "target_city_hint": "",
+                      "reason": "existing_mvp_active_store_not_found_in_latest_store_files",
                   })
 
           def select_existing_store_for_discovered(discovered_key: str):
               exact = existing_target_chain_by_key.get(discovered_key)
               if exact:
                   return exact
-              hints = existing_target_hints_by_discovered_key.get(discovered_key, [])
-              if hints:
-                  return hints[0]["row"]
               for alias_key in equivalent_store_keys(discovered_key):
                   candidate = existing_target_chain_by_key.get(alias_key)
                   if candidate:
+                      if alias_key != discovered_key:
+                          legacy_store_key_aliases.setdefault(alias_key, discovered_key)
                       return candidate
               return None
-
-          for store_key, row in list(discovered_stores_map.items()):
-              hints = existing_target_hints_by_discovered_key.get(store_key, [])
-              hinted_target_city = hints[0]["target_city"] if hints else ""
-              final_target_city = row.get("target_city") or hinted_target_city or ""
-              if final_target_city in TARGET_CITIES:
-                  row["is_target"] = True
-                  row["target_city"] = final_target_city
-                  row["canonical_city"] = final_target_city
-              discovered_stores_map[store_key] = row
 
           discovered_store_keys = set(discovered_stores_map.keys())
           discovered_target_stores = [row for row in discovered_stores_map.values() if row.get("is_target")]
@@ -1021,15 +999,34 @@ jobs:
           failed_price_store_rows = []
           products_candidates = defaultdict(lambda: defaultdict(list))
           prices_summary_rows = []
+          price_store_coverage_rows = []
           price_parse_errors = list(price_file_diagnostics)
 
           for store_key in sorted(target_store_keys):
               selection = price_file_map.get(store_key)
               if not selection:
                   continue
-              items, product_candidates, parse_errors = parse_price_file(selection["path"], store_key)
+              items, product_candidates, coverage, parse_errors = parse_price_file(selection["path"], store_key)
               price_parse_errors.extend(parse_errors)
               if parse_errors or items is None or not items:
+                  price_store_coverage_rows.append({
+                      "store_key": store_key,
+                      "retailer": discovered_stores_map[store_key]["retailer"],
+                      "store_name": discovered_stores_map[store_key]["store_name"],
+                      "city": discovered_stores_map[store_key]["canonical_city"],
+                      "valid_price_rows": coverage.get("valid_price_rows", 0),
+                      "unique_barcodes": coverage.get("unique_barcodes", 0),
+                      "name_present": coverage.get("name_present", 0),
+                      "brand_present": coverage.get("brand_present", 0),
+                      "manufacturer_present": coverage.get("manufacturer_present", 0),
+                      "category_present": coverage.get("category_present", 0),
+                      "pct_name": 0,
+                      "pct_brand": 0,
+                      "pct_manufacturer": 0,
+                      "pct_category": 0,
+                      "source_file": str(selection["path"]),
+                      "source_ts": selection["timestamp"],
+                  })
                   failed_price_store_rows.append({
                       "store_key": store_key,
                       "retailer": discovered_stores_map[store_key]["retailer"],
@@ -1045,6 +1042,26 @@ jobs:
               for barcode, fields in product_candidates.items():
                   for field_name, values in fields.items():
                       products_candidates[barcode][field_name].extend(values)
+              def pct(n, d):
+                  return round((100.0 * n / d), 2) if d else 0.0
+              price_store_coverage_rows.append({
+                  "store_key": store_key,
+                  "retailer": discovered_stores_map[store_key]["retailer"],
+                  "store_name": discovered_stores_map[store_key]["store_name"],
+                  "city": discovered_stores_map[store_key]["canonical_city"],
+                  "valid_price_rows": coverage.get("valid_price_rows", 0),
+                  "unique_barcodes": coverage.get("unique_barcodes", 0),
+                  "name_present": coverage.get("name_present", 0),
+                  "brand_present": coverage.get("brand_present", 0),
+                  "manufacturer_present": coverage.get("manufacturer_present", 0),
+                  "category_present": coverage.get("category_present", 0),
+                  "pct_name": pct(coverage.get("name_present", 0), coverage.get("valid_price_rows", 0)),
+                  "pct_brand": pct(coverage.get("brand_present", 0), coverage.get("valid_price_rows", 0)),
+                  "pct_manufacturer": pct(coverage.get("manufacturer_present", 0), coverage.get("valid_price_rows", 0)),
+                  "pct_category": pct(coverage.get("category_present", 0), coverage.get("valid_price_rows", 0)),
+                  "source_file": str(selection["path"]),
+                  "source_ts": selection["timestamp"],
+              })
               prices_summary_rows.append({
                   "store_key": store_key,
                   "retailer": discovered_stores_map[store_key]["retailer"],
@@ -1086,6 +1103,7 @@ jobs:
           promotions_payload = []
           promotion_items_payload = []
           successful_promo_store_keys = []
+          failed_promo_store_rows = []
           processed_promotion_keys = set()
           promotions_summary_rows = []
           promo_parse_errors = price_parse_errors[:0] + list(promo_full_diag) + list(promo_partial_diag)
@@ -1097,6 +1115,15 @@ jobs:
               promo_headers, promo_items, parse_errors = parse_promo_file(selection["path"], store_key)
               promo_parse_errors.extend(parse_errors)
               if parse_errors or promo_headers is None:
+                  failed_promo_store_rows.append({
+                      "store_key": store_key,
+                      "retailer": discovered_stores_map[store_key]["retailer"],
+                      "store_name": discovered_stores_map[store_key]["store_name"],
+                      "city": discovered_stores_map[store_key]["canonical_city"],
+                      "source_file": str(selection["path"]),
+                      "source_ts": selection["timestamp"],
+                      "error": "; ".join(err.get("error", "parse failure") for err in (parse_errors or [{"error": "promo parse failure"}])),
+                  })
                   continue
               promotions_payload.extend(promo_headers)
               promotion_items_payload.extend(promo_items)
@@ -1153,6 +1180,29 @@ jobs:
               promotions_summary_rows,
               ["store_key", "retailer", "store_name", "city", "promotions_count", "promotion_items_count", "source_file", "source_ts"],
           )
+          write_csv(
+              OUT_DIR / "failed_promo_files.csv",
+              failed_promo_store_rows,
+              ["store_key", "retailer", "store_name", "city", "source_file", "source_ts", "error"],
+          )
+          write_csv(
+              OUT_DIR / "product_field_coverage_by_store.csv",
+              price_store_coverage_rows,
+              ["store_key", "retailer", "store_name", "city", "valid_price_rows", "unique_barcodes", "name_present", "brand_present", "manufacturer_present", "category_present", "pct_name", "pct_brand", "pct_manufacturer", "pct_category", "source_file", "source_ts"],
+          )
+
+          product_payload_coverage = {
+              "products_payload": len(products_payload),
+              "name_present": sum(1 for row in products_payload if clean_text(row.get("name"))),
+              "brand_present": sum(1 for row in products_payload if clean_text(row.get("brand"))),
+              "manufacturer_present": sum(1 for row in products_payload if clean_text(row.get("manufacturer"))),
+              "category_present": sum(1 for row in products_payload if clean_text(row.get("category"))),
+          }
+          for key in ["name_present", "brand_present", "manufacturer_present", "category_present"]:
+              product_payload_coverage[f"pct_{key.replace('_present','')}"] = round((100.0 * product_payload_coverage[key] / product_payload_coverage["products_payload"]), 2) if product_payload_coverage["products_payload"] else 0.0
+          write_json(OUT_DIR / "product_payload_coverage.json", product_payload_coverage)
+
+          strict_target_coverage_ok = not missing_price_store_keys and not failed_price_store_rows and not missing_promo_store_keys and not failed_promo_store_rows
 
           payload_counts = {
               "run_ts": RUN_TS_ISO,
@@ -1168,8 +1218,10 @@ jobs:
               "successful_promo_store_keys": len(successful_promo_store_keys),
               "missing_price_store_keys": len(missing_price_store_keys),
               "missing_promo_store_keys": len(missing_promo_store_keys),
+              "failed_promo_store_rows": len(failed_promo_store_rows),
               "legacy_store_key_aliases": len(legacy_store_key_aliases),
               "unresolved_existing_target_rows": len(unresolved_existing_target_rows),
+              "ready_for_db_write": strict_target_coverage_ok,
           }
           write_json(OUT_DIR / "db_payload_counts.json", payload_counts)
           write_json(OUT_DIR / "run_summary.json", {
@@ -1183,6 +1235,23 @@ jobs:
           write_json(OUT_DIR / "prices_upsert.json", prices_payload)
           write_json(OUT_DIR / "promotions_upsert.json", promotions_payload)
           write_json(OUT_DIR / "promotion_items_upsert.json", promotion_items_payload)
+
+          if not strict_target_coverage_ok:
+              coverage_errors = []
+              if missing_price_store_keys:
+                  coverage_errors.append(f"missing_price_store_keys={len(missing_price_store_keys)}")
+              if failed_price_store_rows:
+                  coverage_errors.append(f"failed_price_store_rows={len(failed_price_store_rows)}")
+              if missing_promo_store_keys:
+                  coverage_errors.append(f"missing_promo_store_keys={len(missing_promo_store_keys)}")
+              if failed_promo_store_rows:
+                  coverage_errors.append(f"failed_promo_store_rows={len(failed_promo_store_rows)}")
+              message = "Target-store coverage is incomplete; DB write blocked: " + ", ".join(coverage_errors)
+              if WRITE_TO_SUPABASE:
+                  raise SystemExit(message)
+              log(message)
+              log("WRITE_TO_SUPABASE=false -> payload built for inspection only. Fix coverage before DB write.")
+              sys.exit(0)
 
           if not WRITE_TO_SUPABASE:
               log("WRITE_TO_SUPABASE=false -> built payload and artifacts only. No DB writes performed.")
