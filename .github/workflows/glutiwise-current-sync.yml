@@ -1,0 +1,1076 @@
+name: GlutiWise Current Sync to Supabase
+
+on:
+  # Uncomment the 2 lines below only after the first successful manual run.
+  # schedule:
+  #   - cron: "30 1 * * *"
+  workflow_dispatch:
+    inputs:
+      write_to_supabase:
+        description: "Write to Supabase (true/false)"
+        required: true
+        default: "true"
+      scraper_today:
+        description: "Optional UTC override for scraper TODAY, format YYYY-MM-DD HH:MM"
+        required: false
+        default: ""
+
+concurrency:
+  group: glutiwise-current-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      WRITE_TO_SUPABASE: ${{ inputs.write_to_supabase || 'true' }}
+      SCRAPER_TODAY: ${{ inputs.scraper_today || '' }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare folders
+        run: |
+          mkdir -p dumps out out/chunks
+
+      - name: Pull scraper image
+        run: |
+          docker pull erlichsefi/israeli-supermarket-scarpers:latest
+
+      - name: Download store, price, and promotion files
+        run: |
+          set -euo pipefail
+          ARGS=(
+            --rm
+            -v "${{ github.workspace }}/dumps:/usr/src/app/dumps"
+            -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL,YOHANANOF"
+            -e ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE,PROMO_FILE,PROMO_FULL_FILE"
+            -e NUMBER_OF_PROCESSES="3"
+            -e OUTPUT_MODE="disk"
+            -e STORAGE_PATH="/usr/src/app/dumps"
+          )
+          if [ -n "${SCRAPER_TODAY}" ]; then
+            ARGS+=( -e "TODAY=${SCRAPER_TODAY}" )
+          fi
+          docker run "${ARGS[@]}" erlichsefi/israeli-supermarket-scarpers:latest
+
+      - name: Build payload, validate, and sync
+        run: |
+          cat > sync_glutiwise.py <<'PY'
+          import csv
+          import gzip
+          import hashlib
+          import json
+          import os
+          import re
+          import sys
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          import xml.etree.ElementTree as ET
+          import zipfile
+          from collections import Counter, defaultdict
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+
+          TARGET_RETAILERS = ("shufersal", "ramilevy", "yohananof")
+          TARGET_CITIES = (
+              "הוד השרון",
+              "כפר סבא",
+              "פתח תקווה",
+              "רמת השרון",
+              "רעננה",
+          )
+          CHAIN_ID_TO_RETAILER = {
+              "7290027600007": "shufersal",
+              "7290058140886": "ramilevy",
+              "7290803800003": "yohananof",
+          }
+          RUN_TS = datetime.now(timezone.utc).replace(microsecond=0)
+          RUN_TS_ISO = RUN_TS.isoformat().replace("+00:00", "Z")
+          PRICE_STALE_BEFORE = (RUN_TS - timedelta(days=7)).isoformat().replace("+00:00", "Z")
+          SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
+          SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_JWT"]
+          WRITE_TO_SUPABASE = os.environ.get("WRITE_TO_SUPABASE", "true").strip().lower() == "true"
+          OUT_DIR = Path("out")
+          DUMPS_DIR = Path("dumps")
+          OUT_DIR.mkdir(parents=True, exist_ok=True)
+          (OUT_DIR / "chunks").mkdir(parents=True, exist_ok=True)
+
+          def log(msg: str) -> None:
+              print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+          def write_json(path: Path, data) -> None:
+              path.parent.mkdir(parents=True, exist_ok=True)
+              with path.open("w", encoding="utf-8") as f:
+                  json.dump(data, f, ensure_ascii=False, indent=2)
+
+          def write_csv(path: Path, rows, fieldnames) -> None:
+              path.parent.mkdir(parents=True, exist_ok=True)
+              with path.open("w", encoding="utf-8", newline="") as f:
+                  writer = csv.DictWriter(f, fieldnames=fieldnames)
+                  writer.writeheader()
+                  for row in rows:
+                      writer.writerow({k: row.get(k) for k in fieldnames})
+
+          def localname(tag: str) -> str:
+              return tag.split("}")[-1] if "}" in tag else tag
+
+          def clean_text(value) -> str:
+              if value is None:
+                  return ""
+              text = str(value).replace("\u200f", " ").replace("\u200e", " ").replace("\xa0", " ")
+              text = re.sub(r"[\t\r\n]+", " ", text)
+              text = re.sub(r"\s+", " ", text).strip()
+              return text
+
+          def clean_lookup_text(value) -> str:
+              text = clean_text(value)
+              text = text.replace('"', ' ').replace("׳", " ").replace("'", " ").replace("״", " ")
+              text = text.replace("-", " ").replace("/", " ").replace("\\", " ")
+              text = re.sub(r"\s+", " ", text).strip()
+              return text
+
+          def collapse_for_match(value) -> str:
+              return re.sub(r"\s+", "", clean_lookup_text(value))
+
+          def text_is_placeholder(value: str) -> bool:
+              v = clean_text(value).lower()
+              if not v:
+                  return True
+              placeholders = {
+                  "unknown", "לא ידוע", "לא ידועה", "null", "none", "n/a", "na",
+                  "ללא", "0", "---", "-",
+              }
+              return v in placeholders
+
+          def looks_like_barcode(value: str) -> bool:
+              digits = re.sub(r"\D", "", clean_text(value))
+              return bool(re.fullmatch(r"\d{8,13}", digits))
+
+          def normalize_barcode(value: str) -> str:
+              return re.sub(r"\D", "", clean_text(value))
+
+          def safe_decimal(value):
+              s = clean_text(value).replace(",", ".")
+              if not s:
+                  return None
+              try:
+                  num = float(s)
+              except ValueError:
+                  return None
+              return round(num, 2) if num > 0 else None
+
+          def parse_datetime_value(value: str):
+              value = clean_text(value)
+              if not value:
+                  return None
+              raw = value.replace("Z", "+00:00")
+              fmts = (
+                  None,
+                  "%Y%m%d%H%M",
+                  "%Y%m%d%H%M%S",
+                  "%d/%m/%Y %H:%M",
+                  "%d/%m/%Y %H:%M:%S",
+                  "%Y-%m-%d %H:%M:%S",
+                  "%Y-%m-%d %H:%M",
+                  "%Y-%m-%d",
+              )
+              for fmt in fmts:
+                  try:
+                      if fmt is None:
+                          dt = datetime.fromisoformat(raw)
+                      else:
+                          dt = datetime.strptime(value, fmt)
+                      if dt.tzinfo is None:
+                          dt = dt.replace(tzinfo=timezone.utc)
+                      return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                  except Exception:
+                      continue
+              return None
+
+          def filename_timestamp(path: Path):
+              matches = re.findall(r"(\d{12,14})", path.name)
+              for candidate in reversed(matches):
+                  parsed = parse_datetime_value(candidate)
+                  if parsed:
+                      return parsed
+              return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+          def sha1_text(text: str) -> str:
+              return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+          def canonical_store_id(retailer: str, store_id_raw: str) -> str:
+              text = clean_text(store_id_raw)
+              digits = re.sub(r"\D", "", text)
+              if digits:
+                  if retailer in {"shufersal", "yohananof"}:
+                      return digits.zfill(3)
+                  return str(int(digits))
+              return text
+
+          def retailer_from(chain_id: str, chain_name: str):
+              cid = clean_text(chain_id)
+              cname = clean_text(chain_name)
+              if "שופרסל" in cname:
+                  return "shufersal"
+              if "רמי" in cname and "לוי" in cname:
+                  return "ramilevy"
+              if "יוחננוף" in cname or "YOHANANOF" in cname.upper():
+                  return "yohananof"
+              return CHAIN_ID_TO_RETAILER.get(cid)
+
+          def canonical_store_key(retailer: str, store_id_raw: str) -> str:
+              return f"{retailer}:{canonical_store_id(retailer, store_id_raw)}"
+
+          def detect_city(*values):
+              matches = []
+              reasons = []
+              for source_name, value in values:
+                  raw = clean_text(value)
+                  if not raw:
+                      continue
+                  text = clean_lookup_text(raw)
+                  text_no_space = collapse_for_match(raw)
+                  source_matches = []
+                  if ("הוד" in text and "השרון" in text) or "הודהשרון" in text_no_space:
+                      source_matches.append("הוד השרון")
+                  if ("כפר" in text and "סבא" in text) or "כפרסבא" in text_no_space or 'כ"ס' in raw or 'כ״ס' in raw:
+                      source_matches.append("כפר סבא")
+                  if (
+                      ("פתח" in text and ("תקוה" in text or "תקווה" in text))
+                      or "פתחתקוה" in text_no_space
+                      or "פתחתקווה" in text_no_space
+                      or re.search(r"(^|\s)פ\s*ת($|\s)", text)
+                      or 'פ"ת' in raw or 'פ״ת' in raw
+                  ):
+                      source_matches.append("פתח תקווה")
+                  if ("רמת" in text and "השרון" in text) or "רמתהשרון" in text_no_space:
+                      source_matches.append("רמת השרון")
+                  if "רעננה" in text or "רעננה" in text_no_space:
+                      source_matches.append("רעננה")
+                  for city in source_matches:
+                      matches.append(city)
+                      reasons.append(f"{source_name}:{raw}")
+              unique = []
+              for city in matches:
+                  if city not in unique:
+                      unique.append(city)
+              if len(unique) == 1:
+                  return unique[0], reasons
+              if len(unique) > 1:
+                  return None, reasons
+              return None, reasons
+
+          def choose_better_text(current: str, candidate: str) -> str:
+              current = clean_text(current)
+              candidate = clean_text(candidate)
+              if not candidate:
+                  return current
+              if text_is_placeholder(candidate):
+                  return current
+              if not current or text_is_placeholder(current):
+                  return candidate
+              if candidate == current:
+                  return current
+              def score(value: str):
+                  v = clean_text(value)
+                  return (
+                      0 if text_is_placeholder(v) else 1,
+                      1 if re.search(r"[A-Za-zא-ת]", v) else 0,
+                      len(v),
+                      v.count(" "),
+                  )
+              return candidate if score(candidate) > score(current) else current
+
+          def normalize_promotion_type(title: str, description: str, benefit_text: str, is_club: bool) -> str:
+              text = " ".join(filter(None, [clean_text(title), clean_text(description), clean_text(benefit_text)])).lower()
+              if is_club:
+                  return "club"
+              if re.search(r"\b[2-9]\s*ב", text) or "קנה" in text or "מתנה" in text or "השני" in text:
+                  return "multibuy"
+              if "%" in text or "הנחה" in text:
+                  return "discount"
+              if text:
+                  return "simple"
+              return "unknown"
+
+          def load_xml_roots(path: Path):
+              lower = path.name.lower()
+              if lower.endswith(".zip"):
+                  roots = []
+                  with zipfile.ZipFile(path, "r") as zf:
+                      for name in zf.namelist():
+                          if name.lower().endswith(".xml"):
+                              data = zf.read(name)
+                              roots.append(ET.fromstring(data))
+                  return roots
+              if lower.endswith(".gz"):
+                  with gzip.open(path, "rb") as f:
+                      return [ET.fromstring(f.read())]
+              return [ET.parse(path).getroot()]
+
+          def extract_any(elem, names):
+              wanted = {n.lower() for n in names}
+              for child in elem.iter():
+                  if localname(child.tag).lower() in wanted:
+                      text = clean_text(child.text)
+                      if text:
+                          return text
+              return ""
+
+          def collect_tag_values(elem):
+              data = {}
+              for child in elem.iter():
+                  key = localname(child.tag)
+                  text = clean_text(child.text)
+                  if text and key not in data:
+                      data[key] = text
+              return data
+
+          def iter_dump_paths():
+              for path in DUMPS_DIR.rglob("*"):
+                  if not path.is_file():
+                      continue
+                  lower = path.name.lower()
+                  if lower.endswith((".xml", ".gz", ".zip", ".xml.gz")):
+                      yield path
+
+          def classify_dump_kind(path: Path):
+              lower = path.name.lower()
+              if lower.startswith("stores") or lower.startswith("store"):
+                  return "store"
+              if "pricefull" in lower:
+                  return "price_full"
+              if "promofull" in lower:
+                  return "promo_full"
+              if lower.startswith("promo") or "promo" in lower:
+                  return "promo"
+              return None
+
+          def parse_filename_identity(path: Path):
+              name = path.name
+              patterns = [
+                  (r"(?i)pricefull(\d+)-(\d+)", "price_full"),
+                  (r"(?i)promofull(\d+)-(\d+)", "promo_full"),
+                  (r"(?i)promo(\d+)-(\d+)", "promo"),
+                  (r"(?i)stores(\d+)", "store"),
+              ]
+              for pattern, kind in patterns:
+                  m = re.search(pattern, name)
+                  if m:
+                      chain_id = m.group(1)
+                      store_id = m.group(2) if m.lastindex and m.lastindex >= 2 else ""
+                      return kind, chain_id, store_id
+              return None, "", ""
+
+          def http_json(method: str, path_or_url: str, headers=None, body=None, timeout=120, expect_json=True):
+              url = path_or_url if path_or_url.startswith("http") else f"{SUPABASE_URL}{path_or_url}"
+              payload = None
+              if body is not None:
+                  payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+              req = urllib.request.Request(url, data=payload, method=method)
+              all_headers = headers.copy() if headers else {}
+              all_headers.setdefault("apikey", SUPABASE_KEY)
+              all_headers.setdefault("Authorization", f"Bearer {SUPABASE_KEY}")
+              if body is not None:
+                  all_headers.setdefault("Content-Type", "application/json")
+              for k, v in all_headers.items():
+                  req.add_header(k, v)
+              last_error = None
+              for attempt in range(1, 4):
+                  try:
+                      with urllib.request.urlopen(req, timeout=timeout) as resp:
+                          raw = resp.read().decode("utf-8")
+                          if not expect_json:
+                              return raw
+                          if not raw:
+                              return None
+                          return json.loads(raw)
+                  except urllib.error.HTTPError as exc:
+                      body_text = exc.read().decode("utf-8", errors="replace")
+                      last_error = RuntimeError(f"HTTP {exc.code} {method} {url}: {body_text[:1200]}")
+                  except Exception as exc:
+                      last_error = exc
+                  if attempt < 3:
+                      time.sleep(attempt * 2)
+              raise last_error
+
+          def pg_quote(value: str) -> str:
+              text = clean_text(value)
+              text = text.replace('"', '\\"')
+              return f'"{text}"'
+
+          def build_in_filter(values):
+              return "in.(" + ",".join(pg_quote(v) for v in values) + ")"
+
+          def rest_get_rows(table: str, select_clause: str, filters=None):
+              query = {"select": select_clause}
+              if filters:
+                  query.update(filters)
+              parts = []
+              for key, value in query.items():
+                  parts.append(f"{urllib.parse.quote(str(key), safe='')}={urllib.parse.quote(str(value), safe='().,:*')}")
+              path = f"/rest/v1/{table}?" + "&".join(parts)
+              data = http_json("GET", path)
+              return data or []
+
+          def chunked(iterable, size):
+              batch = []
+              for item in iterable:
+                  batch.append(item)
+                  if len(batch) >= size:
+                      yield batch
+                      batch = []
+              if batch:
+                  yield batch
+
+          def fetch_existing_products(barcodes):
+              rows = {}
+              for batch in chunked(sorted(set(barcodes)), 200):
+                  filters = {"barcode": build_in_filter(batch)}
+                  data = rest_get_rows("products", "barcode,name,category,brand,manufacturer", filters)
+                  for row in data:
+                      rows[row["barcode"]] = row
+              return rows
+
+          def fetch_existing_stores(store_keys):
+              rows = {}
+              for batch in chunked(sorted(set(store_keys)), 200):
+                  filters = {"store_key": build_in_filter(batch)}
+                  data = rest_get_rows(
+                      "stores",
+                      "retailer,store_id,store_name,city,store_key,address,area,store_type,mvp_active",
+                      filters,
+                  )
+                  for row in data:
+                      rows[row["store_key"]] = row
+              return rows
+
+          def fetch_existing_active_target_store_keys():
+              filters = {
+                  "retailer": build_in_filter(TARGET_RETAILERS),
+                  "mvp_active": "is.true",
+              }
+              data = rest_get_rows("stores", "retailer,store_key,store_id,store_name,city,address,mvp_active", filters)
+              return data
+
+          def post_upsert(table: str, conflict: str, rows, chunk_size: int):
+              if not rows:
+                  return
+              path = f"/rest/v1/{table}?on_conflict={urllib.parse.quote(conflict, safe=',')}"
+              headers = {"Prefer": "resolution=merge-duplicates,return=minimal,missing=default"}
+              for index, batch in enumerate(chunked(rows, chunk_size), start=1):
+                  log(f"Upserting {table} chunk {index} ({len(batch)} rows)")
+                  http_json("POST", path, headers=headers, body=batch, expect_json=False)
+
+          def delete_rows(table: str, filters):
+              if not filters:
+                  return
+              parts = []
+              for key, value in filters.items():
+                  parts.append(f"{urllib.parse.quote(str(key), safe='')}={urllib.parse.quote(str(value), safe='().,:*')}")
+              path = f"/rest/v1/{table}?" + "&".join(parts)
+              http_json("DELETE", path, headers={"Prefer": "return=minimal"}, expect_json=False)
+
+          def merge_store_row(discovered: dict, existing: dict):
+              existing = existing or {}
+              city_value = discovered.get("canonical_city") or choose_better_text(existing.get("city", ""), discovered.get("city", ""))
+              store_type = choose_better_text(existing.get("store_type", ""), discovered.get("store_type", "")) or "chain"
+              return {
+                  "retailer": discovered.get("retailer") or existing.get("retailer"),
+                  "store_id": discovered.get("store_id") or existing.get("store_id"),
+                  "store_name": choose_better_text(existing.get("store_name", ""), discovered.get("store_name", "")),
+                  "city": city_value,
+                  "store_key": discovered.get("store_key") or existing.get("store_key"),
+                  "address": choose_better_text(existing.get("address", ""), discovered.get("address", "")),
+                  "area": choose_better_text(existing.get("area", ""), discovered.get("area", "")),
+                  "store_type": store_type,
+                  "mvp_active": bool(discovered.get("is_target")),
+              }
+
+          def best_from_candidates(existing_value: str, candidates):
+              value = clean_text(existing_value)
+              for candidate in candidates:
+                  value = choose_better_text(value, candidate)
+              return value or None
+
+          def discover_stores():
+              discovered = {}
+              ambiguous = []
+              parse_errors = []
+              store_file_rows = []
+              for path in iter_dump_paths():
+                  if classify_dump_kind(path) != "store":
+                      continue
+                  file_ts = filename_timestamp(path)
+                  try:
+                      roots = load_xml_roots(path)
+                  except Exception as exc:
+                      parse_errors.append({"file": str(path), "error": str(exc)})
+                      continue
+                  for root in roots:
+                      chain_id = extract_any(root, {"ChainId", "chainid"})
+                      chain_name = extract_any(root, {"ChainName", "chainname"})
+                      retailer = retailer_from(chain_id, chain_name)
+                      if retailer not in TARGET_RETAILERS:
+                          continue
+                      for node in root.iter():
+                          if localname(node.tag).lower() != "store":
+                              continue
+                          store_id_raw = extract_any(node, {"StoreId", "storeid"})
+                          if not clean_text(store_id_raw):
+                              continue
+                          store_key = canonical_store_key(retailer, store_id_raw)
+                          store_name = extract_any(node, {"StoreName", "storename"})
+                          city_raw = extract_any(node, {"City", "city"})
+                          address = extract_any(node, {"Address", "address"})
+                          area = extract_any(node, {"Area", "area"})
+                          store_type = extract_any(node, {"StoreType", "storetype"}) or "chain"
+                          target_city, reasons = detect_city(
+                              ("city", city_raw),
+                              ("address", address),
+                              ("store_name", store_name),
+                          )
+                          is_ambiguous = target_city is None and len({r.split(':', 1)[0] for r in reasons}) > 1 and len(reasons) > 1
+                          if is_ambiguous:
+                              ambiguous.append({
+                                  "retailer": retailer,
+                                  "store_key": store_key,
+                                  "store_name": store_name,
+                                  "city": city_raw,
+                                  "address": address,
+                                  "reason": " | ".join(reasons),
+                              })
+                          canonical_city = target_city or clean_text(city_raw)
+                          row = {
+                              "retailer": retailer,
+                              "store_id": canonical_store_id(retailer, store_id_raw),
+                              "store_name": store_name,
+                              "city": clean_text(city_raw),
+                              "canonical_city": canonical_city,
+                              "store_key": store_key,
+                              "address": address,
+                              "area": area,
+                              "store_type": store_type,
+                              "is_target": target_city in TARGET_CITIES,
+                              "target_city": target_city or "",
+                              "source_file": str(path),
+                              "source_ts": file_ts,
+                          }
+                          store_file_rows.append(row)
+                          previous = discovered.get(store_key)
+                          if previous is None:
+                              discovered[store_key] = row
+                          else:
+                              discovered[store_key] = {
+                                  **previous,
+                                  "store_name": choose_better_text(previous.get("store_name", ""), store_name),
+                                  "city": choose_better_text(previous.get("city", ""), clean_text(city_raw)),
+                                  "canonical_city": target_city or choose_better_text(previous.get("canonical_city", ""), clean_text(city_raw)),
+                                  "address": choose_better_text(previous.get("address", ""), address),
+                                  "area": choose_better_text(previous.get("area", ""), area),
+                                  "store_type": choose_better_text(previous.get("store_type", ""), store_type) or "chain",
+                                  "is_target": previous.get("is_target", False) or (target_city in TARGET_CITIES),
+                                  "target_city": previous.get("target_city") or target_city or "",
+                                  "source_ts": max(previous.get("source_ts", file_ts), file_ts),
+                                  "source_file": previous.get("source_file") if previous.get("source_ts", "") >= file_ts else str(path),
+                              }
+              return discovered, ambiguous, parse_errors, store_file_rows
+
+          def select_latest_files(kind_expected: str, target_store_keys=None, allow_non_target=False):
+              selected = {}
+              diagnostics = []
+              for path in iter_dump_paths():
+                  kind = classify_dump_kind(path)
+                  if kind != kind_expected:
+                      continue
+                  file_ts = filename_timestamp(path)
+                  parsed_kind, chain_id, store_id = parse_filename_identity(path)
+                  retailer = retailer_from(chain_id, "")
+                  store_key = ""
+                  if retailer and store_id:
+                      store_key = canonical_store_key(retailer, store_id)
+                  if not store_key:
+                      try:
+                          roots = load_xml_roots(path)
+                      except Exception as exc:
+                          diagnostics.append({"file": str(path), "error": str(exc)})
+                          continue
+                      root = roots[0] if roots else None
+                      if root is None:
+                          continue
+                      chain_id = extract_any(root, {"ChainId", "chainid"})
+                      chain_name = extract_any(root, {"ChainName", "chainname"})
+                      retailer = retailer_from(chain_id, chain_name)
+                      store_id = extract_any(root, {"StoreId", "storeid"})
+                      if retailer and store_id:
+                          store_key = canonical_store_key(retailer, store_id)
+                  if not store_key:
+                      diagnostics.append({"file": str(path), "error": "Could not resolve store_key"})
+                      continue
+                  if target_store_keys is not None and not allow_non_target and store_key not in target_store_keys:
+                      continue
+                  prev = selected.get(store_key)
+                  priority = 2 if kind_expected.endswith("full") else 1
+                  candidate = {
+                      "path": path,
+                      "store_key": store_key,
+                      "timestamp": file_ts,
+                      "priority": priority,
+                  }
+                  if prev is None or (candidate["timestamp"], candidate["priority"]) > (prev["timestamp"], prev["priority"]):
+                      selected[store_key] = candidate
+              return selected, diagnostics
+
+          def parse_price_file(path: Path, store_key: str):
+              items_by_key = {}
+              product_candidates = defaultdict(lambda: defaultdict(list))
+              parse_errors = []
+              file_updated_candidates = []
+              try:
+                  roots = load_xml_roots(path)
+              except Exception as exc:
+                  return None, None, [{"store_key": store_key, "file": str(path), "error": str(exc)}]
+              for root in roots:
+                  root_updated = parse_datetime_value(extract_any(root, {"PriceUpdateDate", "UpdateDate", "LastUpdateDate"}))
+                  if root_updated:
+                      file_updated_candidates.append(root_updated)
+                  for node in root.iter():
+                      if localname(node.tag).lower() not in {"item", "product"}:
+                          continue
+                      barcode = normalize_barcode(
+                          extract_any(node, {"ItemCode", "Barcode", "GTIN", "EAN", "Code", "ItemId", "ItemNumber"})
+                      )
+                      if not looks_like_barcode(barcode):
+                          continue
+                      price = safe_decimal(
+                          extract_any(node, {"ItemPrice", "Price", "UnitPrice", "PriceAfterDiscount", "PriceInclVat"})
+                      )
+                      if price is None:
+                          continue
+                      updated_at = parse_datetime_value(
+                          extract_any(node, {"PriceUpdateDate", "UpdateDate", "LastUpdateDate"})
+                      ) or root_updated or filename_timestamp(path)
+                      item_name = extract_any(node, {"ItemName", "ItemNm", "ProductName", "Description", "ItemDescription"})
+                      brand = extract_any(node, {"BrandName", "Brand", "BrandNm"})
+                      manufacturer = extract_any(node, {"ManufacturerName", "ManufactureName", "Manufacturer", "Manufacture"})
+                      category = extract_any(node, {"MainCategoryName", "Category", "DepartmentName", "SubCategoryName", "ItemCategory"})
+                      price_key = f"{barcode}:{store_key}"
+                      existing = items_by_key.get(price_key)
+                      if existing is None or (updated_at, len(clean_text(item_name))) > (existing["updated_at"], len(clean_text(existing.get("_name_candidate", "")))):
+                          items_by_key[price_key] = {
+                              "price_key": price_key,
+                              "barcode": barcode,
+                              "store_key": store_key,
+                              "price": price,
+                              "updated_at": updated_at,
+                              "last_seen_at": RUN_TS_ISO,
+                              "_name_candidate": item_name,
+                          }
+                      product_candidates[barcode]["name"].append(item_name)
+                      product_candidates[barcode]["brand"].append(brand)
+                      product_candidates[barcode]["manufacturer"].append(manufacturer)
+                      product_candidates[barcode]["category"].append(category)
+              items = list(items_by_key.values())
+              for item in items:
+                  item.pop("_name_candidate", None)
+              return items, product_candidates, parse_errors
+
+          def parse_promo_file(path: Path, store_key: str):
+              promo_headers = {}
+              promo_items = {}
+              parse_errors = []
+              try:
+                  roots = load_xml_roots(path)
+              except Exception as exc:
+                  return None, None, [{"store_key": store_key, "file": str(path), "error": str(exc)}]
+              for root in roots:
+                  for node in root.iter():
+                      tag = localname(node.tag).lower()
+                      if tag not in {"promotion", "sale", "deal", "discount"}:
+                          continue
+                      tag_values = collect_tag_values(node)
+                      barcodes = []
+                      for child in node.iter():
+                          child_tag = localname(child.tag).lower()
+                          child_text = clean_text(child.text)
+                          if child_tag in {"itemcode", "itembarcode", "barcode", "ean", "gtin"} and looks_like_barcode(child_text):
+                              barcodes.append(normalize_barcode(child_text))
+                      if not barcodes:
+                          continue
+                      source_promotion_id = (
+                          tag_values.get("PromotionId")
+                          or tag_values.get("PromotionID")
+                          or tag_values.get("PromoId")
+                          or tag_values.get("DealId")
+                          or tag_values.get("SaleId")
+                          or ""
+                      )
+                      title = (
+                          tag_values.get("PromotionDescription")
+                          or tag_values.get("PromotionName")
+                          or tag_values.get("Description")
+                          or tag_values.get("Name")
+                          or ""
+                      )
+                      description = (
+                          tag_values.get("AdditionalRemarks")
+                          or tag_values.get("Remarks")
+                          or tag_values.get("Comment")
+                          or ""
+                      )
+                      benefit_text = (
+                          tag_values.get("RewardDescription")
+                          or tag_values.get("BenefitDescription")
+                          or tag_values.get("DiscountRate")
+                          or ""
+                      )
+                      club_name = tag_values.get("ClubName") or tag_values.get("CustomerClub") or ""
+                      is_club = False
+                      club_markers = [
+                          club_name,
+                          tag_values.get("AllowClub"),
+                          tag_values.get("IsClub"),
+                          title,
+                          description,
+                          benefit_text,
+                      ]
+                      for marker in club_markers:
+                          marker_text = clean_text(marker).lower()
+                          if marker_text in {"1", "true", "yes"} or "מועדון" in marker_text or "club" in marker_text:
+                              is_club = True
+                              break
+                      start_at = parse_datetime_value(
+                          tag_values.get("PromotionStartDate") or tag_values.get("StartDate") or tag_values.get("Start") or ""
+                      )
+                      end_at = parse_datetime_value(
+                          tag_values.get("PromotionEndDate") or tag_values.get("EndDate") or tag_values.get("End") or ""
+                      )
+                      promotion_type = normalize_promotion_type(title, description, benefit_text, is_club)
+                      key_basis = "|".join([
+                          store_key,
+                          source_promotion_id,
+                          clean_text(title),
+                          clean_text(description),
+                          clean_text(benefit_text),
+                          start_at or "",
+                          end_at or "",
+                      ])
+                      promotion_key = sha1_text(key_basis)
+                      promo_headers[promotion_key] = {
+                          "promotion_key": promotion_key,
+                          "store_key": store_key,
+                          "source_promotion_id": source_promotion_id or None,
+                          "title": clean_text(title) or None,
+                          "description": clean_text(description) or None,
+                          "promotion_type": promotion_type,
+                          "benefit_text": clean_text(benefit_text) or None,
+                          "is_club": is_club,
+                          "club_name": clean_text(club_name) or None,
+                          "start_at": start_at,
+                          "end_at": end_at,
+                          "updated_at": RUN_TS_ISO,
+                          "last_seen_at": RUN_TS_ISO,
+                          "raw_payload": tag_values,
+                      }
+                      for barcode in sorted(set(barcodes)):
+                          promotion_item_key = sha1_text(f"{promotion_key}|{barcode}")
+                          promo_items[promotion_item_key] = {
+                              "promotion_item_key": promotion_item_key,
+                              "promotion_key": promotion_key,
+                              "barcode": barcode,
+                              "updated_at": RUN_TS_ISO,
+                              "last_seen_at": RUN_TS_ISO,
+                              "raw_payload": {"barcode": barcode},
+                          }
+              return list(promo_headers.values()), list(promo_items.values()), parse_errors
+
+          discovered_stores_map, ambiguous_rows, store_parse_errors, store_file_rows = discover_stores()
+          discovered_store_keys = set(discovered_stores_map.keys())
+          discovered_target_stores = [row for row in discovered_stores_map.values() if row.get("is_target")]
+          discovered_non_target_stores = [row for row in discovered_stores_map.values() if not row.get("is_target")]
+          target_store_keys = {row["store_key"] for row in discovered_target_stores}
+          non_target_store_keys = {row["store_key"] for row in discovered_non_target_stores}
+
+          if not discovered_target_stores:
+              raise SystemExit("No target stores were discovered from STORE files. Aborting.")
+
+          by_retailer = Counter(row["retailer"] for row in discovered_target_stores)
+          missing_retailers = [ret for ret in TARGET_RETAILERS if by_retailer.get(ret, 0) == 0]
+          if missing_retailers:
+              raise SystemExit(f"No target stores discovered for retailers: {', '.join(missing_retailers)}")
+
+          existing_active_rows = fetch_existing_active_target_store_keys()
+          existing_active_keys = {row["store_key"] for row in existing_active_rows}
+          missing_existing_active = sorted(existing_active_keys - target_store_keys)
+          if missing_existing_active:
+              write_csv(
+                  OUT_DIR / "stores_missing_from_source.csv",
+                  [{"store_key": key} for key in missing_existing_active],
+                  ["store_key"],
+              )
+              raise SystemExit(
+                  "Discovery produced fewer active target stores than already exist in DB. Missing active store_keys: "
+                  + ", ".join(missing_existing_active)
+              )
+
+          price_file_map, price_file_diagnostics = select_latest_files("price_full", target_store_keys=target_store_keys)
+          missing_price_store_keys = sorted(target_store_keys - set(price_file_map.keys()))
+          if missing_price_store_keys:
+              write_csv(
+                  OUT_DIR / "missing_price_files.csv",
+                  [
+                      {
+                          "store_key": key,
+                          "retailer": discovered_stores_map[key]["retailer"],
+                          "store_name": discovered_stores_map[key]["store_name"],
+                          "city": discovered_stores_map[key]["canonical_city"],
+                      }
+                      for key in missing_price_store_keys
+                  ],
+                  ["store_key", "retailer", "store_name", "city"],
+              )
+              raise SystemExit(
+                  "Missing PriceFull files for target stores: " + ", ".join(missing_price_store_keys)
+              )
+
+          promo_full_map, promo_full_diag = select_latest_files("promo_full", target_store_keys=target_store_keys)
+          promo_partial_map, promo_partial_diag = select_latest_files("promo", target_store_keys=target_store_keys)
+          promo_file_map = {}
+          for store_key in target_store_keys:
+              if store_key in promo_full_map:
+                  promo_file_map[store_key] = promo_full_map[store_key]
+              elif store_key in promo_partial_map:
+                  promo_file_map[store_key] = promo_partial_map[store_key]
+          missing_promo_store_keys = sorted(target_store_keys - set(promo_file_map.keys()))
+
+          write_csv(
+              OUT_DIR / "stores_discovered.csv",
+              sorted(discovered_stores_map.values(), key=lambda x: (x["retailer"], x["canonical_city"], x["store_key"])),
+              ["retailer", "store_id", "store_key", "store_name", "city", "canonical_city", "address", "area", "store_type", "is_target", "source_file", "source_ts"],
+          )
+          write_csv(
+              OUT_DIR / "target_stores.csv",
+              sorted(discovered_target_stores, key=lambda x: (x["canonical_city"], x["retailer"], x["store_key"])),
+              ["retailer", "store_id", "store_key", "store_name", "canonical_city", "address", "source_file"],
+          )
+          write_csv(
+              OUT_DIR / "non_target_stores.csv",
+              sorted(discovered_non_target_stores, key=lambda x: (x["retailer"], x["canonical_city"], x["store_key"])),
+              ["retailer", "store_id", "store_key", "store_name", "canonical_city", "address", "source_file"],
+          )
+          write_csv(
+              OUT_DIR / "ambiguous_city_matches.csv",
+              ambiguous_rows,
+              ["retailer", "store_key", "store_name", "city", "address", "reason"],
+          )
+
+          existing_stores = fetch_existing_stores(discovered_store_keys)
+          stores_payload = [merge_store_row(discovered_stores_map[key], existing_stores.get(key)) for key in sorted(discovered_store_keys)]
+
+          prices_payload = []
+          successful_price_store_keys = []
+          products_candidates = defaultdict(lambda: defaultdict(list))
+          prices_summary_rows = []
+          price_parse_errors = list(price_file_diagnostics)
+
+          for store_key in sorted(target_store_keys):
+              selection = price_file_map[store_key]
+              items, product_candidates, parse_errors = parse_price_file(selection["path"], store_key)
+              price_parse_errors.extend(parse_errors)
+              if parse_errors or items is None:
+                  raise SystemExit(f"Failed parsing price file for {store_key}. Aborting before DB write.")
+              if not items:
+                  raise SystemExit(f"Price file for {store_key} produced zero valid items. Aborting before DB write.")
+              prices_payload.extend(items)
+              successful_price_store_keys.append(store_key)
+              for barcode, fields in product_candidates.items():
+                  for field_name, values in fields.items():
+                      products_candidates[barcode][field_name].extend(values)
+              prices_summary_rows.append({
+                  "store_key": store_key,
+                  "retailer": discovered_stores_map[store_key]["retailer"],
+                  "store_name": discovered_stores_map[store_key]["store_name"],
+                  "city": discovered_stores_map[store_key]["canonical_city"],
+                  "items_count": len(items),
+                  "source_file": str(selection["path"]),
+                  "source_ts": selection["timestamp"],
+              })
+
+          if set(successful_price_store_keys) != target_store_keys:
+              missing = sorted(target_store_keys - set(successful_price_store_keys))
+              raise SystemExit(f"Not all target stores produced valid price payloads: {', '.join(missing)}")
+
+          all_barcodes = sorted(products_candidates.keys())
+          existing_products = fetch_existing_products(all_barcodes)
+          products_payload = []
+          for barcode in all_barcodes:
+              existing = existing_products.get(barcode, {})
+              fields = products_candidates[barcode]
+              products_payload.append({
+                  "barcode": barcode,
+                  "name": best_from_candidates(existing.get("name", ""), fields.get("name", [])),
+                  "category": best_from_candidates(existing.get("category", ""), fields.get("category", [])),
+                  "brand": best_from_candidates(existing.get("brand", ""), fields.get("brand", [])),
+                  "manufacturer": best_from_candidates(existing.get("manufacturer", ""), fields.get("manufacturer", [])),
+              })
+
+          promotions_payload = []
+          promotion_items_payload = []
+          successful_promo_store_keys = []
+          processed_promotion_keys = set()
+          promotions_summary_rows = []
+          promo_parse_errors = price_parse_errors[:0] + list(promo_full_diag) + list(promo_partial_diag)
+
+          for store_key in sorted(target_store_keys):
+              selection = promo_file_map.get(store_key)
+              if not selection:
+                  continue
+              promo_headers, promo_items, parse_errors = parse_promo_file(selection["path"], store_key)
+              promo_parse_errors.extend(parse_errors)
+              if parse_errors or promo_headers is None:
+                  continue
+              promotions_payload.extend(promo_headers)
+              promotion_items_payload.extend(promo_items)
+              processed_promotion_keys.update(row["promotion_key"] for row in promo_headers)
+              successful_promo_store_keys.append(store_key)
+              promotions_summary_rows.append({
+                  "store_key": store_key,
+                  "retailer": discovered_stores_map[store_key]["retailer"],
+                  "store_name": discovered_stores_map[store_key]["store_name"],
+                  "city": discovered_stores_map[store_key]["canonical_city"],
+                  "promotions_count": len(promo_headers),
+                  "promotion_items_count": len(promo_items),
+                  "source_file": str(selection["path"]),
+                  "source_ts": selection["timestamp"],
+              })
+
+          def assert_unique(rows, key_name, table_name):
+              seen = set()
+              duplicates = []
+              for row in rows:
+                  key = row[key_name]
+                  if key in seen:
+                      duplicates.append(key)
+                  seen.add(key)
+              if duplicates:
+                  raise SystemExit(f"Duplicate {key_name} values in {table_name}: {duplicates[:20]}")
+
+          assert_unique(products_payload, "barcode", "products")
+          assert_unique(stores_payload, "store_key", "stores")
+          assert_unique(prices_payload, "price_key", "prices_current")
+          assert_unique(promotions_payload, "promotion_key", "promotions_current")
+          assert_unique(promotion_items_payload, "promotion_item_key", "promotion_items_current")
+
+          write_csv(
+              OUT_DIR / "prices_summary_by_store.csv",
+              prices_summary_rows,
+              ["store_key", "retailer", "store_name", "city", "items_count", "source_file", "source_ts"],
+          )
+          write_csv(
+              OUT_DIR / "missing_promo_files.csv",
+              [
+                  {
+                      "store_key": key,
+                      "retailer": discovered_stores_map[key]["retailer"],
+                      "store_name": discovered_stores_map[key]["store_name"],
+                      "city": discovered_stores_map[key]["canonical_city"],
+                  }
+                  for key in missing_promo_store_keys
+              ],
+              ["store_key", "retailer", "store_name", "city"],
+          )
+          write_csv(
+              OUT_DIR / "promotions_summary_by_store.csv",
+              promotions_summary_rows,
+              ["store_key", "retailer", "store_name", "city", "promotions_count", "promotion_items_count", "source_file", "source_ts"],
+          )
+
+          payload_counts = {
+              "run_ts": RUN_TS_ISO,
+              "write_to_supabase": WRITE_TO_SUPABASE,
+              "stores_discovered": len(discovered_stores_map),
+              "target_stores": len(discovered_target_stores),
+              "non_target_stores": len(discovered_non_target_stores),
+              "products_payload": len(products_payload),
+              "prices_payload": len(prices_payload),
+              "promotions_payload": len(promotions_payload),
+              "promotion_items_payload": len(promotion_items_payload),
+              "successful_price_store_keys": len(successful_price_store_keys),
+              "successful_promo_store_keys": len(successful_promo_store_keys),
+              "missing_promo_store_keys": len(missing_promo_store_keys),
+          }
+          write_json(OUT_DIR / "db_payload_counts.json", payload_counts)
+          write_json(OUT_DIR / "run_summary.json", {
+              **payload_counts,
+              "store_parse_errors": store_parse_errors,
+              "price_parse_errors": price_parse_errors,
+              "promo_parse_errors": promo_parse_errors,
+          })
+          write_json(OUT_DIR / "products_upsert.json", products_payload)
+          write_json(OUT_DIR / "stores_upsert.json", stores_payload)
+          write_json(OUT_DIR / "prices_upsert.json", prices_payload)
+          write_json(OUT_DIR / "promotions_upsert.json", promotions_payload)
+          write_json(OUT_DIR / "promotion_items_upsert.json", promotion_items_payload)
+
+          if not WRITE_TO_SUPABASE:
+              log("WRITE_TO_SUPABASE=false -> built payload and artifacts only. No DB writes performed.")
+              sys.exit(0)
+
+          post_upsert("products", "barcode", products_payload, 2000)
+          post_upsert("stores", "store_key", stores_payload, 500)
+          post_upsert("prices_current", "price_key", prices_payload, 5000)
+          post_upsert("promotions_current", "promotion_key", promotions_payload, 2000)
+          post_upsert("promotion_items_current", "promotion_item_key", promotion_items_payload, 5000)
+
+          discovered_non_target_batches = list(chunked(sorted(non_target_store_keys), 200))
+          successful_price_batches = list(chunked(sorted(successful_price_store_keys), 200))
+          successful_promo_batches = list(chunked(sorted(successful_promo_store_keys), 200))
+
+          for batch in discovered_non_target_batches:
+              delete_rows("prices_current", {"store_key": build_in_filter(batch)})
+              delete_rows("promotions_current", {"store_key": build_in_filter(batch)})
+
+          for batch in successful_price_batches:
+              delete_rows(
+                  "prices_current",
+                  {
+                      "store_key": build_in_filter(batch),
+                      "last_seen_at": f"lt.{PRICE_STALE_BEFORE}",
+                  },
+              )
+
+          for batch in successful_promo_batches:
+              delete_rows(
+                  "promotions_current",
+                  {
+                      "store_key": build_in_filter(batch),
+                      "last_seen_at": f"lt.{RUN_TS_ISO}",
+                  },
+              )
+
+          if processed_promotion_keys:
+              for batch in chunked(sorted(processed_promotion_keys), 200):
+                  delete_rows(
+                      "promotion_items_current",
+                      {
+                          "promotion_key": build_in_filter(batch),
+                          "last_seen_at": f"lt.{RUN_TS_ISO}",
+                      },
+                  )
+
+          log("GlutiWise current sync completed successfully.")
+          PY
+          python3 sync_glutiwise.py
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: glutiwise-current-sync-${{ github.run_id }}
+          path: out
