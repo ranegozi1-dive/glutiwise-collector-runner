@@ -1,4 +1,4 @@
-name: GlutiWise Current Sync to Supabase
+name: GlutiWise Current Sync to Supabase v2
 
 on:
   # Uncomment the 2 lines below only after the first successful manual run.
@@ -16,7 +16,7 @@ on:
         default: ""
 
 concurrency:
-  group: glutiwise-current-sync
+  group: glutiwise-current-sync-v2
   cancel-in-progress: false
 
 jobs:
@@ -62,6 +62,7 @@ jobs:
           cat > sync_glutiwise.py <<'PY'
           import csv
           import gzip
+          import io
           import hashlib
           import json
           import os
@@ -227,6 +228,44 @@ jobs:
           def canonical_store_key(retailer: str, store_id_raw: str) -> str:
               return f"{retailer}:{canonical_store_id(retailer, store_id_raw)}"
 
+          def split_store_key(store_key: str):
+              parts = clean_text(store_key).split(":", 1)
+              if len(parts) != 2:
+                  return clean_text(store_key), ""
+              return parts[0], parts[1]
+
+          def equivalent_store_keys(store_key: str):
+              retailer, store_id_raw = split_store_key(store_key)
+              digits = re.sub(r"\D", "", clean_text(store_id_raw))
+              keys = []
+
+              def add_for(ret: str):
+                  if not ret:
+                      return
+                  seen_local = set(keys)
+                  if digits:
+                      variants = [digits, digits.zfill(3)]
+                      try:
+                          variants.append(str(int(digits)))
+                      except Exception:
+                          pass
+                      for variant in variants:
+                          key = f"{ret}:{variant}"
+                          if key not in seen_local:
+                              keys.append(key)
+                              seen_local.add(key)
+                  else:
+                      key = f"{ret}:{clean_text(store_id_raw)}"
+                      if key not in seen_local:
+                          keys.append(key)
+
+              add_for(retailer)
+              if retailer == 'shufersal':
+                  add_for('ramilevy')
+              elif retailer == 'ramilevy':
+                  add_for('shufersal')
+              return keys
+
           def detect_city(*values):
               matches = []
               reasons = []
@@ -299,20 +338,43 @@ jobs:
                   return "simple"
               return "unknown"
 
+          def _roots_from_zip_bytes(blob: bytes):
+              roots = []
+              with zipfile.ZipFile(io.BytesIO(blob), "r") as zf:
+                  for name in zf.namelist():
+                      if name.lower().endswith(".xml"):
+                          roots.append(ET.fromstring(zf.read(name)))
+              return roots
+
           def load_xml_roots(path: Path):
+              blob = path.read_bytes()
               lower = path.name.lower()
-              if lower.endswith(".zip"):
-                  roots = []
-                  with zipfile.ZipFile(path, "r") as zf:
-                      for name in zf.namelist():
-                          if name.lower().endswith(".xml"):
-                              data = zf.read(name)
-                              roots.append(ET.fromstring(data))
-                  return roots
-              if lower.endswith(".gz"):
-                  with gzip.open(path, "rb") as f:
-                      return [ET.fromstring(f.read())]
-              return [ET.parse(path).getroot()]
+              # 1) Proper zip files
+              if blob[:4] == b"PK\x03\x04" or lower.endswith('.zip'):
+                  roots = _roots_from_zip_bytes(blob)
+                  if roots:
+                      return roots
+              # 2) Proper gzip files
+              if blob[:2] == b"\x1f\x8b" or lower.endswith('.gz'):
+                  try:
+                      raw = gzip.decompress(blob)
+                      # Some vendors ship zip payloads inside .gz wrappers
+                      if raw[:4] == b"PK\x03\x04":
+                          roots = _roots_from_zip_bytes(raw)
+                          if roots:
+                              return roots
+                      return [ET.fromstring(raw)]
+                  except Exception:
+                      pass
+              # 3) Mislabelled zip with .gz extension
+              try:
+                  roots = _roots_from_zip_bytes(blob)
+                  if roots:
+                      return roots
+              except Exception:
+                  pass
+              # 4) Plain XML fallback
+              return [ET.fromstring(blob)]
 
           def extract_any(elem, names):
               wanted = {n.lower() for n in names}
@@ -438,25 +500,15 @@ jobs:
                       rows[row["barcode"]] = row
               return rows
 
-          def fetch_existing_stores(store_keys):
-              rows = {}
-              for batch in chunked(sorted(set(store_keys)), 200):
-                  filters = {"store_key": build_in_filter(batch)}
-                  data = rest_get_rows(
-                      "stores",
-                      "retailer,store_id,store_name,city,store_key,address,area,store_type,mvp_active",
-                      filters,
-                  )
-                  for row in data:
-                      rows[row["store_key"]] = row
-              return rows
-
-          def fetch_existing_active_target_store_keys():
+          def fetch_existing_target_chain_stores():
               filters = {
                   "retailer": build_in_filter(TARGET_RETAILERS),
-                  "mvp_active": "is.true",
               }
-              data = rest_get_rows("stores", "retailer,store_key,store_id,store_name,city,address,mvp_active", filters)
+              data = rest_get_rows(
+                  "stores",
+                  "retailer,store_id,store_name,city,store_key,address,area,store_type,mvp_active",
+                  filters,
+              )
               return data
 
           def post_upsert(table: str, conflict: str, rows, chunk_size: int):
@@ -791,63 +843,92 @@ jobs:
               return list(promo_headers.values()), list(promo_items.values()), parse_errors
 
           discovered_stores_map, ambiguous_rows, store_parse_errors, store_file_rows = discover_stores()
+
+          existing_target_chain_rows = fetch_existing_target_chain_stores()
+          existing_target_chain_by_key = {row["store_key"]: row for row in existing_target_chain_rows}
+
+          def target_hint_from_row(row):
+              target_city, reasons = detect_city(
+                  ("city", row.get("city", "")),
+                  ("address", row.get("address", "")),
+                  ("store_name", row.get("store_name", "")),
+              )
+              if target_city in TARGET_CITIES:
+                  return {"target_city": target_city, "reasons": reasons}
+              return None
+
+          existing_target_hints_by_discovered_key = {}
+          legacy_store_key_aliases = {}
+          unresolved_existing_target_rows = []
+
+          for row in existing_target_chain_rows:
+              hint = target_hint_from_row(row)
+              if not hint:
+                  continue
+              raw_key = row["store_key"]
+              matched_discovered_key = None
+              for candidate_key in equivalent_store_keys(raw_key):
+                  if candidate_key in discovered_stores_map:
+                      matched_discovered_key = candidate_key
+                      break
+              if matched_discovered_key:
+                  existing_target_hints_by_discovered_key.setdefault(matched_discovered_key, []).append({
+                      "raw_store_key": raw_key,
+                      "target_city": hint["target_city"],
+                      "reasons": hint["reasons"],
+                      "row": row,
+                  })
+                  if raw_key != matched_discovered_key:
+                      legacy_store_key_aliases[raw_key] = matched_discovered_key
+              else:
+                  unresolved_existing_target_rows.append({
+                      "store_key": raw_key,
+                      "retailer": row.get("retailer", ""),
+                      "store_id": row.get("store_id", ""),
+                      "store_name": row.get("store_name", ""),
+                      "city": row.get("city", ""),
+                      "address": row.get("address", ""),
+                      "target_city_hint": hint["target_city"],
+                      "reason": " | ".join(hint["reasons"]),
+                  })
+
+          def select_existing_store_for_discovered(discovered_key: str):
+              exact = existing_target_chain_by_key.get(discovered_key)
+              if exact:
+                  return exact
+              hints = existing_target_hints_by_discovered_key.get(discovered_key, [])
+              if hints:
+                  return hints[0]["row"]
+              for alias_key in equivalent_store_keys(discovered_key):
+                  candidate = existing_target_chain_by_key.get(alias_key)
+                  if candidate:
+                      return candidate
+              return None
+
+          for store_key, row in list(discovered_stores_map.items()):
+              hints = existing_target_hints_by_discovered_key.get(store_key, [])
+              hinted_target_city = hints[0]["target_city"] if hints else ""
+              final_target_city = row.get("target_city") or hinted_target_city or ""
+              if final_target_city in TARGET_CITIES:
+                  row["is_target"] = True
+                  row["target_city"] = final_target_city
+                  row["canonical_city"] = final_target_city
+              discovered_stores_map[store_key] = row
+
           discovered_store_keys = set(discovered_stores_map.keys())
           discovered_target_stores = [row for row in discovered_stores_map.values() if row.get("is_target")]
           discovered_non_target_stores = [row for row in discovered_stores_map.values() if not row.get("is_target")]
           target_store_keys = {row["store_key"] for row in discovered_target_stores}
           non_target_store_keys = {row["store_key"] for row in discovered_non_target_stores}
+          legacy_store_keys_to_deactivate = set(legacy_store_key_aliases.keys())
 
           if not discovered_target_stores:
-              raise SystemExit("No target stores were discovered from STORE files. Aborting.")
+              raise SystemExit("No target stores were discovered from STORE files after source+DB hint reconciliation. Aborting.")
 
           by_retailer = Counter(row["retailer"] for row in discovered_target_stores)
           missing_retailers = [ret for ret in TARGET_RETAILERS if by_retailer.get(ret, 0) == 0]
           if missing_retailers:
               raise SystemExit(f"No target stores discovered for retailers: {', '.join(missing_retailers)}")
-
-          existing_active_rows = fetch_existing_active_target_store_keys()
-          existing_active_keys = {row["store_key"] for row in existing_active_rows}
-          missing_existing_active = sorted(existing_active_keys - target_store_keys)
-          if missing_existing_active:
-              write_csv(
-                  OUT_DIR / "stores_missing_from_source.csv",
-                  [{"store_key": key} for key in missing_existing_active],
-                  ["store_key"],
-              )
-              raise SystemExit(
-                  "Discovery produced fewer active target stores than already exist in DB. Missing active store_keys: "
-                  + ", ".join(missing_existing_active)
-              )
-
-          price_file_map, price_file_diagnostics = select_latest_files("price_full", target_store_keys=target_store_keys)
-          missing_price_store_keys = sorted(target_store_keys - set(price_file_map.keys()))
-          if missing_price_store_keys:
-              write_csv(
-                  OUT_DIR / "missing_price_files.csv",
-                  [
-                      {
-                          "store_key": key,
-                          "retailer": discovered_stores_map[key]["retailer"],
-                          "store_name": discovered_stores_map[key]["store_name"],
-                          "city": discovered_stores_map[key]["canonical_city"],
-                      }
-                      for key in missing_price_store_keys
-                  ],
-                  ["store_key", "retailer", "store_name", "city"],
-              )
-              raise SystemExit(
-                  "Missing PriceFull files for target stores: " + ", ".join(missing_price_store_keys)
-              )
-
-          promo_full_map, promo_full_diag = select_latest_files("promo_full", target_store_keys=target_store_keys)
-          promo_partial_map, promo_partial_diag = select_latest_files("promo", target_store_keys=target_store_keys)
-          promo_file_map = {}
-          for store_key in target_store_keys:
-              if store_key in promo_full_map:
-                  promo_file_map[store_key] = promo_full_map[store_key]
-              elif store_key in promo_partial_map:
-                  promo_file_map[store_key] = promo_partial_map[store_key]
-          missing_promo_store_keys = sorted(target_store_keys - set(promo_file_map.keys()))
 
           write_csv(
               OUT_DIR / "stores_discovered.csv",
@@ -869,24 +950,93 @@ jobs:
               ambiguous_rows,
               ["retailer", "store_key", "store_name", "city", "address", "reason"],
           )
+          write_csv(
+              OUT_DIR / "legacy_store_key_aliases.csv",
+              [
+                  {
+                      "legacy_store_key": old_key,
+                      "canonical_store_key": new_key,
+                  }
+                  for old_key, new_key in sorted(legacy_store_key_aliases.items())
+              ],
+              ["legacy_store_key", "canonical_store_key"],
+          )
+          write_csv(
+              OUT_DIR / "unresolved_existing_target_rows.csv",
+              unresolved_existing_target_rows,
+              ["store_key", "retailer", "store_id", "store_name", "city", "address", "target_city_hint", "reason"],
+          )
 
-          existing_stores = fetch_existing_stores(discovered_store_keys)
-          stores_payload = [merge_store_row(discovered_stores_map[key], existing_stores.get(key)) for key in sorted(discovered_store_keys)]
+          price_file_map, price_file_diagnostics = select_latest_files("price_full", target_store_keys=target_store_keys)
+          missing_price_store_keys = sorted(target_store_keys - set(price_file_map.keys()))
+          write_csv(
+              OUT_DIR / "missing_price_files.csv",
+              [
+                  {
+                      "store_key": key,
+                      "retailer": discovered_stores_map[key]["retailer"],
+                      "store_name": discovered_stores_map[key]["store_name"],
+                      "city": discovered_stores_map[key]["canonical_city"],
+                  }
+                  for key in missing_price_store_keys
+              ],
+              ["store_key", "retailer", "store_name", "city"],
+          )
+
+          promo_full_map, promo_full_diag = select_latest_files("promo_full", target_store_keys=target_store_keys)
+          promo_partial_map, promo_partial_diag = select_latest_files("promo", target_store_keys=target_store_keys)
+          promo_file_map = {}
+          for store_key in target_store_keys:
+              if store_key in promo_full_map:
+                  promo_file_map[store_key] = promo_full_map[store_key]
+              elif store_key in promo_partial_map:
+                  promo_file_map[store_key] = promo_partial_map[store_key]
+          missing_promo_store_keys = sorted(target_store_keys - set(promo_file_map.keys()))
+
+          stores_payload = [
+              merge_store_row(discovered_stores_map[key], select_existing_store_for_discovered(key))
+              for key in sorted(discovered_store_keys)
+          ]
+          for legacy_key in sorted(legacy_store_keys_to_deactivate):
+              existing_row = existing_target_chain_by_key.get(legacy_key)
+              if not existing_row:
+                  continue
+              stores_payload.append({
+                  "retailer": existing_row.get("retailer"),
+                  "store_id": existing_row.get("store_id"),
+                  "store_name": existing_row.get("store_name"),
+                  "city": existing_row.get("city"),
+                  "store_key": existing_row.get("store_key"),
+                  "address": existing_row.get("address"),
+                  "area": existing_row.get("area"),
+                  "store_type": existing_row.get("store_type") or "chain",
+                  "mvp_active": False,
+              })
 
           prices_payload = []
           successful_price_store_keys = []
+          failed_price_store_rows = []
           products_candidates = defaultdict(lambda: defaultdict(list))
           prices_summary_rows = []
           price_parse_errors = list(price_file_diagnostics)
 
           for store_key in sorted(target_store_keys):
-              selection = price_file_map[store_key]
+              selection = price_file_map.get(store_key)
+              if not selection:
+                  continue
               items, product_candidates, parse_errors = parse_price_file(selection["path"], store_key)
               price_parse_errors.extend(parse_errors)
-              if parse_errors or items is None:
-                  raise SystemExit(f"Failed parsing price file for {store_key}. Aborting before DB write.")
-              if not items:
-                  raise SystemExit(f"Price file for {store_key} produced zero valid items. Aborting before DB write.")
+              if parse_errors or items is None or not items:
+                  failed_price_store_rows.append({
+                      "store_key": store_key,
+                      "retailer": discovered_stores_map[store_key]["retailer"],
+                      "store_name": discovered_stores_map[store_key]["store_name"],
+                      "city": discovered_stores_map[store_key]["canonical_city"],
+                      "source_file": str(selection["path"]),
+                      "source_ts": selection["timestamp"],
+                      "error": "; ".join(err.get("error", "parse failure") for err in (parse_errors or [{"error": "zero valid items"}])),
+                  })
+                  continue
               prices_payload.extend(items)
               successful_price_store_keys.append(store_key)
               for barcode, fields in product_candidates.items():
@@ -902,9 +1052,19 @@ jobs:
                   "source_ts": selection["timestamp"],
               })
 
-          if set(successful_price_store_keys) != target_store_keys:
-              missing = sorted(target_store_keys - set(successful_price_store_keys))
-              raise SystemExit(f"Not all target stores produced valid price payloads: {', '.join(missing)}")
+          write_csv(
+              OUT_DIR / "failed_price_files.csv",
+              failed_price_store_rows,
+              ["store_key", "retailer", "store_name", "city", "source_file", "source_ts", "error"],
+          )
+
+          if not successful_price_store_keys:
+              raise SystemExit("No target stores produced valid price payloads. Aborting before DB write.")
+
+          price_success_by_retailer = Counter(discovered_stores_map[key]["retailer"] for key in successful_price_store_keys)
+          missing_price_retailers = [ret for ret in TARGET_RETAILERS if price_success_by_retailer.get(ret, 0) == 0]
+          if missing_price_retailers:
+              raise SystemExit("No valid price payloads were produced for retailers: " + ", ".join(missing_price_retailers))
 
           all_barcodes = sorted(products_candidates.keys())
           existing_products = fetch_existing_products(all_barcodes)
@@ -1003,7 +1163,10 @@ jobs:
               "promotion_items_payload": len(promotion_items_payload),
               "successful_price_store_keys": len(successful_price_store_keys),
               "successful_promo_store_keys": len(successful_promo_store_keys),
+              "missing_price_store_keys": len(missing_price_store_keys),
               "missing_promo_store_keys": len(missing_promo_store_keys),
+              "legacy_store_key_aliases": len(legacy_store_key_aliases),
+              "unresolved_existing_target_rows": len(unresolved_existing_target_rows),
           }
           write_json(OUT_DIR / "db_payload_counts.json", payload_counts)
           write_json(OUT_DIR / "run_summary.json", {
@@ -1028,11 +1191,12 @@ jobs:
           post_upsert("promotions_current", "promotion_key", promotions_payload, 2000)
           post_upsert("promotion_items_current", "promotion_item_key", promotion_items_payload, 5000)
 
-          discovered_non_target_batches = list(chunked(sorted(non_target_store_keys), 200))
+          cleanup_non_current_store_keys = sorted(non_target_store_keys | legacy_store_keys_to_deactivate)
+          cleanup_non_current_batches = list(chunked(cleanup_non_current_store_keys, 200))
           successful_price_batches = list(chunked(sorted(successful_price_store_keys), 200))
           successful_promo_batches = list(chunked(sorted(successful_promo_store_keys), 200))
 
-          for batch in discovered_non_target_batches:
+          for batch in cleanup_non_current_batches:
               delete_rows("prices_current", {"store_key": build_in_filter(batch)})
               delete_rows("promotions_current", {"store_key": build_in_filter(batch)})
 
