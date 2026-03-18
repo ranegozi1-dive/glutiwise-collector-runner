@@ -1,4 +1,4 @@
-name: GlutiWise Current Sync to Supabase v6
+name: GlutiWise Current Sync to Supabase v7
 
 on:
   # Uncomment the 2 lines below only after the first successful manual run.
@@ -148,9 +148,51 @@ jobs:
                   return True
               placeholders = {
                   "unknown", "לא ידוע", "לא ידועה", "null", "none", "n/a", "na",
-                  "ללא", "0", "---", "-",
+                  "ללא", "0", "---", "-", "_none_", "_off_not_found_", "_off_no_brand_",
+                  "_off_no_manufacturer_", "not found", "brand not found", "manufacturer not found",
+                  "משתנה", "כללי", "generic", "nan", "nil",
               }
-              return v in placeholders
+              if v in placeholders:
+                  return True
+              if v.startswith('_off_'):
+                  return True
+              if re.fullmatch(r'[-_ ]+', v):
+                  return True
+              return False
+
+          def sanitize_optional_text(value):
+              v = clean_text(value)
+              return "" if text_is_placeholder(v) else v
+
+          def looks_like_generic_company_name(value: str) -> bool:
+              v = clean_lookup_text(value).lower()
+              if not v:
+                  return True
+              generic_tokens = {
+                  "בעמ", "בע מ", "חברה", "תעשיות", "מפעל", "לוגיסטיקה", "שיווק", "יבוא", "יבוא ושיווק",
+                  "קמעונאות", "רשת", "מזון", "פרמצבטיות", "מעבדות", "group", "ltd", "inc", "corp", "co"
+              }
+              return any(tok in v for tok in generic_tokens)
+
+          def fallback_brand_from_name_or_manufacturer(name: str, manufacturer: str) -> str:
+              name_v = sanitize_optional_text(name)
+              manuf_v = sanitize_optional_text(manufacturer)
+              if not manuf_v:
+                  return ""
+              if len(manuf_v) < 2 or len(manuf_v) > 24:
+                  return ""
+              if looks_like_generic_company_name(manuf_v):
+                  return ""
+              name_norm = clean_lookup_text(name_v).lower()
+              manuf_norm = clean_lookup_text(manuf_v).lower()
+              if not name_norm or not manuf_norm:
+                  return ""
+              manuf_tokens = [tok for tok in manuf_norm.split() if len(tok) >= 3]
+              if manuf_norm in name_norm:
+                  return manuf_v
+              if manuf_tokens and all(tok in name_norm for tok in manuf_tokens[:2]):
+                  return manuf_v
+              return ""
 
           def looks_like_barcode(value: str) -> bool:
               digits = re.sub(r"\D", "", clean_text(value))
@@ -315,13 +357,11 @@ jobs:
               return detected_city, reasons, bool(expected_city and detected_city == expected_city)
 
           def choose_better_text(current: str, candidate: str) -> str:
-              current = clean_text(current)
-              candidate = clean_text(candidate)
+              current = sanitize_optional_text(current)
+              candidate = sanitize_optional_text(candidate)
               if not candidate:
                   return current
-              if text_is_placeholder(candidate):
-                  return current
-              if not current or text_is_placeholder(current):
+              if not current:
                   return candidate
               if candidate == current:
                   return current
@@ -555,10 +595,10 @@ jobs:
               }
 
           def best_from_candidates(existing_value: str, candidates):
-              value = clean_text(existing_value)
+              value = sanitize_optional_text(existing_value)
               for candidate in candidates:
                   value = choose_better_text(value, candidate)
-              return value or None
+              return sanitize_optional_text(value) or None
 
           def discover_stores():
               discovered = {}
@@ -727,9 +767,15 @@ jobs:
                           extract_any(node, {"PriceUpdateDate", "UpdateDate", "LastUpdateDate"})
                       ) or root_updated or filename_timestamp(path)
                       item_name = extract_any(node, {"ItemName", "ItemNm", "ProductName", "Description", "ItemDescription"})
-                      brand = extract_any(node, {"BrandName", "Brand", "BrandNm", "BrandDescription", "BrandDesc", "TradeMark", "Trademark", "BrandHebrewName", "BrandEngName"})
-                      manufacturer = extract_any(node, {"ManufacturerName", "ManufactureName", "Manufacturer", "Manufacture", "ManufactorerName", "SupplierName", "Supplier", "ProducerName", "VendorName"})
-                      category = extract_any(node, {"MainCategoryName", "Category", "DepartmentName", "SubCategoryName", "ItemCategory", "MainCategory", "SubCategory", "CategoryName", "Department", "SubDepartmentName"})
+                      brand = extract_any(node, {"BrandName", "Brand", "BrandNm", "BrandDescription", "BrandDesc", "TradeMark", "Trademark", "BrandHebrewName", "BrandEngName", "ItemBrand", "BrandLabel", "BrandLongName", "BrandShortName", "BrandTitle"})
+                      manufacturer = extract_any(node, {"ManufacturerName", "ManufactureName", "Manufacturer", "Manufacture", "ManufactorerName", "SupplierName", "Supplier", "ProducerName", "VendorName", "CompanyName", "ImporterName", "ManufacturerHebName", "ManufacturerEngName"})
+                      category = extract_any(node, {"MainCategoryName", "Category", "DepartmentName", "SubCategoryName", "ItemCategory", "MainCategory", "SubCategory", "CategoryName", "Department", "SubDepartmentName", "DepartmentNm", "SubDepartment", "FamilyName", "GroupName", "SubGroupName", "ItemType", "ItemTypeName", "CategoryNm", "SectionName", "PrimaryCategoryName"})
+                      item_name = sanitize_optional_text(item_name)
+                      brand = sanitize_optional_text(brand)
+                      manufacturer = sanitize_optional_text(manufacturer)
+                      category = sanitize_optional_text(category)
+                      if not brand:
+                          brand = fallback_brand_from_name_or_manufacturer(item_name, manufacturer)
                       price_key = f"{barcode}:{store_key}"
                       existing = items_by_key.get(price_key)
                       if existing is None or (updated_at, len(clean_text(item_name))) > (existing["updated_at"], len(clean_text(existing.get("_name_candidate", "")))):
@@ -1134,12 +1180,18 @@ jobs:
           for barcode in all_barcodes:
               existing = existing_products.get(barcode, {})
               fields = products_candidates[barcode]
+              name_value = best_from_candidates(existing.get("name", ""), fields.get("name", []))
+              manufacturer_value = best_from_candidates(existing.get("manufacturer", ""), fields.get("manufacturer", []))
+              brand_value = best_from_candidates(existing.get("brand", ""), fields.get("brand", []))
+              category_value = best_from_candidates(existing.get("category", ""), fields.get("category", []))
+              if not brand_value:
+                  brand_value = fallback_brand_from_name_or_manufacturer(name_value or "", manufacturer_value or "") or None
               products_payload.append({
                   "barcode": barcode,
-                  "name": best_from_candidates(existing.get("name", ""), fields.get("name", [])),
-                  "category": best_from_candidates(existing.get("category", ""), fields.get("category", [])),
-                  "brand": best_from_candidates(existing.get("brand", ""), fields.get("brand", [])),
-                  "manufacturer": best_from_candidates(existing.get("manufacturer", ""), fields.get("manufacturer", [])),
+                  "name": name_value,
+                  "category": category_value,
+                  "brand": sanitize_optional_text(brand_value) or None,
+                  "manufacturer": sanitize_optional_text(manufacturer_value) or None,
               })
 
           promotions_payload = []
@@ -1262,14 +1314,20 @@ jobs:
 
           product_payload_coverage = {
               "products_payload": len(products_payload),
-              "name_present": sum(1 for row in products_payload if clean_text(row.get("name"))),
-              "brand_present": sum(1 for row in products_payload if clean_text(row.get("brand"))),
-              "manufacturer_present": sum(1 for row in products_payload if clean_text(row.get("manufacturer"))),
-              "category_present": sum(1 for row in products_payload if clean_text(row.get("category"))),
+              "name_present": sum(1 for row in products_payload if sanitize_optional_text(row.get("name"))),
+              "brand_present": sum(1 for row in products_payload if sanitize_optional_text(row.get("brand"))),
+              "manufacturer_present": sum(1 for row in products_payload if sanitize_optional_text(row.get("manufacturer"))),
+              "category_present": sum(1 for row in products_payload if sanitize_optional_text(row.get("category"))),
+              "company_or_brand_present": sum(1 for row in products_payload if sanitize_optional_text(row.get("brand")) or sanitize_optional_text(row.get("manufacturer"))),
           }
-          for key in ["name_present", "brand_present", "manufacturer_present", "category_present"]:
+          for key in ["name_present", "brand_present", "manufacturer_present", "category_present", "company_or_brand_present"]:
               product_payload_coverage[f"pct_{key.replace('_present','')}"] = round((100.0 * product_payload_coverage[key] / product_payload_coverage["products_payload"]), 2) if product_payload_coverage["products_payload"] else 0.0
           write_json(OUT_DIR / "product_payload_coverage.json", product_payload_coverage)
+          write_json(OUT_DIR / "product_quality_gate.json", {
+              "minimum_company_or_brand_pct": 85.0,
+              "actual_company_or_brand_pct": product_payload_coverage.get("pct_company_or_brand", 0),
+              "product_quality_ok": product_payload_coverage.get("pct_company_or_brand", 0) >= 85.0,
+          })
 
           strict_target_coverage_ok = not missing_price_store_keys and not failed_price_store_rows and not missing_promo_store_keys and not failed_promo_store_rows
 
@@ -1293,6 +1351,7 @@ jobs:
               "target_validation_failures": len(target_validation_failures),
               "store_set_consistency_ok": store_set_consistency_ok,
               "ready_for_db_write": strict_target_coverage_ok and not target_validation_failures and not unresolved_existing_target_rows and store_set_consistency_ok,
+              "product_company_or_brand_pct": product_payload_coverage.get("pct_company_or_brand", 0),
           }
           write_json(OUT_DIR / "db_payload_counts.json", payload_counts)
           write_json(OUT_DIR / "run_summary.json", {
@@ -1307,7 +1366,10 @@ jobs:
           write_json(OUT_DIR / "promotions_upsert.json", promotions_payload)
           write_json(OUT_DIR / "promotion_items_upsert.json", promotion_items_payload)
 
-          if (not strict_target_coverage_ok) or target_validation_failures or unresolved_existing_target_rows or (not store_set_consistency_ok):
+          minimum_company_or_brand_pct = 85.0
+          product_quality_ok = product_payload_coverage.get("pct_company_or_brand", 0) >= minimum_company_or_brand_pct
+
+          if (not strict_target_coverage_ok) or target_validation_failures or unresolved_existing_target_rows or (not store_set_consistency_ok) or (not product_quality_ok):
               coverage_errors = []
               if target_validation_failures:
                   coverage_errors.append(f"target_validation_failures={len(target_validation_failures)}")
@@ -1315,6 +1377,8 @@ jobs:
                   coverage_errors.append(f"unresolved_existing_target_rows={len(unresolved_existing_target_rows)}")
               if not store_set_consistency_ok:
                   coverage_errors.append("store_set_consistency_ok=false")
+              if not product_quality_ok:
+                  coverage_errors.append(f"product_company_or_brand_pct<{minimum_company_or_brand_pct}")
               if missing_price_store_keys:
                   coverage_errors.append(f"missing_price_store_keys={len(missing_price_store_keys)}")
               if failed_price_store_rows:
