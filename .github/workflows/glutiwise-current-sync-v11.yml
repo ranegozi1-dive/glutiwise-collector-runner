@@ -1,4 +1,4 @@
-name: GlutiWise Current Sync to Supabase v10
+name: GlutiWise Current Sync to Supabase v11
 
 on:
   # Uncomment the 2 lines below only after the first successful manual run.
@@ -16,7 +16,7 @@ on:
         default: ""
 
 concurrency:
-  group: glutiwise-current-sync-v10
+  group: glutiwise-current-sync-v11
   cancel-in-progress: false
 
 permissions:
@@ -80,7 +80,7 @@ jobs:
           from collections import Counter, defaultdict
           from datetime import datetime, timedelta, timezone
           from pathlib import Path
-
+          
           TARGET_RETAILERS = ("shufersal", "ramilevy", "yohananof")
           TARGET_CITIES = (
               "הוד השרון",
@@ -104,15 +104,15 @@ jobs:
           DUMPS_DIR = Path("dumps")
           OUT_DIR.mkdir(parents=True, exist_ok=True)
           (OUT_DIR / "chunks").mkdir(parents=True, exist_ok=True)
-
+          
           def log(msg: str) -> None:
               print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
-
+          
           def write_json(path: Path, data) -> None:
               path.parent.mkdir(parents=True, exist_ok=True)
               with path.open("w", encoding="utf-8") as f:
                   json.dump(data, f, ensure_ascii=False, indent=2)
-
+          
           def write_csv(path: Path, rows, fieldnames) -> None:
               path.parent.mkdir(parents=True, exist_ok=True)
               with path.open("w", encoding="utf-8", newline="") as f:
@@ -120,10 +120,10 @@ jobs:
                   writer.writeheader()
                   for row in rows:
                       writer.writerow({k: row.get(k) for k in fieldnames})
-
+          
           def localname(tag: str) -> str:
               return tag.split("}")[-1] if "}" in tag else tag
-
+          
           def clean_text(value) -> str:
               if value is None:
                   return ""
@@ -131,17 +131,17 @@ jobs:
               text = re.sub(r"[\t\r\n]+", " ", text)
               text = re.sub(r"\s+", " ", text).strip()
               return text
-
+          
           def clean_lookup_text(value) -> str:
               text = clean_text(value)
               text = text.replace('"', ' ').replace("׳", " ").replace("'", " ").replace("״", " ")
               text = text.replace("-", " ").replace("/", " ").replace("\\", " ")
               text = re.sub(r"\s+", " ", text).strip()
               return text
-
+          
           def collapse_for_match(value) -> str:
               return re.sub(r"\s+", "", clean_lookup_text(value))
-
+          
           def text_is_placeholder(value: str) -> bool:
               v = clean_text(value).lower()
               if not v:
@@ -159,15 +159,15 @@ jobs:
               if re.fullmatch(r'[-_ ]+', v):
                   return True
               return False
-
+          
           def sanitize_optional_text(value):
               v = clean_text(value)
               return "" if text_is_placeholder(v) else v
-
+          
           def has_placeholder_leak(value) -> bool:
               v = clean_text(value)
               return bool(v) and text_is_placeholder(v)
-
+          
           def scrub_product_row(row: dict):
               cleaned = {
                   "barcode": normalize_barcode(row.get("barcode")),
@@ -179,8 +179,8 @@ jobs:
               if not cleaned["brand"]:
                   cleaned["brand"] = fallback_brand_from_name_or_manufacturer(cleaned["name"] or "", cleaned["manufacturer"] or "") or None
               return cleaned
-
-
+          
+          
           def compact_row(row: dict, required_keys=None):
               required_keys = set(required_keys or [])
               compacted = {}
@@ -194,7 +194,7 @@ jobs:
                       continue
                   compacted[key] = value
               return compacted
-
+          
           def build_target_coverage_by_store_rows(target_rows, price_keys, promo_keys, missing_price_keys, missing_promo_keys):
               price_keys = set(price_keys)
               promo_keys = set(promo_keys)
@@ -214,7 +214,7 @@ jobs:
                       "missing_promo_file": store_key in missing_promo_keys,
                   })
               return rows
-
+          
           def summarize_target_coverage_by_city_retailer(target_rows, price_keys, promo_keys):
               price_keys = set(price_keys)
               promo_keys = set(promo_keys)
@@ -242,7 +242,7 @@ jobs:
                       "full_promo_coverage": counts["target_stores"] == counts["promo_payload_stores"],
                   })
               return rows
-
+          
           def collect_product_placeholder_leaks(rows, limit=250):
               summary = Counter()
               examples = []
@@ -260,17 +260,17 @@ jobs:
                                   "value": text_value,
                               })
               return summary, examples
-
+          
           def fetch_promotion_keys(filters):
               rows = rest_get_rows("promotions_current", "promotion_key", filters)
               return sorted({clean_text(row.get("promotion_key", "")) for row in rows if clean_text(row.get("promotion_key", ""))})
-
+          
           def delete_promotion_items_by_promotion_keys(promotion_keys):
               if not promotion_keys:
                   return
               for batch in chunked(sorted(set(promotion_keys)), 200):
                   delete_rows("promotion_items_current", {"promotion_key": build_in_filter(batch)})
-
+          
           def looks_like_generic_company_name(value: str) -> bool:
               v = clean_lookup_text(value).lower()
               if not v:
@@ -280,7 +280,7 @@ jobs:
                   "קמעונאות", "רשת", "מזון", "פרמצבטיות", "מעבדות", "group", "ltd", "inc", "corp", "co"
               }
               return any(tok in v for tok in generic_tokens)
-
+          
           def fallback_brand_from_name_or_manufacturer(name: str, manufacturer: str) -> str:
               name_v = sanitize_optional_text(name)
               manuf_v = sanitize_optional_text(manufacturer)
@@ -300,14 +300,14 @@ jobs:
               if manuf_tokens and all(tok in name_norm for tok in manuf_tokens[:2]):
                   return manuf_v
               return ""
-
+          
           def looks_like_barcode(value: str) -> bool:
               digits = re.sub(r"\D", "", clean_text(value))
               return bool(re.fullmatch(r"\d{8,13}", digits))
-
+          
           def normalize_barcode(value: str) -> str:
               return re.sub(r"\D", "", clean_text(value))
-
+          
           def safe_decimal(value):
               s = clean_text(value).replace(",", ".")
               if not s:
@@ -317,7 +317,7 @@ jobs:
               except ValueError:
                   return None
               return round(num, 2) if num > 0 else None
-
+          
           def parse_datetime_value(value: str):
               value = clean_text(value)
               if not value:
@@ -345,7 +345,7 @@ jobs:
                   except Exception:
                       continue
               return None
-
+          
           def filename_timestamp(path: Path):
               matches = re.findall(r"(\d{12,14})", path.name)
               for candidate in reversed(matches):
@@ -353,10 +353,10 @@ jobs:
                   if parsed:
                       return parsed
               return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
+          
           def sha1_text(text: str) -> str:
               return hashlib.sha1(text.encode("utf-8")).hexdigest()
-
+          
           def canonical_store_id(retailer: str, store_id_raw: str) -> str:
               text = clean_text(store_id_raw)
               digits = re.sub(r"\D", "", text)
@@ -365,7 +365,7 @@ jobs:
                       return digits.zfill(3)
                   return str(int(digits))
               return text
-
+          
           def retailer_from(chain_id: str, chain_name: str):
               cid = clean_text(chain_id)
               cname = clean_text(chain_name)
@@ -376,16 +376,16 @@ jobs:
               if "יוחננוף" in cname or "YOHANANOF" in cname.upper():
                   return "yohananof"
               return CHAIN_ID_TO_RETAILER.get(cid)
-
+          
           def canonical_store_key(retailer: str, store_id_raw: str) -> str:
               return f"{retailer}:{canonical_store_id(retailer, store_id_raw)}"
-
+          
           def split_store_key(store_key: str):
               parts = clean_text(store_key).split(":", 1)
               if len(parts) != 2:
                   return clean_text(store_key), ""
               return parts[0], parts[1]
-
+          
           def equivalent_store_keys(store_key: str):
               retailer, store_id_raw = split_store_key(store_key)
               digits = re.sub(r"\D", "", clean_text(store_id_raw))
@@ -407,7 +407,7 @@ jobs:
                   if key not in seen_local:
                       keys.append(key)
               return keys
-
+          
           def detect_city(*values):
               matches = []
               reasons = []
@@ -453,7 +453,7 @@ jobs:
               if len(unique) > 1:
                   return None, reasons
               return None, reasons
-
+          
           def validate_target_assignment(row: dict):
               detected_city, reasons = detect_city(
                   ("city", row.get("city", "")),
@@ -462,7 +462,7 @@ jobs:
               )
               expected_city = clean_text(row.get("canonical_city", ""))
               return detected_city, reasons, bool(expected_city and detected_city == expected_city)
-
+          
           def choose_better_text(current: str, candidate: str) -> str:
               current = sanitize_optional_text(current)
               candidate = sanitize_optional_text(candidate)
@@ -481,7 +481,7 @@ jobs:
                       v.count(" "),
                   )
               return candidate if score(candidate) > score(current) else current
-
+          
           def normalize_promotion_type(title: str, description: str, benefit_text: str, is_club: bool) -> str:
               text = " ".join(filter(None, [clean_text(title), clean_text(description), clean_text(benefit_text)])).lower()
               if is_club:
@@ -493,7 +493,7 @@ jobs:
               if text:
                   return "simple"
               return "unknown"
-
+          
           def _roots_from_zip_bytes(blob: bytes):
               roots = []
               with zipfile.ZipFile(io.BytesIO(blob), "r") as zf:
@@ -501,7 +501,7 @@ jobs:
                       if name.lower().endswith(".xml"):
                           roots.append(ET.fromstring(zf.read(name)))
               return roots
-
+          
           def load_xml_roots(path: Path):
               blob = path.read_bytes()
               lower = path.name.lower()
@@ -531,7 +531,7 @@ jobs:
                   pass
               # 4) Plain XML fallback
               return [ET.fromstring(blob)]
-
+          
           def extract_any(elem, names):
               wanted = {n.lower() for n in names}
               for child in elem.iter():
@@ -540,7 +540,7 @@ jobs:
                       if text:
                           return text
               return ""
-
+          
           def collect_tag_values(elem):
               data = {}
               for child in elem.iter():
@@ -549,7 +549,7 @@ jobs:
                   if text and key not in data:
                       data[key] = text
               return data
-
+          
           def iter_dump_paths():
               for path in DUMPS_DIR.rglob("*"):
                   if not path.is_file():
@@ -557,7 +557,7 @@ jobs:
                   lower = path.name.lower()
                   if lower.endswith((".xml", ".gz", ".zip", ".xml.gz")):
                       yield path
-
+          
           def classify_dump_kind(path: Path):
               lower = path.name.lower()
               if lower.startswith("stores") or lower.startswith("store"):
@@ -569,7 +569,7 @@ jobs:
               if lower.startswith("promo") or "promo" in lower:
                   return "promo"
               return None
-
+          
           def parse_filename_identity(path: Path):
               name = path.name
               patterns = [
@@ -585,7 +585,7 @@ jobs:
                       store_id = m.group(2) if m.lastindex and m.lastindex >= 2 else ""
                       return kind, chain_id, store_id
               return None, "", ""
-
+          
           def http_json(method: str, path_or_url: str, headers=None, body=None, timeout=120, expect_json=True):
               url = path_or_url if path_or_url.startswith("http") else f"{SUPABASE_URL}{path_or_url}"
               payload = None
@@ -617,15 +617,15 @@ jobs:
                   if attempt < 3:
                       time.sleep(attempt * 2)
               raise last_error
-
+          
           def pg_quote(value: str) -> str:
               text = clean_text(value)
               text = text.replace('"', '\\"')
               return f'"{text}"'
-
+          
           def build_in_filter(values):
               return "in.(" + ",".join(pg_quote(v) for v in values) + ")"
-
+          
           def rest_get_rows(table: str, select_clause: str, filters=None):
               query = {"select": select_clause}
               if filters:
@@ -636,7 +636,7 @@ jobs:
               path = f"/rest/v1/{table}?" + "&".join(parts)
               data = http_json("GET", path)
               return data or []
-
+          
           def chunked(iterable, size):
               batch = []
               for item in iterable:
@@ -646,7 +646,24 @@ jobs:
                       batch = []
               if batch:
                   yield batch
-
+          
+          def group_rows_by_key_signature(rows):
+              grouped = defaultdict(list)
+              for row in rows:
+                  signature = tuple(sorted(row.keys()))
+                  grouped[signature].append(row)
+              return grouped
+          
+          def summarize_payload_keysets(rows):
+              summary = []
+              for signature, group_rows in sorted(group_rows_by_key_signature(rows).items(), key=lambda item: (len(item[0]), item[0])):
+                  summary.append({
+                      "row_count": len(group_rows),
+                      "field_count": len(signature),
+                      "fields": list(signature),
+                  })
+              return summary
+          
           def fetch_existing_products(barcodes):
               rows = {}
               for batch in chunked(sorted(set(barcodes)), 200):
@@ -655,7 +672,7 @@ jobs:
                   for row in data:
                       rows[row["barcode"]] = row
               return rows
-
+          
           def fetch_existing_target_chain_stores():
               filters = {
                   "retailer": build_in_filter(TARGET_RETAILERS),
@@ -666,16 +683,23 @@ jobs:
                   filters,
               )
               return data
-
+          
           def post_upsert(table: str, conflict: str, rows, chunk_size: int):
               if not rows:
                   return
               path = f"/rest/v1/{table}?on_conflict={urllib.parse.quote(conflict, safe=',')}"
               headers = {"Prefer": "resolution=merge-duplicates,return=minimal,missing=default"}
-              for index, batch in enumerate(chunked(rows, chunk_size), start=1):
-                  log(f"Upserting {table} chunk {index} ({len(batch)} rows)")
-                  http_json("POST", path, headers=headers, body=batch, expect_json=False)
-
+              signature_groups = group_rows_by_key_signature(rows)
+              if len(signature_groups) > 1:
+                  log(f"{table}: detected {len(signature_groups)} row key signatures; splitting upserts by signature to satisfy PostgREST.")
+              group_index = 0
+              for signature, group_rows in sorted(signature_groups.items(), key=lambda item: (len(item[0]), item[0])):
+                  group_index += 1
+                  signature_text = ",".join(signature)
+                  for chunk_index, batch in enumerate(chunked(group_rows, chunk_size), start=1):
+                      log(f"Upserting {table} signature {group_index}/{len(signature_groups)} chunk {chunk_index} ({len(batch)} rows) keys=[{signature_text}]")
+                      http_json("POST", path, headers=headers, body=batch, expect_json=False)
+          
           def delete_rows(table: str, filters):
               if not filters:
                   return
@@ -684,7 +708,7 @@ jobs:
                   parts.append(f"{urllib.parse.quote(str(key), safe='')}={urllib.parse.quote(str(value), safe='().,:*')}")
               path = f"/rest/v1/{table}?" + "&".join(parts)
               http_json("DELETE", path, headers={"Prefer": "return=minimal"}, expect_json=False)
-
+          
           def merge_store_row(discovered: dict, existing: dict):
               existing = existing or {}
               city_value = discovered.get("canonical_city") or choose_better_text(existing.get("city", ""), discovered.get("city", ""))
@@ -700,13 +724,13 @@ jobs:
                   "store_type": store_type,
                   "mvp_active": bool(discovered.get("is_target")),
               }
-
+          
           def best_from_candidates(existing_value: str, candidates):
               value = sanitize_optional_text(existing_value)
               for candidate in candidates:
                   value = choose_better_text(value, candidate)
               return sanitize_optional_text(value) or None
-
+          
           def discover_stores():
               discovered = {}
               ambiguous = []
@@ -789,7 +813,7 @@ jobs:
                                   "source_file": previous.get("source_file") if previous.get("source_ts", "") >= file_ts else str(path),
                               }
               return discovered, ambiguous, parse_errors, store_file_rows
-
+          
           def select_latest_files(kind_expected: str, target_store_keys=None, allow_non_target=False):
               selected = {}
               diagnostics = []
@@ -834,7 +858,7 @@ jobs:
                   if prev is None or (candidate["timestamp"], candidate["priority"]) > (prev["timestamp"], prev["priority"]):
                       selected[store_key] = candidate
               return selected, diagnostics
-
+          
           def parse_price_file(path: Path, store_key: str):
               items_by_key = {}
               product_candidates = defaultdict(lambda: defaultdict(list))
@@ -914,7 +938,7 @@ jobs:
                   item.pop("_name_candidate", None)
               coverage["unique_barcodes"] = len(coverage["unique_barcodes"])
               return items, product_candidates, coverage, parse_errors
-
+          
           def parse_promo_file(path: Path, store_key: str):
               promo_headers = {}
               promo_items = {}
@@ -1023,15 +1047,15 @@ jobs:
                               "raw_payload": {"barcode": barcode},
                           }
               return list(promo_headers.values()), list(promo_items.values()), parse_errors
-
+          
           discovered_stores_map, ambiguous_rows, store_parse_errors, store_file_rows = discover_stores()
-
+          
           existing_target_chain_rows = fetch_existing_target_chain_stores()
           existing_target_chain_by_key = {row["store_key"]: row for row in existing_target_chain_rows}
           legacy_store_key_aliases = {}
           unresolved_existing_target_rows = []
           auto_deactivated_existing_target_rows = []
-
+          
           for row in existing_target_chain_rows:
               raw_key = clean_text(row.get("store_key", ""))
               row_retailer = clean_text(row.get("retailer", ""))
@@ -1053,7 +1077,7 @@ jobs:
                       "target_city_hint": "",
                       "reason": "existing_mvp_active_store_not_found_in_latest_store_files",
                   })
-
+          
           def select_existing_store_for_discovered(discovered_key: str):
               exact = existing_target_chain_by_key.get(discovered_key)
               if exact:
@@ -1065,7 +1089,7 @@ jobs:
                           legacy_store_key_aliases.setdefault(alias_key, discovered_key)
                       return candidate
               return None
-
+          
           target_validation_failures = []
           for row in discovered_stores_map.values():
               detected_city, detected_reasons, is_valid_target = validate_target_assignment(row)
@@ -1086,27 +1110,27 @@ jobs:
                   row["is_target"] = False
                   row["target_city"] = ""
                   row["canonical_city"] = clean_text(row.get("city", "")) or clean_text(row.get("store_name", ""))
-
+          
           discovered_store_keys = set(discovered_stores_map.keys())
           discovered_target_stores = [row for row in discovered_stores_map.values() if row.get("is_target")]
           discovered_non_target_stores = [row for row in discovered_stores_map.values() if not row.get("is_target")]
           target_store_keys = {row["store_key"] for row in discovered_target_stores}
           non_target_store_keys = {row["store_key"] for row in discovered_non_target_stores}
           legacy_store_keys_to_deactivate = set(legacy_store_key_aliases.keys())
-
+          
           if not discovered_target_stores:
               raise SystemExit("No target stores were discovered from STORE files after source-only target validation. Aborting.")
-
+          
           by_retailer = Counter(row["retailer"] for row in discovered_target_stores)
           missing_retailers = [ret for ret in TARGET_RETAILERS if by_retailer.get(ret, 0) == 0]
           if missing_retailers:
               raise SystemExit(f"No target stores discovered for retailers: {', '.join(missing_retailers)}")
-
+          
           discovered_target_city_set = {row["canonical_city"] for row in discovered_target_stores if row.get("canonical_city") in TARGET_CITIES}
           missing_target_cities = sorted(set(TARGET_CITIES) - discovered_target_city_set)
           if missing_target_cities:
               raise SystemExit(f"No target stores discovered for target cities: {', '.join(missing_target_cities)}")
-
+          
           write_csv(
               OUT_DIR / "stores_discovered.csv",
               sorted(discovered_stores_map.values(), key=lambda x: (x["retailer"], x["canonical_city"], x["store_key"])),
@@ -1148,7 +1172,7 @@ jobs:
               target_validation_failures,
               ["store_key", "retailer", "store_name", "city", "canonical_city", "address", "validation_detected_city", "validation_reasons", "reason"],
           )
-
+          
           price_file_map, price_file_diagnostics = select_latest_files("price_full", target_store_keys=target_store_keys)
           missing_price_store_keys = sorted(target_store_keys - set(price_file_map.keys()))
           write_csv(
@@ -1164,7 +1188,7 @@ jobs:
               ],
               ["store_key", "retailer", "store_name", "city"],
           )
-
+          
           promo_full_map, promo_full_diag = select_latest_files("promo_full", target_store_keys=target_store_keys)
           promo_partial_map, promo_partial_diag = select_latest_files("promo", target_store_keys=target_store_keys)
           promo_file_map = {}
@@ -1174,7 +1198,7 @@ jobs:
               elif store_key in promo_partial_map:
                   promo_file_map[store_key] = promo_partial_map[store_key]
           missing_promo_store_keys = sorted(target_store_keys - set(promo_file_map.keys()))
-
+          
           stores_payload = [
               merge_store_row(discovered_stores_map[key], select_existing_store_for_discovered(key))
               for key in sorted(discovered_store_keys)
@@ -1194,7 +1218,7 @@ jobs:
                   "store_type": existing_row.get("store_type") or "chain",
                   "mvp_active": False,
               })
-
+          
           prices_payload = []
           successful_price_store_keys = []
           failed_price_store_rows = []
@@ -1202,7 +1226,7 @@ jobs:
           prices_summary_rows = []
           price_store_coverage_rows = []
           price_parse_errors = list(price_file_diagnostics)
-
+          
           for store_key in sorted(target_store_keys):
               selection = price_file_map.get(store_key)
               if not selection:
@@ -1272,21 +1296,21 @@ jobs:
                   "source_file": str(selection["path"]),
                   "source_ts": selection["timestamp"],
               })
-
+          
           write_csv(
               OUT_DIR / "failed_price_files.csv",
               failed_price_store_rows,
               ["store_key", "retailer", "store_name", "city", "source_file", "source_ts", "error"],
           )
-
+          
           if not successful_price_store_keys:
               raise SystemExit("No target stores produced valid price payloads. Aborting before DB write.")
-
+          
           price_success_by_retailer = Counter(discovered_stores_map[key]["retailer"] for key in successful_price_store_keys)
           missing_price_retailers = [ret for ret in TARGET_RETAILERS if price_success_by_retailer.get(ret, 0) == 0]
           if missing_price_retailers:
               raise SystemExit("No valid price payloads were produced for retailers: " + ", ".join(missing_price_retailers))
-
+          
           all_barcodes = sorted(products_candidates.keys())
           existing_products = fetch_existing_products(all_barcodes)
           products_payload = []
@@ -1306,7 +1330,7 @@ jobs:
                   "brand": brand_value,
                   "manufacturer": manufacturer_value,
               }), required_keys={"barcode"}))
-
+          
           promotions_payload = []
           promotion_items_payload = []
           successful_promo_store_keys = []
@@ -1314,7 +1338,7 @@ jobs:
           processed_promotion_keys = set()
           promotions_summary_rows = []
           promo_parse_errors = price_parse_errors[:0] + list(promo_full_diag) + list(promo_partial_diag)
-
+          
           for store_key in sorted(target_store_keys):
               selection = promo_file_map.get(store_key)
               if not selection:
@@ -1346,7 +1370,7 @@ jobs:
                   "source_file": str(selection["path"]),
                   "source_ts": selection["timestamp"],
               })
-
+          
           def assert_unique(rows, key_name, table_name):
               seen = set()
               duplicates = []
@@ -1357,13 +1381,13 @@ jobs:
                   seen.add(key)
               if duplicates:
                   raise SystemExit(f"Duplicate {key_name} values in {table_name}: {duplicates[:20]}")
-
+          
           assert_unique(products_payload, "barcode", "products")
           assert_unique(stores_payload, "store_key", "stores")
           assert_unique(prices_payload, "price_key", "prices_current")
           assert_unique(promotions_payload, "promotion_key", "promotions_current")
           assert_unique(promotion_items_payload, "promotion_item_key", "promotion_items_current")
-
+          
           write_csv(
               OUT_DIR / "prices_summary_by_store.csv",
               prices_summary_rows,
@@ -1397,7 +1421,7 @@ jobs:
               price_store_coverage_rows,
               ["store_key", "retailer", "store_name", "city", "valid_price_rows", "unique_barcodes", "name_present", "brand_present", "manufacturer_present", "category_present", "pct_name", "pct_brand", "pct_manufacturer", "pct_category", "source_file", "source_ts"],
           )
-
+          
           target_coverage_by_store_rows = build_target_coverage_by_store_rows(
               discovered_target_stores,
               successful_price_store_keys,
@@ -1420,7 +1444,7 @@ jobs:
               target_coverage_by_city_retailer_rows,
               ["city", "retailer", "target_stores", "price_payload_stores", "promo_payload_stores", "full_price_coverage", "full_promo_coverage"],
           )
-
+          
           target_store_key_set = set(target_store_keys)
           price_store_key_set = set(successful_price_store_keys)
           promo_store_key_set = set(successful_promo_store_keys)
@@ -1451,7 +1475,7 @@ jobs:
           ])
           store_set_consistency["store_set_consistency_ok"] = store_set_consistency_ok
           write_json(OUT_DIR / "store_set_consistency.json", store_set_consistency)
-
+          
           product_payload_coverage = {
               "products_payload": len(products_payload),
               "name_present": sum(1 for row in products_payload if sanitize_optional_text(row.get("name"))),
@@ -1470,7 +1494,7 @@ jobs:
               placeholder_leak_examples,
               ["barcode", "field", "value"],
           )
-
+          
           minimum_company_or_brand_pct = 85.0
           minimum_manufacturer_pct = 70.0
           minimum_category_pct = 70.0
@@ -1513,7 +1537,7 @@ jobs:
               "product_enrichment_quality_ok": product_enrichment_quality_ok,
               "product_quality_ok": product_enrichment_quality_ok,
           })
-
+          
           price_summary_store_key_set = {row["store_key"] for row in prices_summary_rows}
           promo_summary_store_key_set = {row["store_key"] for row in promotions_summary_rows}
           coverage_all_store_key_set = {row["store_key"] for row in price_store_coverage_rows}
@@ -1529,7 +1553,7 @@ jobs:
           }
           artifact_self_check["artifact_self_check_ok"] = all(artifact_self_check.values())
           write_json(OUT_DIR / "artifact_self_check.json", artifact_self_check)
-
+          
           strict_target_coverage_ok = not missing_price_store_keys and not failed_price_store_rows and not missing_promo_store_keys and not failed_promo_store_rows
           covered_target_store_keys = sorted(target_store_key_set & price_store_key_set & promo_store_key_set)
           uncovered_target_store_keys = sorted(target_store_key_set - set(covered_target_store_keys))
@@ -1598,7 +1622,7 @@ jobs:
               "missing_covered_target_retailers": missing_covered_target_retailers,
               "ready_for_db_write": write_scope_ok,
           })
-
+          
           payload_counts = {
               "run_ts": RUN_TS_ISO,
               "write_to_supabase": WRITE_TO_SUPABASE,
@@ -1633,6 +1657,13 @@ jobs:
               "product_company_or_brand_pct": product_payload_coverage.get("pct_company_or_brand", 0),
           }
           write_json(OUT_DIR / "db_payload_counts.json", payload_counts)
+          write_json(OUT_DIR / "payload_keysets_summary.json", {
+              "products": summarize_payload_keysets(products_payload),
+              "stores": summarize_payload_keysets(stores_payload),
+              "prices_current": summarize_payload_keysets(prices_payload),
+              "promotions_current": summarize_payload_keysets(promotions_payload),
+              "promotion_items_current": summarize_payload_keysets(promotion_items_payload),
+          })
           write_json(OUT_DIR / "run_summary.json", {
               **payload_counts,
               "store_parse_errors": store_parse_errors,
@@ -1644,7 +1675,7 @@ jobs:
           write_json(OUT_DIR / "prices_upsert.json", prices_payload)
           write_json(OUT_DIR / "promotions_upsert.json", promotions_payload)
           write_json(OUT_DIR / "promotion_items_upsert.json", promotion_items_payload)
-
+          
           if not write_scope_ok:
               coverage_errors = []
               if target_validation_failures:
@@ -1667,39 +1698,39 @@ jobs:
               log(message)
               log("WRITE_TO_SUPABASE=false -> payload built for inspection only. Safe write scope not approved.")
               sys.exit(0)
-
+          
           if not WRITE_TO_SUPABASE:
               if write_mode == "partial_safe":
                   log("WRITE_TO_SUPABASE=false -> safe partial write is possible. Covered target stores would be updated; uncovered target stores would be left untouched.")
               else:
                   log("WRITE_TO_SUPABASE=false -> full target coverage achieved; DB write is ready.")
               sys.exit(0)
-
+          
           safe_write_store_keys = set(covered_target_store_keys)
           prices_payload_to_write = [row for row in prices_payload if row["store_key"] in safe_write_store_keys]
           promotions_payload_to_write = [row for row in promotions_payload if row["store_key"] in safe_write_store_keys]
           promotion_store_key_by_key = {row["promotion_key"]: row["store_key"] for row in promotions_payload_to_write}
           promotion_items_payload_to_write = [row for row in promotion_items_payload if promotion_store_key_by_key.get(row["promotion_key"]) in safe_write_store_keys]
           processed_promotion_keys_to_write = {row["promotion_key"] for row in promotions_payload_to_write}
-
+          
           post_upsert("products", "barcode", products_payload, 2000)
           post_upsert("stores", "store_key", stores_payload, 500)
           post_upsert("prices_current", "price_key", prices_payload_to_write, 5000)
           post_upsert("promotions_current", "promotion_key", promotions_payload_to_write, 2000)
           post_upsert("promotion_items_current", "promotion_item_key", promotion_items_payload_to_write, 5000)
-
+          
           deactivated_missing_target_store_keys = {row["store_key"] for row in auto_deactivated_existing_target_rows}
           cleanup_non_current_store_keys = sorted(non_target_store_keys | legacy_store_keys_to_deactivate | deactivated_missing_target_store_keys)
           cleanup_non_current_batches = list(chunked(cleanup_non_current_store_keys, 200))
           successful_price_batches = list(chunked(sorted(safe_write_store_keys), 200))
           successful_promo_batches = list(chunked(sorted(safe_write_store_keys), 200))
-
+          
           for batch in cleanup_non_current_batches:
               promo_keys_for_removed_stores = fetch_promotion_keys({"store_key": build_in_filter(batch)})
               delete_promotion_items_by_promotion_keys(promo_keys_for_removed_stores)
               delete_rows("prices_current", {"store_key": build_in_filter(batch)})
               delete_rows("promotions_current", {"store_key": build_in_filter(batch)})
-
+          
           for batch in successful_price_batches:
               delete_rows(
                   "prices_current",
@@ -1708,7 +1739,7 @@ jobs:
                       "last_seen_at": f"lt.{PRICE_STALE_BEFORE}",
                   },
               )
-
+          
           for batch in successful_promo_batches:
               stale_promo_filters = {
                   "store_key": build_in_filter(batch),
@@ -1720,7 +1751,7 @@ jobs:
                   "promotions_current",
                   stale_promo_filters,
               )
-
+          
           if processed_promotion_keys_to_write:
               for batch in chunked(sorted(processed_promotion_keys_to_write), 200):
                   delete_rows(
@@ -1730,7 +1761,7 @@ jobs:
                           "last_seen_at": f"lt.{RUN_TS_ISO}",
                       },
                   )
-
+          
           if write_mode == "partial_safe":
               log(f"GlutiWise current sync completed in partial-safe mode. Updated {len(covered_target_store_keys)} covered target stores and left {len(uncovered_target_store_keys)} uncovered target stores untouched.")
           else:
@@ -1743,5 +1774,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: glutiwise-current-sync-v10-${{ github.run_id }}
+          name: glutiwise-current-sync-v11-${{ github.run_id }}
           path: out
