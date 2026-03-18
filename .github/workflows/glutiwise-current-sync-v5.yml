@@ -1,4 +1,4 @@
-name: GlutiWise Current Sync to Supabase v4
+name: GlutiWise Current Sync to Supabase v5
 
 on:
   # Uncomment the 2 lines below only after the first successful manual run.
@@ -16,7 +16,7 @@ on:
         default: ""
 
 concurrency:
-  group: glutiwise-current-sync-v4
+  group: glutiwise-current-sync-v5
   cancel-in-progress: false
 
 permissions:
@@ -268,22 +268,29 @@ jobs:
                       continue
                   text = clean_lookup_text(raw)
                   text_no_space = collapse_for_match(raw)
+                  tokens = [tok for tok in re.split(r"[^A-Za-zא-ת0-9]+", text) if tok]
+                  token_set = set(tokens)
                   source_matches = []
-                  if ("הוד" in text and "השרון" in text) or "הודהשרון" in text_no_space:
+                  if ("הוד" in token_set and "השרון" in token_set) or "הודהשרון" in text_no_space:
                       source_matches.append("הוד השרון")
-                  if ("כפר" in text and "סבא" in text) or "כפרסבא" in text_no_space or 'כ"ס' in raw or 'כ״ס' in raw:
+                  if ("כפר" in token_set and "סבא" in token_set) or "כפרסבא" in text_no_space or 'כ"ס' in raw or 'כ״ס' in raw:
                       source_matches.append("כפר סבא")
+                  pt_abbrev = (
+                      'פ"ת' in raw
+                      or 'פ״ת' in raw
+                      or 'פת' in token_set
+                      or ('פ' in token_set and 'ת' in token_set)
+                  )
                   if (
-                      ("פתח" in text and ("תקוה" in text or "תקווה" in text))
+                      ("פתח" in token_set and ("תקוה" in token_set or "תקווה" in token_set))
                       or "פתחתקוה" in text_no_space
                       or "פתחתקווה" in text_no_space
-                      or re.search(r"(^|\s)פ\s*ת($|\s)", text)
-                      or 'פ"ת' in raw or 'פ״ת' in raw
+                      or pt_abbrev
                   ):
                       source_matches.append("פתח תקווה")
-                  if ("רמת" in text and "השרון" in text) or "רמתהשרון" in text_no_space:
+                  if ("רמת" in token_set and "השרון" in token_set) or "רמתהשרון" in text_no_space:
                       source_matches.append("רמת השרון")
-                  if "רעננה" in text or "רעננה" in text_no_space:
+                  if "רעננה" in token_set or "רעננה" in text_no_space:
                       source_matches.append("רעננה")
                   for city in source_matches:
                       matches.append(city)
@@ -297,6 +304,15 @@ jobs:
               if len(unique) > 1:
                   return None, reasons
               return None, reasons
+
+          def validate_target_assignment(row: dict):
+              detected_city, reasons = detect_city(
+                  ("city", row.get("city", "")),
+                  ("address", row.get("address", "")),
+                  ("store_name", row.get("store_name", "")),
+              )
+              expected_city = clean_text(row.get("canonical_city", ""))
+              return detected_city, reasons, bool(expected_city and detected_city == expected_city)
 
           def choose_better_text(current: str, candidate: str) -> str:
               current = clean_text(current)
@@ -864,13 +880,13 @@ jobs:
 
           for row in existing_target_chain_rows:
               raw_key = clean_text(row.get("store_key", ""))
-              if not raw_key:
+              row_retailer = clean_text(row.get("retailer", ""))
+              if not raw_key or row_retailer not in TARGET_RETAILERS:
                   continue
-              retailer, store_id_raw = split_store_key(raw_key)
-              if retailer not in TARGET_RETAILERS:
-                  continue
-              canonical_key = canonical_store_key(retailer, store_id_raw)
-              if raw_key != canonical_key and canonical_key in discovered_stores_map:
+              raw_key_retailer, raw_key_store_id = split_store_key(raw_key)
+              row_store_id = row.get("store_id", "") or raw_key_store_id
+              canonical_key = canonical_store_key(row_retailer, row_store_id)
+              if raw_key_retailer == row_retailer and raw_key != canonical_key and canonical_key in discovered_stores_map:
                   legacy_store_key_aliases[raw_key] = canonical_key
               if row.get("mvp_active") and canonical_key not in discovered_stores_map:
                   unresolved_existing_target_rows.append({
@@ -896,6 +912,27 @@ jobs:
                       return candidate
               return None
 
+          target_validation_failures = []
+          for row in discovered_stores_map.values():
+              detected_city, detected_reasons, is_valid_target = validate_target_assignment(row)
+              row["validation_detected_city"] = detected_city or ""
+              row["validation_reasons"] = " | ".join(detected_reasons)
+              if row.get("is_target") and not is_valid_target:
+                  target_validation_failures.append({
+                      "store_key": row.get("store_key", ""),
+                      "retailer": row.get("retailer", ""),
+                      "store_name": row.get("store_name", ""),
+                      "city": row.get("city", ""),
+                      "canonical_city": row.get("canonical_city", ""),
+                      "address": row.get("address", ""),
+                      "validation_detected_city": detected_city or "",
+                      "validation_reasons": " | ".join(detected_reasons),
+                      "reason": "target_city_not_supported_by_source_fields",
+                  })
+                  row["is_target"] = False
+                  row["target_city"] = ""
+                  row["canonical_city"] = clean_text(row.get("city", "")) or clean_text(row.get("store_name", ""))
+
           discovered_store_keys = set(discovered_stores_map.keys())
           discovered_target_stores = [row for row in discovered_stores_map.values() if row.get("is_target")]
           discovered_non_target_stores = [row for row in discovered_stores_map.values() if not row.get("is_target")]
@@ -904,7 +941,7 @@ jobs:
           legacy_store_keys_to_deactivate = set(legacy_store_key_aliases.keys())
 
           if not discovered_target_stores:
-              raise SystemExit("No target stores were discovered from STORE files after source+DB hint reconciliation. Aborting.")
+              raise SystemExit("No target stores were discovered from STORE files after source-only target validation. Aborting.")
 
           by_retailer = Counter(row["retailer"] for row in discovered_target_stores)
           missing_retailers = [ret for ret in TARGET_RETAILERS if by_retailer.get(ret, 0) == 0]
@@ -946,6 +983,11 @@ jobs:
               OUT_DIR / "unresolved_existing_target_rows.csv",
               unresolved_existing_target_rows,
               ["store_key", "retailer", "store_id", "store_name", "city", "address", "target_city_hint", "reason"],
+          )
+          write_csv(
+              OUT_DIR / "target_validation_failures.csv",
+              target_validation_failures,
+              ["store_key", "retailer", "store_name", "city", "canonical_city", "address", "validation_detected_city", "validation_reasons", "reason"],
           )
 
           price_file_map, price_file_diagnostics = select_latest_files("price_full", target_store_keys=target_store_keys)
@@ -1221,7 +1263,8 @@ jobs:
               "failed_promo_store_rows": len(failed_promo_store_rows),
               "legacy_store_key_aliases": len(legacy_store_key_aliases),
               "unresolved_existing_target_rows": len(unresolved_existing_target_rows),
-              "ready_for_db_write": strict_target_coverage_ok,
+              "target_validation_failures": len(target_validation_failures),
+              "ready_for_db_write": strict_target_coverage_ok and not target_validation_failures,
           }
           write_json(OUT_DIR / "db_payload_counts.json", payload_counts)
           write_json(OUT_DIR / "run_summary.json", {
@@ -1236,8 +1279,10 @@ jobs:
           write_json(OUT_DIR / "promotions_upsert.json", promotions_payload)
           write_json(OUT_DIR / "promotion_items_upsert.json", promotion_items_payload)
 
-          if not strict_target_coverage_ok:
+          if (not strict_target_coverage_ok) or target_validation_failures:
               coverage_errors = []
+              if target_validation_failures:
+                  coverage_errors.append(f"target_validation_failures={len(target_validation_failures)}")
               if missing_price_store_keys:
                   coverage_errors.append(f"missing_price_store_keys={len(missing_price_store_keys)}")
               if failed_price_store_rows:
@@ -1246,7 +1291,7 @@ jobs:
                   coverage_errors.append(f"missing_promo_store_keys={len(missing_promo_store_keys)}")
               if failed_promo_store_rows:
                   coverage_errors.append(f"failed_promo_store_rows={len(failed_promo_store_rows)}")
-              message = "Target-store coverage is incomplete; DB write blocked: " + ", ".join(coverage_errors)
+              message = "Target-store coverage is incomplete or target classification failed validation; DB write blocked: " + ", ".join(coverage_errors)
               if WRITE_TO_SUPABASE:
                   raise SystemExit(message)
               log(message)
