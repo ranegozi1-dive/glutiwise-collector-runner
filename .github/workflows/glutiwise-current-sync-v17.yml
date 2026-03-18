@@ -1,4 +1,4 @@
-name: GlutiWise Current Sync to Supabase v11
+name: GlutiWise Current Sync to Supabase v17
 
 on:
   # Uncomment the 2 lines below only after the first successful manual run.
@@ -10,13 +10,29 @@ on:
         description: "Write to Supabase (true/false)"
         required: true
         default: "false"
+      write_promotion_items:
+        description: "Write promotion_items_current (true/false). Keep true for accurate comparison in the 3-city free-safe MVP."
+        required: true
+        default: "true"
+      mvp_scope_profile:
+        description: "MVP scope profile (free_mvp_3_cities / free_plus_raanana / full_5_cities)"
+        required: true
+        default: "free_mvp_3_cities"
+      target_cities_csv:
+        description: "Optional comma-separated city override in Hebrew"
+        required: false
+        default: ""
+      allow_large_promotion_scope:
+        description: "Override Free-plan guardrails for large promotion-item writes (true/false)"
+        required: true
+        default: "false"
       scraper_today:
         description: "Optional UTC override for scraper TODAY, format YYYY-MM-DD HH:MM"
         required: false
         default: ""
 
 concurrency:
-  group: glutiwise-current-sync-v11
+  group: glutiwise-current-sync-v17
   cancel-in-progress: false
 
 permissions:
@@ -25,12 +41,17 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       WRITE_TO_SUPABASE: ${{ inputs.write_to_supabase || 'false' }}
+      WRITE_PROMOTION_ITEMS: ${{ inputs.write_promotion_items || 'true' }}
+      MVP_SCOPE_PROFILE: ${{ inputs.mvp_scope_profile || 'free_mvp_3_cities' }}
+      TARGET_CITIES_CSV: ${{ inputs.target_cities_csv || '' }}
+      ALLOW_LARGE_PROMOTION_SCOPE: ${{ inputs.allow_large_promotion_scope || 'false' }}
       SCRAPER_TODAY: ${{ inputs.scraper_today || '' }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
+      WRITE_HEAVY_DEBUG_ARTIFACTS: "false"
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -82,13 +103,24 @@ jobs:
           from pathlib import Path
           
           TARGET_RETAILERS = ("shufersal", "ramilevy", "yohananof")
-          TARGET_CITIES = (
+          FULL_TARGET_CITIES = (
               "הוד השרון",
               "כפר סבא",
               "פתח תקווה",
               "רמת השרון",
               "רעננה",
           )
+          SCOPE_PROFILES = {
+              "free_mvp_3_cities": ("הוד השרון", "כפר סבא", "רמת השרון"),
+              "free_plus_raanana": ("הוד השרון", "כפר סבא", "רמת השרון", "רעננה"),
+              "full_5_cities": FULL_TARGET_CITIES,
+          }
+          MVP_SCOPE_PROFILE = os.environ.get("MVP_SCOPE_PROFILE", "free_mvp_3_cities").strip().lower()
+          TARGET_CITIES_CSV = os.environ.get("TARGET_CITIES_CSV", "").strip()
+          if TARGET_CITIES_CSV:
+              TARGET_CITIES = tuple(clean.strip() for clean in TARGET_CITIES_CSV.split(",") if clean.strip())
+          else:
+              TARGET_CITIES = SCOPE_PROFILES.get(MVP_SCOPE_PROFILE, SCOPE_PROFILES["free_mvp_3_cities"])
           CHAIN_ID_TO_RETAILER = {
               "7290027600007": "shufersal",
               "7290058140886": "ramilevy",
@@ -100,6 +132,12 @@ jobs:
           SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
           SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_JWT"]
           WRITE_TO_SUPABASE = os.environ.get("WRITE_TO_SUPABASE", "true").strip().lower() == "true"
+          WRITE_PROMOTION_ITEMS = os.environ.get("WRITE_PROMOTION_ITEMS", "true").strip().lower() == "true"
+          WRITE_PROMOTION_RAW = os.environ.get("WRITE_PROMOTION_RAW", "false").strip().lower() == "true"
+          WRITE_HEAVY_DEBUG_ARTIFACTS = os.environ.get("WRITE_HEAVY_DEBUG_ARTIFACTS", "false").strip().lower() == "true"
+          ALLOW_LARGE_PROMOTION_SCOPE = os.environ.get("ALLOW_LARGE_PROMOTION_SCOPE", "false").strip().lower() == "true"
+          PROMOTION_ITEMS_MAX_SAFE = int(os.environ.get("PROMOTION_ITEMS_MAX_SAFE", "1100000"))
+          MAX_TARGET_STORES_SAFE = int(os.environ.get("MAX_TARGET_STORES_SAFE", "30"))
           OUT_DIR = Path("out")
           DUMPS_DIR = Path("dumps")
           OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -264,12 +302,6 @@ jobs:
           def fetch_promotion_keys(filters):
               rows = rest_get_rows("promotions_current", "promotion_key", filters)
               return sorted({clean_text(row.get("promotion_key", "")) for row in rows if clean_text(row.get("promotion_key", ""))})
-          
-          def delete_promotion_items_by_promotion_keys(promotion_keys):
-              if not promotion_keys:
-                  return
-              for batch in chunked(sorted(set(promotion_keys)), 200):
-                  delete_rows("promotion_items_current", {"promotion_key": build_in_filter(batch)})
           
           def looks_like_generic_company_name(value: str) -> bool:
               v = clean_lookup_text(value).lower()
@@ -637,6 +669,17 @@ jobs:
               data = http_json("GET", path)
               return data or []
           
+          def is_statement_timeout_error(exc: Exception) -> bool:
+              text = str(exc).lower()
+              markers = [
+                  'statement timeout',
+                  'canceling statement due to statement timeout',
+                  '"code":"57014"',
+                  '"code": "57014"',
+                  "'57014'",
+              ]
+              return any(marker in text for marker in markers)
+          
           def chunked(iterable, size):
               batch = []
               for item in iterable:
@@ -684,7 +727,7 @@ jobs:
               )
               return data
           
-          def post_upsert(table: str, conflict: str, rows, chunk_size: int):
+          def post_upsert(table: str, conflict: str, rows, chunk_size: int, min_chunk_size: int | None = None, split_on_timeout: bool = False, pause_after_chunk: float = 0.0):
               if not rows:
                   return
               path = f"/rest/v1/{table}?on_conflict={urllib.parse.quote(conflict, safe=',')}"
@@ -692,13 +735,38 @@ jobs:
               signature_groups = group_rows_by_key_signature(rows)
               if len(signature_groups) > 1:
                   log(f"{table}: detected {len(signature_groups)} row key signatures; splitting upserts by signature to satisfy PostgREST.")
+              min_chunk_size = min_chunk_size or chunk_size
+          
+              def send_batch(batch_rows, requested_chunk_size: int, signature_text: str, group_index: int, chunk_label: str):
+                  log(
+                      f"Upserting {table} signature {group_index}/{len(signature_groups)} chunk {chunk_label} "
+                      f"({len(batch_rows)} rows) keys=[{signature_text}]"
+                  )
+                  try:
+                      http_json("POST", path, headers=headers, body=batch_rows, expect_json=False)
+                  except Exception as exc:
+                      if split_on_timeout and is_statement_timeout_error(exc) and len(batch_rows) > min_chunk_size:
+                          next_chunk_size = max(min_chunk_size, requested_chunk_size // 2)
+                          if next_chunk_size >= len(batch_rows):
+                              next_chunk_size = max(min_chunk_size, len(batch_rows) - 1)
+                          if next_chunk_size < len(batch_rows):
+                              log(
+                                  f"{table}: statement timeout on chunk {chunk_label} ({len(batch_rows)} rows). "
+                                  f"Retrying by splitting into chunks of {next_chunk_size}."
+                              )
+                              for split_index, split_batch in enumerate(chunked(batch_rows, next_chunk_size), start=1):
+                                  send_batch(split_batch, next_chunk_size, signature_text, group_index, f"{chunk_label}.{split_index}")
+                              return
+                      raise
+                  if pause_after_chunk > 0:
+                      time.sleep(pause_after_chunk)
+          
               group_index = 0
               for signature, group_rows in sorted(signature_groups.items(), key=lambda item: (len(item[0]), item[0])):
                   group_index += 1
                   signature_text = ",".join(signature)
                   for chunk_index, batch in enumerate(chunked(group_rows, chunk_size), start=1):
-                      log(f"Upserting {table} signature {group_index}/{len(signature_groups)} chunk {chunk_index} ({len(batch)} rows) keys=[{signature_text}]")
-                      http_json("POST", path, headers=headers, body=batch, expect_json=False)
+                      send_batch(batch, chunk_size, signature_text, group_index, str(chunk_index))
           
           def delete_rows(table: str, filters):
               if not filters:
@@ -708,6 +776,47 @@ jobs:
                   parts.append(f"{urllib.parse.quote(str(key), safe='')}={urllib.parse.quote(str(value), safe='().,:*')}")
               path = f"/rest/v1/{table}?" + "&".join(parts)
               http_json("DELETE", path, headers={"Prefer": "return=minimal"}, expect_json=False)
+          
+          def delete_rows_safe(table: str, partition_key: str, partition_values, extra_filters=None, batch_size: int = 200, min_batch_size: int = 25, pause_after_batch: float = 0.0):
+              values = [clean_text(v) for v in partition_values if clean_text(v)]
+              if not values:
+                  return
+              extra_filters = dict(extra_filters or {})
+          
+              def send_delete(batch_values, requested_batch_size: int, label: str):
+                  filters = {partition_key: build_in_filter(batch_values), **extra_filters}
+                  log(f"Deleting from {table} batch {label} ({len(batch_values)} values on {partition_key})")
+                  try:
+                      delete_rows(table, filters)
+                  except Exception as exc:
+                      if is_statement_timeout_error(exc) and len(batch_values) > min_batch_size:
+                          next_batch_size = max(min_batch_size, requested_batch_size // 2)
+                          if next_batch_size >= len(batch_values):
+                              next_batch_size = max(min_batch_size, len(batch_values) - 1)
+                          if next_batch_size < len(batch_values):
+                              log(
+                                  f"{table}: statement timeout on delete batch {label} ({len(batch_values)} values on {partition_key}). "
+                                  f"Retrying with batch size {next_batch_size}."
+                              )
+                              for split_index, split_batch in enumerate(chunked(batch_values, next_batch_size), start=1):
+                                  send_delete(split_batch, next_batch_size, f"{label}.{split_index}")
+                              return
+                      raise
+                  if pause_after_batch > 0:
+                      time.sleep(pause_after_batch)
+          
+              for batch_index, batch_values in enumerate(chunked(sorted(set(values)), batch_size), start=1):
+                  send_delete(batch_values, batch_size, str(batch_index))
+          
+          def delete_promotion_items_by_promotion_keys(promotion_keys):
+              delete_rows_safe(
+                  "promotion_items_current",
+                  "promotion_key",
+                  promotion_keys,
+                  batch_size=100,
+                  min_batch_size=10,
+                  pause_after_batch=0.02,
+              )
           
           def merge_store_row(discovered: dict, existing: dict):
               existing = existing or {}
@@ -1020,7 +1129,7 @@ jobs:
                           end_at or "",
                       ])
                       promotion_key = sha1_text(key_basis)
-                      promo_headers[promotion_key] = {
+                      promotion_header_row = {
                           "promotion_key": promotion_key,
                           "store_key": store_key,
                           "source_promotion_id": source_promotion_id or None,
@@ -1034,8 +1143,10 @@ jobs:
                           "end_at": end_at,
                           "updated_at": RUN_TS_ISO,
                           "last_seen_at": RUN_TS_ISO,
-                          "raw_payload": tag_values,
                       }
+                      if WRITE_PROMOTION_RAW:
+                          promotion_header_row["raw_payload"] = tag_values
+                      promo_headers[promotion_key] = promotion_header_row
                       for barcode in sorted(set(barcodes)):
                           promotion_item_key = sha1_text(f"{promotion_key}|{barcode}")
                           promo_items[promotion_item_key] = {
@@ -1044,7 +1155,6 @@ jobs:
                               "barcode": barcode,
                               "updated_at": RUN_TS_ISO,
                               "last_seen_at": RUN_TS_ISO,
-                              "raw_payload": {"barcode": barcode},
                           }
               return list(promo_headers.values()), list(promo_items.values()), parse_errors
           
@@ -1422,6 +1532,32 @@ jobs:
               ["store_key", "retailer", "store_name", "city", "valid_price_rows", "unique_barcodes", "name_present", "brand_present", "manufacturer_present", "category_present", "pct_name", "pct_brand", "pct_manufacturer", "pct_category", "source_file", "source_ts"],
           )
           
+          city_scope_summary = []
+          price_counts_by_city = Counter()
+          promo_counts_by_city = Counter()
+          promo_items_counts_by_city = Counter()
+          for row in prices_summary_rows:
+              price_counts_by_city[row["city"]] += int(row["items_count"])
+          for row in promotions_summary_rows:
+              promo_counts_by_city[row["city"]] += int(row["promotions_count"])
+              promo_items_counts_by_city[row["city"]] += int(row["promotion_items_count"])
+          for city in TARGET_CITIES:
+              city_scope_summary.append({
+                  "city": city,
+                  "target_store_count": sum(1 for row in discovered_target_stores if row.get("canonical_city") == city),
+                  "prices_payload_count": price_counts_by_city.get(city, 0),
+                  "promotions_payload_count": promo_counts_by_city.get(city, 0),
+                  "promotion_items_payload_count": promo_items_counts_by_city.get(city, 0),
+              })
+          write_json(OUT_DIR / "mvp_scope_summary.json", {
+              "mvp_scope_profile": MVP_SCOPE_PROFILE,
+              "target_cities": list(TARGET_CITIES),
+              "target_store_count": len(discovered_target_stores),
+              "write_promotion_items": WRITE_PROMOTION_ITEMS,
+              "city_scope_summary": city_scope_summary,
+              "recommended_for_supabase_free": len(discovered_target_stores) <= MAX_TARGET_STORES_SAFE,
+          })
+          
           target_coverage_by_store_rows = build_target_coverage_by_store_rows(
               discovered_target_stores,
               successful_price_store_keys,
@@ -1609,6 +1745,16 @@ jobs:
               uncovered_target_rows,
               ["store_key", "retailer", "store_name", "city", "missing_price_file", "missing_promo_file", "has_price_payload", "has_promo_payload"],
           )
+          quarantined_target_store_keys = sorted(uncovered_target_store_keys) if write_mode == "partial_safe" else []
+          write_json(OUT_DIR / "partial_safe_mode_summary.json", {
+              "write_mode": write_mode,
+              "covered_target_store_count": len(covered_target_store_keys),
+              "uncovered_target_store_count": len(uncovered_target_store_keys),
+              "quarantined_target_store_count": len(quarantined_target_store_keys),
+              "covered_store_keys": covered_target_store_keys,
+              "quarantined_store_keys": quarantined_target_store_keys,
+              "note": "In partial_safe mode, uncovered target stores are excluded from current comparison data for this run instead of keeping stale current rows.",
+          })
           write_json(OUT_DIR / "db_write_decision.json", {
               "write_mode": write_mode,
               "strict_target_coverage_ok": strict_target_coverage_ok,
@@ -1620,12 +1766,14 @@ jobs:
               "uncovered_target_store_count": len(uncovered_target_store_keys),
               "missing_covered_target_cities": missing_covered_target_cities,
               "missing_covered_target_retailers": missing_covered_target_retailers,
+              "quarantined_target_store_count": len(quarantined_target_store_keys),
               "ready_for_db_write": write_scope_ok,
           })
           
           payload_counts = {
               "run_ts": RUN_TS_ISO,
               "write_to_supabase": WRITE_TO_SUPABASE,
+              "write_promotion_items": WRITE_PROMOTION_ITEMS,
               "stores_discovered": len(discovered_stores_map),
               "target_stores": len(discovered_target_stores),
               "non_target_stores": len(discovered_non_target_stores),
@@ -1648,6 +1796,7 @@ jobs:
               "strict_target_coverage_ok": strict_target_coverage_ok,
               "covered_target_store_keys": len(covered_target_store_keys),
               "uncovered_target_store_keys": len(uncovered_target_store_keys),
+              "quarantined_target_store_keys": len(quarantined_target_store_keys),
               "missing_covered_target_cities": len(missing_covered_target_cities),
               "missing_covered_target_retailers": len(missing_covered_target_retailers),
               "product_hard_quality_ok": product_hard_quality_ok,
@@ -1664,6 +1813,12 @@ jobs:
               "promotions_current": summarize_payload_keysets(promotions_payload),
               "promotion_items_current": summarize_payload_keysets(promotion_items_payload),
           })
+          write_json(OUT_DIR / "promotion_items_write_plan.json", {
+              "write_promotion_items": WRITE_PROMOTION_ITEMS,
+              "promotion_items_payload_total": len(promotion_items_payload),
+              "recommended_for_supabase_free": False,
+              "note": "promotion_items_current is the heaviest write path. Keep it false on Supabase Free unless you intentionally test it.",
+          })
           write_json(OUT_DIR / "run_summary.json", {
               **payload_counts,
               "store_parse_errors": store_parse_errors,
@@ -1672,9 +1827,10 @@ jobs:
           })
           write_json(OUT_DIR / "products_upsert.json", products_payload)
           write_json(OUT_DIR / "stores_upsert.json", stores_payload)
-          write_json(OUT_DIR / "prices_upsert.json", prices_payload)
-          write_json(OUT_DIR / "promotions_upsert.json", promotions_payload)
-          write_json(OUT_DIR / "promotion_items_upsert.json", promotion_items_payload)
+          if WRITE_HEAVY_DEBUG_ARTIFACTS:
+              write_json(OUT_DIR / "prices_upsert.json", prices_payload)
+              write_json(OUT_DIR / "promotions_upsert.json", promotions_payload)
+              write_json(OUT_DIR / "promotion_items_upsert.json", promotion_items_payload)
           
           if not write_scope_ok:
               coverage_errors = []
@@ -1707,63 +1863,119 @@ jobs:
               sys.exit(0)
           
           safe_write_store_keys = set(covered_target_store_keys)
+          quarantined_target_store_key_set = set(quarantined_target_store_keys)
+          safe_price_pairs = {(row["store_key"], row["barcode"]) for row in prices_payload if row["store_key"] in safe_write_store_keys}
           prices_payload_to_write = [row for row in prices_payload if row["store_key"] in safe_write_store_keys]
           promotions_payload_to_write = [row for row in promotions_payload if row["store_key"] in safe_write_store_keys]
           promotion_store_key_by_key = {row["promotion_key"]: row["store_key"] for row in promotions_payload_to_write}
-          promotion_items_payload_to_write = [row for row in promotion_items_payload if promotion_store_key_by_key.get(row["promotion_key"]) in safe_write_store_keys]
+          promotion_items_payload_to_write = [
+              row for row in promotion_items_payload
+              if (promotion_store_key_by_key.get(row["promotion_key"]), row["barcode"]) in safe_price_pairs
+          ]
           processed_promotion_keys_to_write = {row["promotion_key"] for row in promotions_payload_to_write}
+          promotion_items_rows_by_store = {}
+          for row in promotion_items_payload_to_write:
+              store_key = promotion_store_key_by_key.get(row["promotion_key"])
+              if not store_key:
+                  continue
+              promotion_items_rows_by_store.setdefault(store_key, []).append(row)
+          write_json(OUT_DIR / "promotion_items_write_plan.json", {
+              "mvp_scope_profile": MVP_SCOPE_PROFILE,
+              "target_cities": list(TARGET_CITIES),
+              "write_promotion_items": WRITE_PROMOTION_ITEMS,
+              "promotion_items_payload_total": len(promotion_items_payload),
+              "promotion_items_payload_intersect_prices": len(promotion_items_payload_to_write),
+              "safe_write_store_keys": len(safe_write_store_keys),
+              "stores_with_promotion_items_to_write": len(promotion_items_rows_by_store),
+              "promotion_items_max_safe": PROMOTION_ITEMS_MAX_SAFE,
+              "max_target_stores_safe": MAX_TARGET_STORES_SAFE,
+              "recommended_for_supabase_free": len(promotion_items_payload_to_write) <= PROMOTION_ITEMS_MAX_SAFE and len(safe_write_store_keys) <= MAX_TARGET_STORES_SAFE,
+              "note": "For Supabase Free, keep the MVP scope near 30 stores and around 1.1M promotion-item rows or below.",
+          })
+          
+          if WRITE_TO_SUPABASE and WRITE_PROMOTION_ITEMS and not ALLOW_LARGE_PROMOTION_SCOPE:
+              large_scope_errors = []
+              if len(safe_write_store_keys) > MAX_TARGET_STORES_SAFE:
+                  large_scope_errors.append(f"safe_write_store_keys={len(safe_write_store_keys)} exceeds MAX_TARGET_STORES_SAFE={MAX_TARGET_STORES_SAFE}")
+              if len(promotion_items_payload_to_write) > PROMOTION_ITEMS_MAX_SAFE:
+                  large_scope_errors.append(f"promotion_items_payload_to_write={len(promotion_items_payload_to_write)} exceeds PROMOTION_ITEMS_MAX_SAFE={PROMOTION_ITEMS_MAX_SAFE}")
+              if large_scope_errors:
+                  raise SystemExit("DB write blocked for Supabase Free safety: " + "; ".join(large_scope_errors))
           
           post_upsert("products", "barcode", products_payload, 2000)
           post_upsert("stores", "store_key", stores_payload, 500)
-          post_upsert("prices_current", "price_key", prices_payload_to_write, 5000)
-          post_upsert("promotions_current", "promotion_key", promotions_payload_to_write, 2000)
-          post_upsert("promotion_items_current", "promotion_item_key", promotion_items_payload_to_write, 5000)
+          post_upsert("prices_current", "price_key", prices_payload_to_write, 2500, min_chunk_size=200, split_on_timeout=True, pause_after_chunk=0.02)
+          post_upsert("promotions_current", "promotion_key", promotions_payload_to_write, 750, min_chunk_size=50, split_on_timeout=True, pause_after_chunk=0.03)
+          if WRITE_PROMOTION_ITEMS:
+              for store_key in sorted(promotion_items_rows_by_store):
+                  log(f"Writing promotion_items_current for {store_key} ({len(promotion_items_rows_by_store[store_key])} rows)")
+                  post_upsert(
+                      "promotion_items_current",
+                      "promotion_item_key",
+                      promotion_items_rows_by_store[store_key],
+                      250,
+                      min_chunk_size=10,
+                      split_on_timeout=True,
+                      pause_after_chunk=0.05,
+                  )
+          else:
+              log("Skipping promotion_items_current write by design.")
           
           deactivated_missing_target_store_keys = {row["store_key"] for row in auto_deactivated_existing_target_rows}
-          cleanup_non_current_store_keys = sorted(non_target_store_keys | legacy_store_keys_to_deactivate | deactivated_missing_target_store_keys)
-          cleanup_non_current_batches = list(chunked(cleanup_non_current_store_keys, 200))
-          successful_price_batches = list(chunked(sorted(safe_write_store_keys), 200))
-          successful_promo_batches = list(chunked(sorted(safe_write_store_keys), 200))
+          cleanup_non_current_store_keys = sorted(non_target_store_keys | legacy_store_keys_to_deactivate | deactivated_missing_target_store_keys | quarantined_target_store_key_set)
+          cleanup_lookup_batches = list(chunked(cleanup_non_current_store_keys, 100))
+          stale_promo_lookup_batches = list(chunked(sorted(safe_write_store_keys), 100))
           
-          for batch in cleanup_non_current_batches:
-              promo_keys_for_removed_stores = fetch_promotion_keys({"store_key": build_in_filter(batch)})
-              delete_promotion_items_by_promotion_keys(promo_keys_for_removed_stores)
-              delete_rows("prices_current", {"store_key": build_in_filter(batch)})
-              delete_rows("promotions_current", {"store_key": build_in_filter(batch)})
+          if WRITE_PROMOTION_ITEMS:
+              for batch in cleanup_lookup_batches:
+                  promo_keys_for_removed_stores = fetch_promotion_keys({"store_key": build_in_filter(batch)})
+                  delete_promotion_items_by_promotion_keys(promo_keys_for_removed_stores)
           
-          for batch in successful_price_batches:
-              delete_rows(
-                  "prices_current",
-                  {
+          delete_rows_safe("prices_current", "store_key", cleanup_non_current_store_keys, batch_size=100, min_batch_size=25, pause_after_batch=0.02)
+          delete_rows_safe("promotions_current", "store_key", cleanup_non_current_store_keys, batch_size=100, min_batch_size=25, pause_after_batch=0.02)
+          
+          delete_rows_safe(
+              "prices_current",
+              "store_key",
+              safe_write_store_keys,
+              extra_filters={"last_seen_at": f"lt.{PRICE_STALE_BEFORE}"},
+              batch_size=100,
+              min_batch_size=25,
+              pause_after_batch=0.02,
+          )
+          
+          if WRITE_PROMOTION_ITEMS:
+              for batch in stale_promo_lookup_batches:
+                  stale_promo_filters = {
                       "store_key": build_in_filter(batch),
-                      "last_seen_at": f"lt.{PRICE_STALE_BEFORE}",
-                  },
-              )
+                      "last_seen_at": f"lt.{RUN_TS_ISO}",
+                  }
+                  stale_promo_keys = fetch_promotion_keys(stale_promo_filters)
+                  delete_promotion_items_by_promotion_keys(stale_promo_keys)
           
-          for batch in successful_promo_batches:
-              stale_promo_filters = {
-                  "store_key": build_in_filter(batch),
-                  "last_seen_at": f"lt.{RUN_TS_ISO}",
-              }
-              stale_promo_keys = fetch_promotion_keys(stale_promo_filters)
-              delete_promotion_items_by_promotion_keys(stale_promo_keys)
-              delete_rows(
-                  "promotions_current",
-                  stale_promo_filters,
-              )
+          delete_rows_safe(
+              "promotions_current",
+              "store_key",
+              safe_write_store_keys,
+              extra_filters={"last_seen_at": f"lt.{RUN_TS_ISO}"},
+              batch_size=100,
+              min_batch_size=25,
+              pause_after_batch=0.02,
+          )
           
-          if processed_promotion_keys_to_write:
-              for batch in chunked(sorted(processed_promotion_keys_to_write), 200):
-                  delete_rows(
-                      "promotion_items_current",
-                      {
-                          "promotion_key": build_in_filter(batch),
-                          "last_seen_at": f"lt.{RUN_TS_ISO}",
-                      },
-                  )
+          if WRITE_PROMOTION_ITEMS and processed_promotion_keys_to_write:
+              delete_rows_safe(
+                  "promotion_items_current",
+                  "promotion_key",
+                  processed_promotion_keys_to_write,
+                  extra_filters={"last_seen_at": f"lt.{RUN_TS_ISO}"},
+                  batch_size=100,
+                  min_batch_size=10,
+                  pause_after_batch=0.02,
+              )
           
           if write_mode == "partial_safe":
-              log(f"GlutiWise current sync completed in partial-safe mode. Updated {len(covered_target_store_keys)} covered target stores and left {len(uncovered_target_store_keys)} uncovered target stores untouched.")
+              log(f"GlutiWise current sync completed in partial-safe mode. Updated {len(covered_target_store_keys)} covered target stores and quarantined {len(quarantined_target_store_keys)} uncovered target stores from current comparison data.")
           else:
               log("GlutiWise current sync completed successfully.")
           PY
@@ -1774,5 +1986,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: glutiwise-current-sync-v11-${{ github.run_id }}
+          name: glutiwise-current-sync-v17-${{ github.run_id }}
           path: out
