@@ -1,4 +1,4 @@
-name: GlutiWise Current Sync to Supabase v8
+name: GlutiWise Current Sync to Supabase v10
 
 on:
   # Uncomment the 2 lines below only after the first successful manual run.
@@ -16,7 +16,7 @@ on:
         default: ""
 
 concurrency:
-  group: glutiwise-current-sync-v8
+  group: glutiwise-current-sync-v10
   cancel-in-progress: false
 
 permissions:
@@ -179,6 +179,21 @@ jobs:
               if not cleaned["brand"]:
                   cleaned["brand"] = fallback_brand_from_name_or_manufacturer(cleaned["name"] or "", cleaned["manufacturer"] or "") or None
               return cleaned
+
+
+          def compact_row(row: dict, required_keys=None):
+              required_keys = set(required_keys or [])
+              compacted = {}
+              for key, value in row.items():
+                  if key in required_keys:
+                      compacted[key] = value
+                      continue
+                  if value is None:
+                      continue
+                  if isinstance(value, str) and not clean_text(value):
+                      continue
+                  compacted[key] = value
+              return compacted
 
           def build_target_coverage_by_store_rows(target_rows, price_keys, promo_keys, missing_price_keys, missing_promo_keys):
               price_keys = set(price_keys)
@@ -860,8 +875,8 @@ jobs:
                       ) or root_updated or filename_timestamp(path)
                       item_name = extract_any(node, {"ItemName", "ItemNm", "ProductName", "Description", "ItemDescription"})
                       brand = extract_any(node, {"BrandName", "Brand", "BrandNm", "BrandDescription", "BrandDesc", "TradeMark", "Trademark", "BrandHebrewName", "BrandEngName", "ItemBrand", "BrandLabel", "BrandLongName", "BrandShortName", "BrandTitle"})
-                      manufacturer = extract_any(node, {"ManufacturerName", "ManufactureName", "Manufacturer", "Manufacture", "ManufactorerName", "SupplierName", "Supplier", "ProducerName", "VendorName", "CompanyName", "ImporterName", "ManufacturerHebName", "ManufacturerEngName"})
-                      category = extract_any(node, {"MainCategoryName", "Category", "DepartmentName", "SubCategoryName", "ItemCategory", "MainCategory", "SubCategory", "CategoryName", "Department", "SubDepartmentName", "DepartmentNm", "SubDepartment", "FamilyName", "GroupName", "SubGroupName", "ItemType", "ItemTypeName", "CategoryNm", "SectionName", "PrimaryCategoryName"})
+                      manufacturer = extract_any(node, {"ManufacturerName", "ManufactureName", "Manufacturer", "Manufacture", "ManufactorerName", "Manufactorer", "ManufacturerDesc", "ManufactureDesc", "SupplierName", "Supplier", "SupplierNm", "SupplierHebName", "SupplierEngName", "ProducerName", "VendorName", "VendorNm", "CompanyName", "ImporterName", "Importer", "ManufacturerHebName", "ManufacturerEngName"})
+                      category = extract_any(node, {"MainCategoryName", "Category", "DepartmentName", "SubCategoryName", "ItemCategory", "MainCategory", "SubCategory", "CategoryName", "Department", "SubDepartmentName", "DepartmentNm", "SubDepartment", "FamilyName", "FamilyNm", "GroupName", "SubGroupName", "ItemType", "ItemTypeName", "CategoryNm", "SectionName", "PrimaryCategoryName"})
                       item_name = sanitize_optional_text(item_name)
                       brand = sanitize_optional_text(brand)
                       manufacturer = sanitize_optional_text(manufacturer)
@@ -1164,28 +1179,6 @@ jobs:
               merge_store_row(discovered_stores_map[key], select_existing_store_for_discovered(key))
               for key in sorted(discovered_store_keys)
           ]
-          for unresolved_row in unresolved_existing_target_rows:
-              auto_deactivated_existing_target_rows.append({
-                  "store_key": unresolved_row.get("store_key"),
-                  "retailer": unresolved_row.get("retailer"),
-                  "store_id": unresolved_row.get("store_id"),
-                  "store_name": unresolved_row.get("store_name"),
-                  "city": unresolved_row.get("city"),
-                  "address": unresolved_row.get("address"),
-                  "target_city_hint": unresolved_row.get("target_city_hint"),
-                  "reason": unresolved_row.get("reason"),
-              })
-              stores_payload.append({
-                  "retailer": unresolved_row.get("retailer"),
-                  "store_id": unresolved_row.get("store_id"),
-                  "store_name": unresolved_row.get("store_name"),
-                  "city": unresolved_row.get("city"),
-                  "store_key": unresolved_row.get("store_key"),
-                  "address": unresolved_row.get("address"),
-                  "area": existing_target_chain_by_key.get(unresolved_row.get("store_key"), {}).get("area"),
-                  "store_type": existing_target_chain_by_key.get(unresolved_row.get("store_key"), {}).get("store_type") or "chain",
-                  "mvp_active": False,
-              })
           for legacy_key in sorted(legacy_store_keys_to_deactivate):
               existing_row = existing_target_chain_by_key.get(legacy_key)
               if not existing_row:
@@ -1201,12 +1194,6 @@ jobs:
                   "store_type": existing_row.get("store_type") or "chain",
                   "mvp_active": False,
               })
-
-          write_csv(
-              OUT_DIR / "auto_deactivated_existing_target_rows.csv",
-              auto_deactivated_existing_target_rows,
-              ["store_key", "retailer", "store_id", "store_name", "city", "address", "target_city_hint", "reason"],
-          )
 
           prices_payload = []
           successful_price_store_keys = []
@@ -1312,13 +1299,13 @@ jobs:
               category_value = best_from_candidates(existing.get("category", ""), fields.get("category", []))
               if not brand_value:
                   brand_value = fallback_brand_from_name_or_manufacturer(name_value or "", manufacturer_value or "") or None
-              products_payload.append(scrub_product_row({
+              products_payload.append(compact_row(scrub_product_row({
                   "barcode": barcode,
                   "name": name_value,
                   "category": category_value,
                   "brand": brand_value,
                   "manufacturer": manufacturer_value,
-              }))
+              }), required_keys={"barcode"}))
 
           promotions_payload = []
           promotion_items_payload = []
@@ -1487,6 +1474,7 @@ jobs:
           minimum_company_or_brand_pct = 85.0
           minimum_manufacturer_pct = 70.0
           minimum_category_pct = 70.0
+          minimum_name_pct_hard = 99.0
           required_product_coverage_keys = {
               "products_payload",
               "name_present",
@@ -1500,21 +1488,30 @@ jobs:
               "pct_category",
               "pct_company_or_brand",
           }
-          product_quality_ok = (
+          product_hard_quality_ok = (
+              product_payload_coverage.get("pct_name", 0) >= minimum_name_pct_hard
+              and product_payload_coverage.get("pct_category", 0) >= minimum_category_pct
+              and not placeholder_leak_summary
+          )
+          product_enrichment_quality_ok = (
               product_payload_coverage.get("pct_company_or_brand", 0) >= minimum_company_or_brand_pct
               and product_payload_coverage.get("pct_manufacturer", 0) >= minimum_manufacturer_pct
               and product_payload_coverage.get("pct_category", 0) >= minimum_category_pct
               and not placeholder_leak_summary
           )
           write_json(OUT_DIR / "product_quality_gate.json", {
+              "minimum_name_pct_hard": minimum_name_pct_hard,
               "minimum_company_or_brand_pct": minimum_company_or_brand_pct,
               "minimum_manufacturer_pct": minimum_manufacturer_pct,
               "minimum_category_pct": minimum_category_pct,
+              "actual_name_pct": product_payload_coverage.get("pct_name", 0),
               "actual_company_or_brand_pct": product_payload_coverage.get("pct_company_or_brand", 0),
               "actual_manufacturer_pct": product_payload_coverage.get("pct_manufacturer", 0),
               "actual_category_pct": product_payload_coverage.get("pct_category", 0),
               "placeholder_leak_entries": sum(placeholder_leak_summary.values()),
-              "product_quality_ok": product_quality_ok,
+              "product_hard_quality_ok": product_hard_quality_ok,
+              "product_enrichment_quality_ok": product_enrichment_quality_ok,
+              "product_quality_ok": product_enrichment_quality_ok,
           })
 
           price_summary_store_key_set = {row["store_key"] for row in prices_summary_rows}
@@ -1534,6 +1531,73 @@ jobs:
           write_json(OUT_DIR / "artifact_self_check.json", artifact_self_check)
 
           strict_target_coverage_ok = not missing_price_store_keys and not failed_price_store_rows and not missing_promo_store_keys and not failed_promo_store_rows
+          covered_target_store_keys = sorted(target_store_key_set & price_store_key_set & promo_store_key_set)
+          uncovered_target_store_keys = sorted(target_store_key_set - set(covered_target_store_keys))
+          covered_target_city_set = {discovered_stores_map[key]["canonical_city"] for key in covered_target_store_keys}
+          covered_target_retailer_set = {discovered_stores_map[key]["retailer"] for key in covered_target_store_keys}
+          missing_covered_target_cities = sorted(set(TARGET_CITIES) - covered_target_city_set)
+          missing_covered_target_retailers = sorted(set(TARGET_RETAILERS) - covered_target_retailer_set)
+          write_scope_ok = bool(covered_target_store_keys) and not target_validation_failures and not missing_covered_target_cities and not missing_covered_target_retailers and artifact_self_check["artifact_self_check_ok"] and product_hard_quality_ok
+          write_mode = "full" if (strict_target_coverage_ok and store_set_consistency_ok and product_enrichment_quality_ok and write_scope_ok) else ("partial_safe" if write_scope_ok else "blocked")
+          if write_mode == "full":
+              for unresolved_row in unresolved_existing_target_rows:
+                  auto_deactivated_existing_target_rows.append({
+                      "store_key": unresolved_row.get("store_key"),
+                      "retailer": unresolved_row.get("retailer"),
+                      "store_id": unresolved_row.get("store_id"),
+                      "store_name": unresolved_row.get("store_name"),
+                      "city": unresolved_row.get("city"),
+                      "address": unresolved_row.get("address"),
+                      "target_city_hint": unresolved_row.get("target_city_hint"),
+                      "reason": unresolved_row.get("reason"),
+                  })
+                  stores_payload.append({
+                      "retailer": unresolved_row.get("retailer"),
+                      "store_id": unresolved_row.get("store_id"),
+                      "store_name": unresolved_row.get("store_name"),
+                      "city": unresolved_row.get("city"),
+                      "store_key": unresolved_row.get("store_key"),
+                      "address": unresolved_row.get("address"),
+                      "area": existing_target_chain_by_key.get(unresolved_row.get("store_key"), {}).get("area"),
+                      "store_type": existing_target_chain_by_key.get(unresolved_row.get("store_key"), {}).get("store_type") or "chain",
+                      "mvp_active": False,
+                  })
+          write_csv(
+              OUT_DIR / "auto_deactivated_existing_target_rows.csv",
+              auto_deactivated_existing_target_rows,
+              ["store_key", "retailer", "store_id", "store_name", "city", "address", "target_city_hint", "reason"],
+          )
+          uncovered_target_rows = []
+          for store_key in uncovered_target_store_keys:
+              row = discovered_stores_map[store_key]
+              uncovered_target_rows.append({
+                  "store_key": store_key,
+                  "retailer": row["retailer"],
+                  "store_name": row["store_name"],
+                  "city": row["canonical_city"],
+                  "missing_price_file": store_key in missing_price_store_keys,
+                  "missing_promo_file": store_key in missing_promo_store_keys,
+                  "has_price_payload": store_key in price_store_key_set,
+                  "has_promo_payload": store_key in promo_store_key_set,
+              })
+          write_csv(
+              OUT_DIR / "uncovered_target_stores.csv",
+              uncovered_target_rows,
+              ["store_key", "retailer", "store_name", "city", "missing_price_file", "missing_promo_file", "has_price_payload", "has_promo_payload"],
+          )
+          write_json(OUT_DIR / "db_write_decision.json", {
+              "write_mode": write_mode,
+              "strict_target_coverage_ok": strict_target_coverage_ok,
+              "store_set_consistency_ok": store_set_consistency_ok,
+              "artifact_self_check_ok": artifact_self_check["artifact_self_check_ok"],
+              "product_hard_quality_ok": product_hard_quality_ok,
+              "product_enrichment_quality_ok": product_enrichment_quality_ok,
+              "covered_target_store_count": len(covered_target_store_keys),
+              "uncovered_target_store_count": len(uncovered_target_store_keys),
+              "missing_covered_target_cities": missing_covered_target_cities,
+              "missing_covered_target_retailers": missing_covered_target_retailers,
+              "ready_for_db_write": write_scope_ok,
+          })
 
           payload_counts = {
               "run_ts": RUN_TS_ISO,
@@ -1557,7 +1621,15 @@ jobs:
               "missing_target_cities": len(missing_target_cities),
               "store_set_consistency_ok": store_set_consistency_ok,
               "artifact_self_check_ok": artifact_self_check["artifact_self_check_ok"],
-              "ready_for_db_write": strict_target_coverage_ok and not target_validation_failures and store_set_consistency_ok and product_quality_ok and artifact_self_check["artifact_self_check_ok"],
+              "strict_target_coverage_ok": strict_target_coverage_ok,
+              "covered_target_store_keys": len(covered_target_store_keys),
+              "uncovered_target_store_keys": len(uncovered_target_store_keys),
+              "missing_covered_target_cities": len(missing_covered_target_cities),
+              "missing_covered_target_retailers": len(missing_covered_target_retailers),
+              "product_hard_quality_ok": product_hard_quality_ok,
+              "product_enrichment_quality_ok": product_enrichment_quality_ok,
+              "ready_for_db_write": write_scope_ok,
+              "write_mode": write_mode,
               "product_company_or_brand_pct": product_payload_coverage.get("pct_company_or_brand", 0),
           }
           write_json(OUT_DIR / "db_payload_counts.json", payload_counts)
@@ -1573,50 +1645,54 @@ jobs:
           write_json(OUT_DIR / "promotions_upsert.json", promotions_payload)
           write_json(OUT_DIR / "promotion_items_upsert.json", promotion_items_payload)
 
-          if (not strict_target_coverage_ok) or target_validation_failures or (not store_set_consistency_ok) or (not product_quality_ok) or (not artifact_self_check["artifact_self_check_ok"]):
+          if not write_scope_ok:
               coverage_errors = []
               if target_validation_failures:
                   coverage_errors.append(f"target_validation_failures={len(target_validation_failures)}")
-              if unresolved_existing_target_rows:
-                  coverage_errors.append(f"auto_deactivated_existing_target_rows={len(unresolved_existing_target_rows)}")
-              if not store_set_consistency_ok:
-                  coverage_errors.append("store_set_consistency_ok=false")
-              if not product_quality_ok:
-                  coverage_errors.append(
-                      f"product_quality_failed(company_or_brand>={minimum_company_or_brand_pct},manufacturer>={minimum_manufacturer_pct},category>={minimum_category_pct},placeholder_leaks=0)"
-                  )
               if not artifact_self_check["artifact_self_check_ok"]:
                   coverage_errors.append("artifact_self_check_ok=false")
-              if missing_price_store_keys:
-                  coverage_errors.append(f"missing_price_store_keys={len(missing_price_store_keys)}")
-              if failed_price_store_rows:
-                  coverage_errors.append(f"failed_price_store_rows={len(failed_price_store_rows)}")
-              if missing_promo_store_keys:
-                  coverage_errors.append(f"missing_promo_store_keys={len(missing_promo_store_keys)}")
-              if failed_promo_store_rows:
-                  coverage_errors.append(f"failed_promo_store_rows={len(failed_promo_store_rows)}")
-              message = "Target-store coverage is incomplete or product/artifact quality is below the DB-write threshold; DB write blocked: " + ", ".join(coverage_errors)
+              if missing_target_cities:
+                  coverage_errors.append(f"missing_target_cities={len(missing_target_cities)}")
+              if missing_covered_target_cities:
+                  coverage_errors.append(f"missing_covered_target_cities={len(missing_covered_target_cities)}")
+              if missing_covered_target_retailers:
+                  coverage_errors.append(f"missing_covered_target_retailers={len(missing_covered_target_retailers)}")
+              if not product_hard_quality_ok:
+                  coverage_errors.append(
+                      f"product_hard_quality_failed(name>={minimum_name_pct_hard},category>={minimum_category_pct},placeholder_leaks=0)"
+                  )
+              message = "DB write blocked because the safe write scope is not trustworthy enough: " + ", ".join(coverage_errors)
               if WRITE_TO_SUPABASE:
                   raise SystemExit(message)
               log(message)
-              log("WRITE_TO_SUPABASE=false -> payload built for inspection only. Fix coverage before DB write.")
+              log("WRITE_TO_SUPABASE=false -> payload built for inspection only. Safe write scope not approved.")
               sys.exit(0)
 
           if not WRITE_TO_SUPABASE:
-              log("WRITE_TO_SUPABASE=false -> built payload and artifacts only. No DB writes performed.")
+              if write_mode == "partial_safe":
+                  log("WRITE_TO_SUPABASE=false -> safe partial write is possible. Covered target stores would be updated; uncovered target stores would be left untouched.")
+              else:
+                  log("WRITE_TO_SUPABASE=false -> full target coverage achieved; DB write is ready.")
               sys.exit(0)
+
+          safe_write_store_keys = set(covered_target_store_keys)
+          prices_payload_to_write = [row for row in prices_payload if row["store_key"] in safe_write_store_keys]
+          promotions_payload_to_write = [row for row in promotions_payload if row["store_key"] in safe_write_store_keys]
+          promotion_store_key_by_key = {row["promotion_key"]: row["store_key"] for row in promotions_payload_to_write}
+          promotion_items_payload_to_write = [row for row in promotion_items_payload if promotion_store_key_by_key.get(row["promotion_key"]) in safe_write_store_keys]
+          processed_promotion_keys_to_write = {row["promotion_key"] for row in promotions_payload_to_write}
 
           post_upsert("products", "barcode", products_payload, 2000)
           post_upsert("stores", "store_key", stores_payload, 500)
-          post_upsert("prices_current", "price_key", prices_payload, 5000)
-          post_upsert("promotions_current", "promotion_key", promotions_payload, 2000)
-          post_upsert("promotion_items_current", "promotion_item_key", promotion_items_payload, 5000)
+          post_upsert("prices_current", "price_key", prices_payload_to_write, 5000)
+          post_upsert("promotions_current", "promotion_key", promotions_payload_to_write, 2000)
+          post_upsert("promotion_items_current", "promotion_item_key", promotion_items_payload_to_write, 5000)
 
           deactivated_missing_target_store_keys = {row["store_key"] for row in auto_deactivated_existing_target_rows}
           cleanup_non_current_store_keys = sorted(non_target_store_keys | legacy_store_keys_to_deactivate | deactivated_missing_target_store_keys)
           cleanup_non_current_batches = list(chunked(cleanup_non_current_store_keys, 200))
-          successful_price_batches = list(chunked(sorted(successful_price_store_keys), 200))
-          successful_promo_batches = list(chunked(sorted(successful_promo_store_keys), 200))
+          successful_price_batches = list(chunked(sorted(safe_write_store_keys), 200))
+          successful_promo_batches = list(chunked(sorted(safe_write_store_keys), 200))
 
           for batch in cleanup_non_current_batches:
               promo_keys_for_removed_stores = fetch_promotion_keys({"store_key": build_in_filter(batch)})
@@ -1645,8 +1721,8 @@ jobs:
                   stale_promo_filters,
               )
 
-          if processed_promotion_keys:
-              for batch in chunked(sorted(processed_promotion_keys), 200):
+          if processed_promotion_keys_to_write:
+              for batch in chunked(sorted(processed_promotion_keys_to_write), 200):
                   delete_rows(
                       "promotion_items_current",
                       {
@@ -1655,13 +1731,17 @@ jobs:
                       },
                   )
 
-          log("GlutiWise current sync completed successfully.")
+          if write_mode == "partial_safe":
+              log(f"GlutiWise current sync completed in partial-safe mode. Updated {len(covered_target_store_keys)} covered target stores and left {len(uncovered_target_store_keys)} uncovered target stores untouched.")
+          else:
+              log("GlutiWise current sync completed successfully.")
           PY
+          python3 -m py_compile sync_glutiwise.py
           python3 sync_glutiwise.py
 
       - name: Upload run artifacts
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: glutiwise-current-sync-v8-${{ github.run_id }}
+          name: glutiwise-current-sync-v10-${{ github.run_id }}
           path: out
