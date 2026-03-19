@@ -1,9 +1,9 @@
-name: GlutiWise Current Sync to Supabase v17
+name: GlutiWise Current Sync to Supabase v18
 
 on:
-  # Uncomment the 2 lines below only after the first successful manual run.
-  # schedule:
-  #   - cron: "30 1 * * *"
+  schedule:
+    # GitHub Actions cron uses UTC. 04:17 UTC avoids the top-of-hour queue and gives a stable daily run.
+    - cron: "17 4 * * *"
   workflow_dispatch:
     inputs:
       write_to_supabase:
@@ -32,7 +32,7 @@ on:
         default: ""
 
 concurrency:
-  group: glutiwise-current-sync-v17
+  group: glutiwise-current-sync-v18
   cancel-in-progress: false
 
 permissions:
@@ -43,12 +43,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
+      GITHUB_EVENT_NAME: ${{ github.event_name }}
       WRITE_TO_SUPABASE: ${{ inputs.write_to_supabase || 'false' }}
       WRITE_PROMOTION_ITEMS: ${{ inputs.write_promotion_items || 'true' }}
       MVP_SCOPE_PROFILE: ${{ inputs.mvp_scope_profile || 'free_mvp_3_cities' }}
       TARGET_CITIES_CSV: ${{ inputs.target_cities_csv || '' }}
       ALLOW_LARGE_PROMOTION_SCOPE: ${{ inputs.allow_large_promotion_scope || 'false' }}
       SCRAPER_TODAY: ${{ inputs.scraper_today || '' }}
+      SCHEDULED_SCOPE_PROFILE: "free_mvp_3_cities"
+      SCHEDULED_WRITE_TO_SUPABASE: "true"
+      SCHEDULED_WRITE_PROMOTION_ITEMS: "true"
+      SCHEDULED_ALLOW_LARGE_PROMOTION_SCOPE: "false"
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
       WRITE_HEAVY_DEBUG_ARTIFACTS: "false"
@@ -115,8 +120,12 @@ jobs:
               "free_plus_raanana": ("הוד השרון", "כפר סבא", "רמת השרון", "רעננה"),
               "full_5_cities": FULL_TARGET_CITIES,
           }
-          MVP_SCOPE_PROFILE = os.environ.get("MVP_SCOPE_PROFILE", "free_mvp_3_cities").strip().lower()
-          TARGET_CITIES_CSV = os.environ.get("TARGET_CITIES_CSV", "").strip()
+          EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "workflow_dispatch").strip()
+          IS_SCHEDULED_RUN = EVENT_NAME == "schedule"
+          MANUAL_MVP_SCOPE_PROFILE = os.environ.get("MVP_SCOPE_PROFILE", "free_mvp_3_cities").strip().lower()
+          SCHEDULED_SCOPE_PROFILE = os.environ.get("SCHEDULED_SCOPE_PROFILE", "free_mvp_3_cities").strip().lower()
+          MVP_SCOPE_PROFILE = SCHEDULED_SCOPE_PROFILE if IS_SCHEDULED_RUN else MANUAL_MVP_SCOPE_PROFILE
+          TARGET_CITIES_CSV = "" if IS_SCHEDULED_RUN else os.environ.get("TARGET_CITIES_CSV", "").strip()
           if TARGET_CITIES_CSV:
               TARGET_CITIES = tuple(clean.strip() for clean in TARGET_CITIES_CSV.split(",") if clean.strip())
           else:
@@ -131,11 +140,17 @@ jobs:
           PRICE_STALE_BEFORE = (RUN_TS - timedelta(days=7)).isoformat().replace("+00:00", "Z")
           SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
           SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_JWT"]
-          WRITE_TO_SUPABASE = os.environ.get("WRITE_TO_SUPABASE", "true").strip().lower() == "true"
-          WRITE_PROMOTION_ITEMS = os.environ.get("WRITE_PROMOTION_ITEMS", "true").strip().lower() == "true"
+          MANUAL_WRITE_TO_SUPABASE = os.environ.get("WRITE_TO_SUPABASE", "false").strip().lower() == "true"
+          MANUAL_WRITE_PROMOTION_ITEMS = os.environ.get("WRITE_PROMOTION_ITEMS", "true").strip().lower() == "true"
+          SCHEDULED_WRITE_TO_SUPABASE = os.environ.get("SCHEDULED_WRITE_TO_SUPABASE", "true").strip().lower() == "true"
+          SCHEDULED_WRITE_PROMOTION_ITEMS = os.environ.get("SCHEDULED_WRITE_PROMOTION_ITEMS", "true").strip().lower() == "true"
+          WRITE_TO_SUPABASE = SCHEDULED_WRITE_TO_SUPABASE if IS_SCHEDULED_RUN else MANUAL_WRITE_TO_SUPABASE
+          WRITE_PROMOTION_ITEMS = SCHEDULED_WRITE_PROMOTION_ITEMS if IS_SCHEDULED_RUN else MANUAL_WRITE_PROMOTION_ITEMS
           WRITE_PROMOTION_RAW = os.environ.get("WRITE_PROMOTION_RAW", "false").strip().lower() == "true"
           WRITE_HEAVY_DEBUG_ARTIFACTS = os.environ.get("WRITE_HEAVY_DEBUG_ARTIFACTS", "false").strip().lower() == "true"
-          ALLOW_LARGE_PROMOTION_SCOPE = os.environ.get("ALLOW_LARGE_PROMOTION_SCOPE", "false").strip().lower() == "true"
+          MANUAL_ALLOW_LARGE_PROMOTION_SCOPE = os.environ.get("ALLOW_LARGE_PROMOTION_SCOPE", "false").strip().lower() == "true"
+          SCHEDULED_ALLOW_LARGE_PROMOTION_SCOPE = os.environ.get("SCHEDULED_ALLOW_LARGE_PROMOTION_SCOPE", "false").strip().lower() == "true"
+          ALLOW_LARGE_PROMOTION_SCOPE = SCHEDULED_ALLOW_LARGE_PROMOTION_SCOPE if IS_SCHEDULED_RUN else MANUAL_ALLOW_LARGE_PROMOTION_SCOPE
           PROMOTION_ITEMS_MAX_SAFE = int(os.environ.get("PROMOTION_ITEMS_MAX_SAFE", "1100000"))
           MAX_TARGET_STORES_SAFE = int(os.environ.get("MAX_TARGET_STORES_SAFE", "30"))
           OUT_DIR = Path("out")
@@ -1698,7 +1713,8 @@ jobs:
           missing_covered_target_cities = sorted(set(TARGET_CITIES) - covered_target_city_set)
           missing_covered_target_retailers = sorted(set(TARGET_RETAILERS) - covered_target_retailer_set)
           write_scope_ok = bool(covered_target_store_keys) and not target_validation_failures and not missing_covered_target_cities and not missing_covered_target_retailers and artifact_self_check["artifact_self_check_ok"] and product_hard_quality_ok
-          write_mode = "full" if (strict_target_coverage_ok and store_set_consistency_ok and product_enrichment_quality_ok and write_scope_ok) else ("partial_safe" if write_scope_ok else "blocked")
+          full_comparison_scope_ok = strict_target_coverage_ok and store_set_consistency_ok and write_scope_ok
+          write_mode = "full" if full_comparison_scope_ok else "blocked"
           if write_mode == "full":
               for unresolved_row in unresolved_existing_target_rows:
                   auto_deactivated_existing_target_rows.append({
@@ -1745,7 +1761,7 @@ jobs:
               uncovered_target_rows,
               ["store_key", "retailer", "store_name", "city", "missing_price_file", "missing_promo_file", "has_price_payload", "has_promo_payload"],
           )
-          quarantined_target_store_keys = sorted(uncovered_target_store_keys) if write_mode == "partial_safe" else []
+          quarantined_target_store_keys = []
           write_json(OUT_DIR / "partial_safe_mode_summary.json", {
               "write_mode": write_mode,
               "covered_target_store_count": len(covered_target_store_keys),
@@ -1753,7 +1769,7 @@ jobs:
               "quarantined_target_store_count": len(quarantined_target_store_keys),
               "covered_store_keys": covered_target_store_keys,
               "quarantined_store_keys": quarantined_target_store_keys,
-              "note": "In partial_safe mode, uncovered target stores are excluded from current comparison data for this run instead of keeping stale current rows.",
+              "note": "Full-comparison-only mode: the workflow writes only when every selected MVP store has both prices and promotions. Otherwise the DB is left untouched and the previous complete comparison remains in place.",
           })
           write_json(OUT_DIR / "db_write_decision.json", {
               "write_mode": write_mode,
@@ -1767,11 +1783,13 @@ jobs:
               "missing_covered_target_cities": missing_covered_target_cities,
               "missing_covered_target_retailers": missing_covered_target_retailers,
               "quarantined_target_store_count": len(quarantined_target_store_keys),
-              "ready_for_db_write": write_scope_ok,
+              "ready_for_db_write": full_comparison_scope_ok,
           })
           
           payload_counts = {
               "run_ts": RUN_TS_ISO,
+              "event_name": EVENT_NAME,
+              "is_scheduled_run": IS_SCHEDULED_RUN,
               "write_to_supabase": WRITE_TO_SUPABASE,
               "write_promotion_items": WRITE_PROMOTION_ITEMS,
               "stores_discovered": len(discovered_stores_map),
@@ -1801,7 +1819,7 @@ jobs:
               "missing_covered_target_retailers": len(missing_covered_target_retailers),
               "product_hard_quality_ok": product_hard_quality_ok,
               "product_enrichment_quality_ok": product_enrichment_quality_ok,
-              "ready_for_db_write": write_scope_ok,
+              "ready_for_db_write": full_comparison_scope_ok,
               "write_mode": write_mode,
               "product_company_or_brand_pct": product_payload_coverage.get("pct_company_or_brand", 0),
           }
@@ -1817,7 +1835,7 @@ jobs:
               "write_promotion_items": WRITE_PROMOTION_ITEMS,
               "promotion_items_payload_total": len(promotion_items_payload),
               "recommended_for_supabase_free": False,
-              "note": "promotion_items_current is the heaviest write path. Keep it false on Supabase Free unless you intentionally test it.",
+              "note": "promotion_items_current stays enabled for the selected 3-city free MVP, but the workflow will write only when the entire selected scope is complete.",
           })
           write_json(OUT_DIR / "run_summary.json", {
               **payload_counts,
@@ -1832,7 +1850,7 @@ jobs:
               write_json(OUT_DIR / "promotions_upsert.json", promotions_payload)
               write_json(OUT_DIR / "promotion_items_upsert.json", promotion_items_payload)
           
-          if not write_scope_ok:
+          if write_mode != "full":
               coverage_errors = []
               if target_validation_failures:
                   coverage_errors.append(f"target_validation_failures={len(target_validation_failures)}")
@@ -1844,22 +1862,23 @@ jobs:
                   coverage_errors.append(f"missing_covered_target_cities={len(missing_covered_target_cities)}")
               if missing_covered_target_retailers:
                   coverage_errors.append(f"missing_covered_target_retailers={len(missing_covered_target_retailers)}")
+              if not strict_target_coverage_ok:
+                  coverage_errors.append("strict_target_coverage_ok=false")
+              if not store_set_consistency_ok:
+                  coverage_errors.append("store_set_consistency_ok=false")
               if not product_hard_quality_ok:
                   coverage_errors.append(
                       f"product_hard_quality_failed(name>={minimum_name_pct_hard},category>={minimum_category_pct},placeholder_leaks=0)"
                   )
-              message = "DB write blocked because the safe write scope is not trustworthy enough: " + ", ".join(coverage_errors)
+              message = "DB write blocked because the selected MVP scope is not complete enough for a full daily comparison: " + ", ".join(coverage_errors)
               if WRITE_TO_SUPABASE:
                   raise SystemExit(message)
               log(message)
-              log("WRITE_TO_SUPABASE=false -> payload built for inspection only. Safe write scope not approved.")
+              log("WRITE_TO_SUPABASE=false -> payload built for inspection only. Full comparison publish gate not approved.")
               sys.exit(0)
           
           if not WRITE_TO_SUPABASE:
-              if write_mode == "partial_safe":
-                  log("WRITE_TO_SUPABASE=false -> safe partial write is possible. Covered target stores would be updated; uncovered target stores would be left untouched.")
-              else:
-                  log("WRITE_TO_SUPABASE=false -> full target coverage achieved; DB write is ready.")
+              log("WRITE_TO_SUPABASE=false -> full target coverage achieved; DB write is ready.")
               sys.exit(0)
           
           safe_write_store_keys = set(covered_target_store_keys)
@@ -1974,10 +1993,7 @@ jobs:
                   pause_after_batch=0.02,
               )
           
-          if write_mode == "partial_safe":
-              log(f"GlutiWise current sync completed in partial-safe mode. Updated {len(covered_target_store_keys)} covered target stores and quarantined {len(quarantined_target_store_keys)} uncovered target stores from current comparison data.")
-          else:
-              log("GlutiWise current sync completed successfully.")
+          log("GlutiWise current sync completed successfully in full-comparison mode.")
           PY
           python3 -m py_compile sync_glutiwise.py
           python3 sync_glutiwise.py
@@ -1986,5 +2002,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: glutiwise-current-sync-v17-${{ github.run_id }}
+          name: glutiwise-current-sync-v18-${{ github.run_id }}
           path: out
