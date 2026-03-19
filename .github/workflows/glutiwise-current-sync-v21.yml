@@ -1,4 +1,4 @@
-name: GlutiWise Current Sync to Supabase v19
+name: GlutiWise Current Sync to Supabase v21
 
 on:
   schedule:
@@ -32,7 +32,7 @@ on:
         default: ""
 
 concurrency:
-  group: glutiwise-current-sync-v19
+  group: glutiwise-current-sync-v21
   cancel-in-progress: false
 
 permissions:
@@ -905,6 +905,25 @@ jobs:
                       "fields": list(signature),
                   })
               return summary
+
+          def select_fields(row, allowed_fields):
+              return {key: row[key] for key in allowed_fields if key in row}
+
+          PROMOTIONS_CURRENT_DB_FIELDS = (
+              "promotion_key",
+              "store_key",
+              "source_promotion_id",
+              "title",
+              "description",
+              "promotion_type",
+              "benefit_text",
+              "is_club",
+              "club_name",
+              "start_at",
+              "end_at",
+              "updated_at",
+              "last_seen_at",
+          )
           
           def fetch_existing_products(barcodes):
               rows = {}
@@ -2036,7 +2055,7 @@ jobs:
               "products": summarize_payload_keysets(products_payload),
               "stores": summarize_payload_keysets(stores_payload),
               "prices_current": summarize_payload_keysets(prices_payload),
-              "promotions_current": summarize_payload_keysets(promotions_payload),
+              "promotions_current": summarize_payload_keysets([select_fields(row, PROMOTIONS_CURRENT_DB_FIELDS) for row in promotions_payload]),
               "promotion_items_current": summarize_payload_keysets(promotion_items_payload),
           })
           write_json(OUT_DIR / "promotion_items_write_plan.json", {
@@ -2094,7 +2113,11 @@ jobs:
           quarantined_target_store_key_set = set(quarantined_target_store_keys)
           safe_price_pairs = {(row["store_key"], row["barcode"]) for row in prices_payload if row["store_key"] in safe_write_store_keys}
           prices_payload_to_write = [row for row in prices_payload if row["store_key"] in safe_write_store_keys]
-          promotions_payload_to_write = [row for row in promotions_payload if row["store_key"] in safe_write_store_keys]
+          promotions_payload_to_write = [
+              select_fields(row, PROMOTIONS_CURRENT_DB_FIELDS)
+              for row in promotions_payload
+              if row["store_key"] in safe_write_store_keys
+          ]
           promotion_store_key_by_key = {row["promotion_key"]: row["store_key"] for row in promotions_payload_to_write}
           promotion_items_payload_to_write = [
               row for row in promotion_items_payload
@@ -2214,5 +2237,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: glutiwise-current-sync-v19-${{ github.run_id }}
+          name: glutiwise-current-sync-v21-${{ github.run_id }}
           path: out
