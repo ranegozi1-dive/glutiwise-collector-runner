@@ -1,4 +1,4 @@
-name: GlutiWise Current Sync to Supabase v18
+name: GlutiWise Current Sync to Supabase v19
 
 on:
   schedule:
@@ -11,9 +11,9 @@ on:
         required: true
         default: "false"
       write_promotion_items:
-        description: "Write promotion_items_current (true/false). Keep true for accurate comparison in the 3-city free-safe MVP."
+        description: "Write promotion_items_current debug layer (true/false). Keep false for the lightweight compare-ready model."
         required: true
-        default: "true"
+        default: "false"
       mvp_scope_profile:
         description: "MVP scope profile (free_mvp_3_cities / free_plus_raanana / full_5_cities)"
         required: true
@@ -32,7 +32,7 @@ on:
         default: ""
 
 concurrency:
-  group: glutiwise-current-sync-v18
+  group: glutiwise-current-sync-v19
   cancel-in-progress: false
 
 permissions:
@@ -45,14 +45,14 @@ jobs:
     env:
       GITHUB_EVENT_NAME: ${{ github.event_name }}
       WRITE_TO_SUPABASE: ${{ inputs.write_to_supabase || 'false' }}
-      WRITE_PROMOTION_ITEMS: ${{ inputs.write_promotion_items || 'true' }}
+      WRITE_PROMOTION_ITEMS: ${{ inputs.write_promotion_items || 'false' }}
       MVP_SCOPE_PROFILE: ${{ inputs.mvp_scope_profile || 'free_mvp_3_cities' }}
       TARGET_CITIES_CSV: ${{ inputs.target_cities_csv || '' }}
       ALLOW_LARGE_PROMOTION_SCOPE: ${{ inputs.allow_large_promotion_scope || 'false' }}
       SCRAPER_TODAY: ${{ inputs.scraper_today || '' }}
       SCHEDULED_SCOPE_PROFILE: "free_mvp_3_cities"
       SCHEDULED_WRITE_TO_SUPABASE: "true"
-      SCHEDULED_WRITE_PROMOTION_ITEMS: "true"
+      SCHEDULED_WRITE_PROMOTION_ITEMS: "false"
       SCHEDULED_ALLOW_LARGE_PROMOTION_SCOPE: "false"
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
@@ -141,7 +141,7 @@ jobs:
           SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
           SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_JWT"]
           MANUAL_WRITE_TO_SUPABASE = os.environ.get("WRITE_TO_SUPABASE", "false").strip().lower() == "true"
-          MANUAL_WRITE_PROMOTION_ITEMS = os.environ.get("WRITE_PROMOTION_ITEMS", "true").strip().lower() == "true"
+          MANUAL_WRITE_PROMOTION_ITEMS = os.environ.get("WRITE_PROMOTION_ITEMS", "false").strip().lower() == "true"
           SCHEDULED_WRITE_TO_SUPABASE = os.environ.get("SCHEDULED_WRITE_TO_SUPABASE", "true").strip().lower() == "true"
           SCHEDULED_WRITE_PROMOTION_ITEMS = os.environ.get("SCHEDULED_WRITE_PROMOTION_ITEMS", "true").strip().lower() == "true"
           WRITE_TO_SUPABASE = SCHEDULED_WRITE_TO_SUPABASE if IS_SCHEDULED_RUN else MANUAL_WRITE_TO_SUPABASE
@@ -540,6 +540,190 @@ jobs:
               if text:
                   return "simple"
               return "unknown"
+
+          def safe_positive_int(value):
+              raw = clean_text(value)
+              if not raw:
+                  return None
+              digits = re.sub(r"[^0-9]", "", raw)
+              if not digits:
+                  return None
+              try:
+                  parsed = int(digits)
+              except ValueError:
+                  return None
+              return parsed if parsed > 0 else None
+
+          def safe_percent(value):
+              parsed = safe_decimal(value)
+              if parsed is None:
+                  return None
+              return parsed if 0 < parsed <= 100 else None
+
+          def first_present(mapping, keys):
+              for key in keys:
+                  value = mapping.get(key)
+                  if clean_text(value):
+                      return value
+              return ""
+
+          def parse_multibuy_terms(text: str):
+              raw = clean_text(text).replace(",", ".")
+              if not raw:
+                  return None, None
+              patterns = [
+                  r"(?<!\d)(\d{1,2})\s*ב[- ]?(\d{1,4}(?:\.\d{1,2})?)",
+                  r"קנה\s*(\d{1,2}).{0,12}?ב[- ]?(\d{1,4}(?:\.\d{1,2})?)",
+                  r"(?:מארז|יח[י']?)\s*(\d{1,2}).{0,12}?ב[- ]?(\d{1,4}(?:\.\d{1,2})?)",
+              ]
+              for pattern in patterns:
+                  match = re.search(pattern, raw)
+                  if match:
+                      qty = safe_positive_int(match.group(1))
+                      total_price = safe_decimal(match.group(2))
+                      if qty and total_price:
+                          return qty, total_price
+              return None, None
+
+          def extract_promotion_terms(tag_values, title: str, description: str, benefit_text: str, promotion_type: str):
+              merged_text = " | ".join(filter(None, [clean_text(title), clean_text(description), clean_text(benefit_text)]))
+              min_qty = safe_positive_int(first_present(tag_values, [
+                  "MinQty", "MinimumQty", "MinQuantity", "MinimumQuantity", "PurchaseQuantity", "RequiredQty",
+                  "MinPurchaseQty", "MinNoOfItems", "RewardMinQty", "MinItems", "Quantity"
+              ]))
+              discount_percent = safe_percent(first_present(tag_values, [
+                  "DiscountRate", "DiscountPercent", "Percent", "RewardPercent", "DiscountPct"
+              ]))
+              discount_amount = safe_decimal(first_present(tag_values, [
+                  "DiscountAmount", "DiscountValue", "AmountOff", "RewardAmount", "DiscountSum"
+              ]))
+              fixed_price = safe_decimal(first_present(tag_values, [
+                  "PromotionPrice", "DealPrice", "FixedPrice", "RewardPrice", "SpecialPrice", "PriceAfterDiscount", "Price"
+              ]))
+              multibuy_qty = min_qty
+              multibuy_total_price = None
+              if promotion_type == "multibuy":
+                  multibuy_qty, multibuy_total_price = parse_multibuy_terms(merged_text)
+                  if not multibuy_qty:
+                      multibuy_qty = min_qty
+                  if not multibuy_total_price:
+                      multibuy_total_price = safe_decimal(first_present(tag_values, [
+                          "TotalPrice", "RewardValue", "BundlePrice", "PromotionPrice", "DealPrice"
+                      ]))
+              if not discount_percent:
+                  match = re.search(r"(?<!\d)(\d{1,2}(?:\.\d{1,2})?)\s*%", merged_text)
+                  if match:
+                      discount_percent = safe_percent(match.group(1))
+              if promotion_type != "multibuy" and not fixed_price:
+                  match = re.search(r"(?:ב-|ב|₪)\s*(\d{1,4}(?:[\.,]\d{1,2})?)\s*₪?", merged_text.replace(",", "."))
+                  if match:
+                      fixed_price = safe_decimal(match.group(1))
+              return {
+                  "min_qty": min_qty,
+                  "discount_percent": discount_percent,
+                  "discount_amount": discount_amount,
+                  "fixed_price": fixed_price,
+                  "multibuy_qty": multibuy_qty,
+                  "multibuy_total_price": multibuy_total_price,
+              }
+
+          def compute_effective_price(regular_price, promo_header: dict):
+              if regular_price is None:
+                  return None, False
+              min_qty = promo_header.get("min_qty") or 1
+              fixed_price = promo_header.get("fixed_price")
+              discount_percent = promo_header.get("discount_percent")
+              discount_amount = promo_header.get("discount_amount")
+              promotion_type = clean_text(promo_header.get("promotion_type"))
+              if fixed_price and min_qty <= 1 and 0 < fixed_price < regular_price:
+                  return round(fixed_price, 2), True
+              if discount_percent and min_qty <= 1:
+                  candidate = round(regular_price * (1 - (discount_percent / 100.0)), 2)
+                  if 0 < candidate < regular_price:
+                      return candidate, True
+              if discount_amount and min_qty <= 1:
+                  candidate = round(regular_price - discount_amount, 2)
+                  if 0 < candidate < regular_price:
+                      return candidate, True
+              if promotion_type == "multibuy":
+                  qty = promo_header.get("multibuy_qty") or min_qty
+                  total_price = promo_header.get("multibuy_total_price")
+                  if qty and total_price and qty > 0:
+                      candidate = round(total_price / qty, 2)
+                      if 0 < candidate < regular_price:
+                          return candidate, False
+              return round(regular_price, 2), False
+
+          def promotion_sort_key(promo_header: dict, regular_price):
+              candidate_price, directly_applicable = compute_effective_price(regular_price, promo_header)
+              return (
+                  0 if directly_applicable else 1,
+                  candidate_price if candidate_price is not None else regular_price if regular_price is not None else 999999.0,
+                  0 if promo_header.get("is_club") else 1,
+                  clean_text(promo_header.get("title", "")),
+                  clean_text(promo_header.get("promotion_key", "")),
+              )
+
+          def apply_compare_ready_promotions(price_rows, promo_headers_rows, promo_items_rows):
+              price_by_pair = {(row["store_key"], row["barcode"]): row for row in price_rows}
+              promo_header_by_key = {row["promotion_key"]: row for row in promo_headers_rows}
+              promos_by_pair = defaultdict(list)
+              for item_row in promo_items_rows:
+                  promo_key = item_row.get("promotion_key")
+                  promo_header = promo_header_by_key.get(promo_key)
+                  if not promo_header:
+                      continue
+                  pair = (promo_header.get("store_key"), item_row.get("barcode"))
+                  if pair in price_by_pair:
+                      promos_by_pair[pair].append(promo_header)
+
+              compare_ready_summary = {
+                  "price_rows_total": len(price_rows),
+                  "price_rows_with_any_promotion": 0,
+                  "price_rows_with_direct_unit_effective_price": 0,
+                  "price_rows_with_quantity_dependent_promotion": 0,
+                  "applied_promotion_type_counts": {},
+              }
+              promotion_type_counter = Counter()
+
+              for pair, row in price_by_pair.items():
+                  regular_price = row.get("regular_price") or row.get("price")
+                  row["regular_price"] = regular_price
+                  row["effective_price"] = regular_price
+                  row["has_promotion"] = False
+                  row["has_club_promotion"] = False
+                  row["applied_promotion_key"] = None
+                  row["applied_promotion_title"] = None
+                  row["applied_promotion_type"] = None
+                  row["promotion_benefit_text"] = None
+                  row["promotion_start_at"] = None
+                  row["promotion_end_at"] = None
+
+                  headers = promos_by_pair.get(pair, [])
+                  if not headers:
+                      continue
+
+                  compare_ready_summary["price_rows_with_any_promotion"] += 1
+                  selected = sorted(headers, key=lambda header: promotion_sort_key(header, regular_price))[0]
+                  selected_effective_price, directly_applicable = compute_effective_price(regular_price, selected)
+                  if directly_applicable:
+                      compare_ready_summary["price_rows_with_direct_unit_effective_price"] += 1
+                  elif clean_text(selected.get("promotion_type")) == "multibuy":
+                      compare_ready_summary["price_rows_with_quantity_dependent_promotion"] += 1
+
+                  row["has_promotion"] = True
+                  row["has_club_promotion"] = bool(selected.get("is_club"))
+                  row["effective_price"] = selected_effective_price if selected_effective_price is not None else regular_price
+                  row["applied_promotion_key"] = selected.get("promotion_key")
+                  row["applied_promotion_title"] = selected.get("title")
+                  row["applied_promotion_type"] = selected.get("promotion_type")
+                  row["promotion_benefit_text"] = selected.get("benefit_text")
+                  row["promotion_start_at"] = selected.get("start_at")
+                  row["promotion_end_at"] = selected.get("end_at")
+                  promotion_type_counter[clean_text(selected.get("promotion_type")) or "unknown"] += 1
+
+              compare_ready_summary["applied_promotion_type_counts"] = dict(sorted(promotion_type_counter.items()))
+              return compare_ready_summary
           
           def _roots_from_zip_bytes(blob: bytes):
               roots = []
@@ -1039,6 +1223,16 @@ jobs:
                               "barcode": barcode,
                               "store_key": store_key,
                               "price": price,
+                              "regular_price": price,
+                              "effective_price": price,
+                              "has_promotion": False,
+                              "has_club_promotion": False,
+                              "applied_promotion_key": None,
+                              "applied_promotion_title": None,
+                              "applied_promotion_type": None,
+                              "promotion_benefit_text": None,
+                              "promotion_start_at": None,
+                              "promotion_end_at": None,
                               "updated_at": updated_at,
                               "last_seen_at": RUN_TS_ISO,
                               "_name_candidate": item_name,
@@ -1134,6 +1328,7 @@ jobs:
                           tag_values.get("PromotionEndDate") or tag_values.get("EndDate") or tag_values.get("End") or ""
                       )
                       promotion_type = normalize_promotion_type(title, description, benefit_text, is_club)
+                      promo_terms = extract_promotion_terms(tag_values, title, description, benefit_text, promotion_type)
                       key_basis = "|".join([
                           store_key,
                           source_promotion_id,
@@ -1154,6 +1349,12 @@ jobs:
                           "benefit_text": clean_text(benefit_text) or None,
                           "is_club": is_club,
                           "club_name": clean_text(club_name) or None,
+                          "min_qty": promo_terms.get("min_qty"),
+                          "discount_percent": promo_terms.get("discount_percent"),
+                          "discount_amount": promo_terms.get("discount_amount"),
+                          "fixed_price": promo_terms.get("fixed_price"),
+                          "multibuy_qty": promo_terms.get("multibuy_qty"),
+                          "multibuy_total_price": promo_terms.get("multibuy_total_price"),
                           "start_at": start_at,
                           "end_at": end_at,
                           "updated_at": RUN_TS_ISO,
@@ -1507,6 +1708,9 @@ jobs:
               if duplicates:
                   raise SystemExit(f"Duplicate {key_name} values in {table_name}: {duplicates[:20]}")
           
+          compare_ready_summary = apply_compare_ready_promotions(prices_payload, promotions_payload, promotion_items_payload)
+          write_json(OUT_DIR / "compare_ready_summary.json", compare_ready_summary)
+
           assert_unique(products_payload, "barcode", "products")
           assert_unique(stores_payload, "store_key", "stores")
           assert_unique(prices_payload, "price_key", "prices_current")
@@ -1569,6 +1773,7 @@ jobs:
               "target_cities": list(TARGET_CITIES),
               "target_store_count": len(discovered_target_stores),
               "write_promotion_items": WRITE_PROMOTION_ITEMS,
+              "compare_ready_summary": compare_ready_summary,
               "city_scope_summary": city_scope_summary,
               "recommended_for_supabase_free": len(discovered_target_stores) <= MAX_TARGET_STORES_SAFE,
           })
@@ -1799,6 +2004,9 @@ jobs:
               "prices_payload": len(prices_payload),
               "promotions_payload": len(promotions_payload),
               "promotion_items_payload": len(promotion_items_payload),
+              "price_rows_with_any_promotion": compare_ready_summary.get("price_rows_with_any_promotion", 0),
+              "price_rows_with_direct_unit_effective_price": compare_ready_summary.get("price_rows_with_direct_unit_effective_price", 0),
+              "price_rows_with_quantity_dependent_promotion": compare_ready_summary.get("price_rows_with_quantity_dependent_promotion", 0),
               "successful_price_store_keys": len(successful_price_store_keys),
               "successful_promo_store_keys": len(successful_promo_store_keys),
               "missing_price_store_keys": len(missing_price_store_keys),
@@ -1833,9 +2041,10 @@ jobs:
           })
           write_json(OUT_DIR / "promotion_items_write_plan.json", {
               "write_promotion_items": WRITE_PROMOTION_ITEMS,
+              "compare_ready_summary": compare_ready_summary,
               "promotion_items_payload_total": len(promotion_items_payload),
               "recommended_for_supabase_free": False,
-              "note": "promotion_items_current stays enabled for the selected 3-city free MVP, but the workflow will write only when the entire selected scope is complete.",
+              "note": "Compare-ready mode keeps promotion_items_current disabled by default for the scheduled Free-plan run. The workflow still requires full store coverage before publishing.",
           })
           write_json(OUT_DIR / "run_summary.json", {
               **payload_counts,
@@ -1909,7 +2118,7 @@ jobs:
               "promotion_items_max_safe": PROMOTION_ITEMS_MAX_SAFE,
               "max_target_stores_safe": MAX_TARGET_STORES_SAFE,
               "recommended_for_supabase_free": len(promotion_items_payload_to_write) <= PROMOTION_ITEMS_MAX_SAFE and len(safe_write_store_keys) <= MAX_TARGET_STORES_SAFE,
-              "note": "For Supabase Free, keep the MVP scope near 30 stores and around 1.1M promotion-item rows or below.",
+              "note": "Compare-ready mode keeps promotion_items_current optional. For the scheduled Free-plan run, keep it disabled unless you are doing a one-off debug write.",
           })
           
           if WRITE_TO_SUPABASE and WRITE_PROMOTION_ITEMS and not ALLOW_LARGE_PROMOTION_SCOPE:
@@ -1938,17 +2147,16 @@ jobs:
                       pause_after_chunk=0.05,
                   )
           else:
-              log("Skipping promotion_items_current write by design.")
+              log("Skipping promotion_items_current write in compare-ready mode by design.")
           
           deactivated_missing_target_store_keys = {row["store_key"] for row in auto_deactivated_existing_target_rows}
           cleanup_non_current_store_keys = sorted(non_target_store_keys | legacy_store_keys_to_deactivate | deactivated_missing_target_store_keys | quarantined_target_store_key_set)
           cleanup_lookup_batches = list(chunked(cleanup_non_current_store_keys, 100))
           stale_promo_lookup_batches = list(chunked(sorted(safe_write_store_keys), 100))
           
-          if WRITE_PROMOTION_ITEMS:
-              for batch in cleanup_lookup_batches:
-                  promo_keys_for_removed_stores = fetch_promotion_keys({"store_key": build_in_filter(batch)})
-                  delete_promotion_items_by_promotion_keys(promo_keys_for_removed_stores)
+          for batch in cleanup_lookup_batches:
+              promo_keys_for_removed_stores = fetch_promotion_keys({"store_key": build_in_filter(batch)})
+              delete_promotion_items_by_promotion_keys(promo_keys_for_removed_stores)
           
           delete_rows_safe("prices_current", "store_key", cleanup_non_current_store_keys, batch_size=100, min_batch_size=25, pause_after_batch=0.02)
           delete_rows_safe("promotions_current", "store_key", cleanup_non_current_store_keys, batch_size=100, min_batch_size=25, pause_after_batch=0.02)
@@ -1971,6 +2179,10 @@ jobs:
                   }
                   stale_promo_keys = fetch_promotion_keys(stale_promo_filters)
                   delete_promotion_items_by_promotion_keys(stale_promo_keys)
+          else:
+              for batch in stale_promo_lookup_batches:
+                  current_scope_promo_keys = fetch_promotion_keys({"store_key": build_in_filter(batch)})
+                  delete_promotion_items_by_promotion_keys(current_scope_promo_keys)
           
           delete_rows_safe(
               "promotions_current",
@@ -1993,7 +2205,7 @@ jobs:
                   pause_after_batch=0.02,
               )
           
-          log("GlutiWise current sync completed successfully in full-comparison mode.")
+          log("GlutiWise current sync completed successfully in full-comparison compare-ready mode.")
           PY
           python3 -m py_compile sync_glutiwise.py
           python3 sync_glutiwise.py
@@ -2002,5 +2214,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: glutiwise-current-sync-v18-${{ github.run_id }}
+          name: glutiwise-current-sync-v19-${{ github.run_id }}
           path: out
