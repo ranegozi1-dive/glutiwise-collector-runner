@@ -2047,13 +2047,32 @@ jobs:
               ["store_key", "retailer", "store_name", "city", "has_price_payload", "has_promo_payload", "missing_price_file", "missing_promo_file"],
           )
           store_price_rows = defaultdict(list)
+          barcode_store_key_map = defaultdict(set)
           for row in prices_payload:
               if row.get('store_key') in target_store_keys:
                   store_price_rows[row['store_key']].append(row)
+                  barcode_store_key_map[row['barcode']].add(row['store_key'])
 
+          comparison_universe_barcodes = {
+              barcode
+              for barcode, store_keys in barcode_store_key_map.items()
+              if len(store_keys) >= 2
+          }
           best_priced_products_count = max((len({row['barcode'] for row in rows}) for rows in store_price_rows.values()), default=0)
           best_active_categories_count = max((len({clean_text(row.get('category')) for row in rows if clean_text(row.get('category'))}) for rows in store_price_rows.values()), default=0)
           best_promoted_products_count = max((len({row['barcode'] for row in rows if row.get('has_promotion')}) for rows in store_price_rows.values()), default=0)
+          best_comparable_products_count = max((
+              len({row['barcode'] for row in rows if row['barcode'] in comparison_universe_barcodes})
+              for rows in store_price_rows.values()
+          ), default=0)
+          best_comparable_categories_count = max((
+              len({
+                  clean_text(row.get('category'))
+                  for row in rows
+                  if row['barcode'] in comparison_universe_barcodes and clean_text(row.get('category'))
+              })
+              for rows in store_price_rows.values()
+          ), default=0)
 
           store_readiness_rows = []
           weak_target_store_keys = []
@@ -2063,22 +2082,31 @@ jobs:
           for store in sorted(discovered_target_stores, key=lambda x: x['store_key']):
               store_key = store['store_key']
               rows = store_price_rows.get(store_key, [])
+              comparable_rows = [row for row in rows if row['barcode'] in comparison_universe_barcodes]
               priced_products_count = len({row['barcode'] for row in rows})
               active_categories_count = len({clean_text(row.get('category')) for row in rows if clean_text(row.get('category'))})
               promoted_products_count = len({row['barcode'] for row in rows if row.get('has_promotion')})
+              comparable_products_count = len({row['barcode'] for row in comparable_rows})
+              comparable_categories_count = len({clean_text(row.get('category')) for row in comparable_rows if clean_text(row.get('category'))})
               priced_vs_best = round((100.0 * priced_products_count / best_priced_products_count), 1) if best_priced_products_count else 0.0
               categories_vs_best = round((100.0 * active_categories_count / best_active_categories_count), 1) if best_active_categories_count else 0.0
               promotions_vs_best = round((100.0 * promoted_products_count / best_promoted_products_count), 1) if best_promoted_products_count else 0.0
+              comparable_products_vs_best = round((100.0 * comparable_products_count / best_comparable_products_count), 1) if best_comparable_products_count else 0.0
+              comparable_categories_vs_best = round((100.0 * comparable_categories_count / best_comparable_categories_count), 1) if best_comparable_categories_count else 0.0
+              comparison_universe_coverage_pct = round((100.0 * comparable_products_count / len(comparison_universe_barcodes)), 1) if comparison_universe_barcodes else 0.0
               source_freshness_status = 'fresh' if store_key not in stale_target_store_key_set else 'stale_source'
               if priced_products_count == 0:
                   comparison_readiness = 'exclude_no_prices'
               elif store_key in stale_target_store_key_set:
                   comparison_readiness = 'stale_source'
                   weak_target_store_keys.append(store_key)
-              elif priced_vs_best >= 80.0 and categories_vs_best >= 70.0:
+              elif comparable_products_count == 0:
+                  comparison_readiness = 'weak_coverage'
+                  weak_target_store_keys.append(store_key)
+              elif comparable_products_vs_best >= 80.0 and comparable_categories_vs_best >= 70.0:
                   comparison_readiness = 'ready_for_comparison'
                   ready_target_store_keys.append(store_key)
-              elif priced_vs_best >= 60.0:
+              elif comparable_products_vs_best >= 60.0:
                   comparison_readiness = 'partial_review'
                   partial_target_store_keys.append(store_key)
               else:
@@ -2092,21 +2120,30 @@ jobs:
                   'priced_products_count': priced_products_count,
                   'active_categories_count': active_categories_count,
                   'promoted_products_count': promoted_products_count,
+                  'comparable_products_count': comparable_products_count,
+                  'comparable_categories_count': comparable_categories_count,
+                  'comparison_universe_coverage_pct': comparison_universe_coverage_pct,
                   'priced_products_vs_best_store_pct': priced_vs_best,
                   'active_categories_vs_best_store_pct': categories_vs_best,
                   'promotions_vs_best_store_pct': promotions_vs_best,
+                  'comparable_products_vs_best_store_pct': comparable_products_vs_best,
+                  'comparable_categories_vs_best_store_pct': comparable_categories_vs_best,
                   'source_freshness_status': source_freshness_status,
                   'comparison_readiness': comparison_readiness,
               })
           write_csv(
               OUT_DIR / 'store_readiness.csv',
               store_readiness_rows,
-              ['store_key', 'retailer', 'store_name', 'city', 'priced_products_count', 'active_categories_count', 'promoted_products_count', 'priced_products_vs_best_store_pct', 'active_categories_vs_best_store_pct', 'promotions_vs_best_store_pct', 'source_freshness_status', 'comparison_readiness'],
+              ['store_key', 'retailer', 'store_name', 'city', 'priced_products_count', 'active_categories_count', 'promoted_products_count', 'comparable_products_count', 'comparable_categories_count', 'comparison_universe_coverage_pct', 'priced_products_vs_best_store_pct', 'active_categories_vs_best_store_pct', 'promotions_vs_best_store_pct', 'comparable_products_vs_best_store_pct', 'comparable_categories_vs_best_store_pct', 'source_freshness_status', 'comparison_readiness'],
           )
           write_json(OUT_DIR / 'store_readiness_summary.json', {
+              'readiness_method': 'shared_exact_barcode_comparison_universe',
+              'comparison_universe_products_count': len(comparison_universe_barcodes),
               'best_priced_products_count': best_priced_products_count,
               'best_active_categories_count': best_active_categories_count,
               'best_promoted_products_count': best_promoted_products_count,
+              'best_comparable_products_count': best_comparable_products_count,
+              'best_comparable_categories_count': best_comparable_categories_count,
               'ready_target_store_count': len(ready_target_store_keys),
               'partial_target_store_count': len(partial_target_store_keys),
               'weak_target_store_count': len(weak_target_store_keys),
@@ -2207,6 +2244,7 @@ jobs:
               "placeholder_leak_entries": sum(placeholder_leak_summary.values()),
               "product_hard_quality_ok": product_hard_quality_ok,
               "product_enrichment_quality_ok": product_enrichment_quality_ok,
+              "product_enrichment_quality_blocks_write": False,
               "product_quality_ok": product_enrichment_quality_ok,
           })
           
@@ -2303,6 +2341,7 @@ jobs:
               "artifact_self_check_ok": artifact_self_check["artifact_self_check_ok"],
               "product_hard_quality_ok": product_hard_quality_ok,
               "product_enrichment_quality_ok": product_enrichment_quality_ok,
+              "product_enrichment_quality_blocks_write": False,
               "covered_target_store_count": len(covered_target_store_keys),
               "uncovered_target_store_count": len(uncovered_target_store_keys),
               "missing_covered_target_cities": missing_covered_target_cities,
@@ -2570,6 +2609,9 @@ jobs:
             out/source_freshness_summary.json
             out/store_set_consistency.json
             out/product_quality_gate.json
+            out/product_payload_coverage.json
+            out/product_field_coverage_by_store.csv
+            out/product_placeholder_leak_summary.json
             out/db_write_decision.json
             out/partial_safe_mode_summary.json
             out/uncovered_target_stores.csv
