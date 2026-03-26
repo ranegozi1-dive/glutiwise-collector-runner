@@ -2156,7 +2156,25 @@ jobs:
               store_readiness_rows,
               ['store_key', 'retailer', 'store_name', 'city', 'priced_products_count', 'active_categories_count', 'promoted_products_count', 'comparable_products_count', 'comparable_categories_count', 'comparison_universe_coverage_pct', 'priced_products_vs_best_store_pct', 'active_categories_vs_best_store_pct', 'promotions_vs_best_store_pct', 'comparable_products_vs_best_store_pct', 'comparable_categories_vs_best_store_pct', 'source_freshness_status', 'comparison_readiness'],
           )
-          write_json(OUT_DIR / 'store_readiness_summary.json', {
+          readiness_rows_by_status = defaultdict(list)
+          for row in store_readiness_rows:
+              readiness_rows_by_status[row['comparison_readiness']].append(row['store_key'])
+          ready_target_store_keys = sorted(readiness_rows_by_status.get('ready_for_comparison', []))
+          partial_target_store_keys = sorted(readiness_rows_by_status.get('partial_review', []))
+          weak_target_store_keys = sorted(readiness_rows_by_status.get('weak_coverage', []) + readiness_rows_by_status.get('stale_source', []))
+          excluded_no_prices_target_store_keys = sorted(readiness_rows_by_status.get('exclude_no_prices', []))
+          unexpected_readiness_status_rows = sorted(
+              [
+                  {
+                      'store_key': row['store_key'],
+                      'comparison_readiness': row['comparison_readiness'],
+                  }
+                  for row in store_readiness_rows
+                  if row['comparison_readiness'] not in {'ready_for_comparison', 'partial_review', 'weak_coverage', 'stale_source', 'exclude_no_prices'}
+              ],
+              key=lambda item: item['store_key'],
+          )
+          store_readiness_summary = {
               'readiness_method': 'shared_exact_barcode_comparison_universe',
               'comparison_universe_products_count': len(comparison_universe_barcodes),
               'best_priced_products_count': best_priced_products_count,
@@ -2172,7 +2190,82 @@ jobs:
               'ready_target_store_keys': ready_target_store_keys,
               'partial_target_store_keys': partial_target_store_keys,
               'weak_target_store_keys': weak_target_store_keys,
+              'excluded_no_prices_target_store_count': len(excluded_no_prices_target_store_keys),
+              'excluded_no_prices_target_store_keys': excluded_no_prices_target_store_keys,
+          }
+          write_json(OUT_DIR / 'store_readiness_summary.json', store_readiness_summary)
+
+          target_store_rows_with_category_coverage = sorted({
+              row['store_key']
+              for row in price_store_coverage_rows
+              if row.get('store_key') in set(target_store_keys) and int(row.get('category_present', 0) or 0) > 0
           })
+          all_rows_active_categories_zero = bool(store_readiness_rows) and all(
+              int(row.get('active_categories_count', 0) or 0) == 0
+              for row in store_readiness_rows
+          )
+          all_rows_comparable_categories_zero = bool(store_readiness_rows) and all(
+              int(row.get('comparable_categories_count', 0) or 0) == 0
+              for row in store_readiness_rows
+          )
+          recomputed_ready_target_store_count = len(ready_target_store_keys)
+          recomputed_partial_target_store_count = len(partial_target_store_keys)
+          recomputed_weak_target_store_count = len(weak_target_store_keys)
+          contradiction_flags = {
+              'summary_ready_count_mismatch': store_readiness_summary['ready_target_store_count'] != recomputed_ready_target_store_count,
+              'summary_partial_count_mismatch': store_readiness_summary['partial_target_store_count'] != recomputed_partial_target_store_count,
+              'summary_weak_count_mismatch': store_readiness_summary['weak_target_store_count'] != recomputed_weak_target_store_count,
+              'row_count_mismatch_target_scope': len(store_readiness_rows) != len(discovered_target_stores),
+              'unexpected_readiness_status_present': bool(unexpected_readiness_status_rows),
+              'all_active_categories_zero_despite_positive_best': best_active_categories_count > 0 and all_rows_active_categories_zero,
+              'all_comparable_categories_zero_despite_positive_best': best_comparable_categories_count > 0 and all_rows_comparable_categories_zero,
+              'all_row_category_counts_zero_despite_category_coverage_artifact': bool(target_store_rows_with_category_coverage) and all_rows_active_categories_zero,
+          }
+          readiness_consistency_reasons = []
+          if contradiction_flags['summary_ready_count_mismatch']:
+              readiness_consistency_reasons.append('summary_ready_count_mismatch')
+          if contradiction_flags['summary_partial_count_mismatch']:
+              readiness_consistency_reasons.append('summary_partial_count_mismatch')
+          if contradiction_flags['summary_weak_count_mismatch']:
+              readiness_consistency_reasons.append('summary_weak_count_mismatch')
+          if contradiction_flags['row_count_mismatch_target_scope']:
+              readiness_consistency_reasons.append('store_readiness_row_count_mismatch_target_store_count')
+          if contradiction_flags['unexpected_readiness_status_present']:
+              readiness_consistency_reasons.append('unexpected_readiness_status_present')
+          if contradiction_flags['all_active_categories_zero_despite_positive_best']:
+              readiness_consistency_reasons.append('all_active_categories_zero_despite_positive_best')
+          if contradiction_flags['all_comparable_categories_zero_despite_positive_best']:
+              readiness_consistency_reasons.append('all_comparable_categories_zero_despite_positive_best')
+          if contradiction_flags['all_row_category_counts_zero_despite_category_coverage_artifact']:
+              readiness_consistency_reasons.append('all_row_category_counts_zero_despite_category_coverage_artifact')
+          store_readiness_consistency = {
+              'consistency_ok': not any(contradiction_flags.values()),
+              'readiness_method': store_readiness_summary['readiness_method'],
+              'target_store_count': len(discovered_target_stores),
+              'store_readiness_row_count': len(store_readiness_rows),
+              'summary_counts': {
+                  'ready_target_store_count': store_readiness_summary['ready_target_store_count'],
+                  'partial_target_store_count': store_readiness_summary['partial_target_store_count'],
+                  'weak_target_store_count': store_readiness_summary['weak_target_store_count'],
+                  'excluded_no_prices_target_store_count': store_readiness_summary['excluded_no_prices_target_store_count'],
+              },
+              'recomputed_counts': {
+                  'ready_target_store_count': recomputed_ready_target_store_count,
+                  'partial_target_store_count': recomputed_partial_target_store_count,
+                  'weak_target_store_count': recomputed_weak_target_store_count,
+                  'excluded_no_prices_target_store_count': len(excluded_no_prices_target_store_keys),
+              },
+              'best_active_categories_count': best_active_categories_count,
+              'best_comparable_categories_count': best_comparable_categories_count,
+              'all_rows_active_categories_zero': all_rows_active_categories_zero,
+              'all_rows_comparable_categories_zero': all_rows_comparable_categories_zero,
+              'target_store_rows_with_category_coverage_count': len(target_store_rows_with_category_coverage),
+              'target_store_rows_with_category_coverage_keys': target_store_rows_with_category_coverage,
+              'unexpected_readiness_status_rows': unexpected_readiness_status_rows,
+              'contradiction_flags': contradiction_flags,
+              'reasons': readiness_consistency_reasons,
+          }
+          write_json(OUT_DIR / 'store_readiness_consistency.json', store_readiness_consistency)
 
           target_store_key_set = set(target_store_keys)
           price_store_key_set = set(successful_price_store_keys)
@@ -2280,8 +2373,14 @@ jobs:
               "target_coverage_rows_match_target_store_count": len(target_coverage_by_store_rows) == len(target_store_key_set),
               "product_placeholder_leaks_absent": not placeholder_leak_summary,
               "store_parse_errors_absent": not store_parse_errors,
+              "store_readiness_consistency_ok": store_readiness_consistency["consistency_ok"],
           }
-          artifact_self_check["artifact_self_check_ok"] = all(artifact_self_check.values())
+          artifact_self_check["reasons"] = list(store_readiness_consistency["reasons"])
+          artifact_self_check["artifact_self_check_ok"] = all(
+              value
+              for key, value in artifact_self_check.items()
+              if key != "reasons"
+          )
           write_json(OUT_DIR / "artifact_self_check.json", artifact_self_check)
           
           source_freshness_ok = not stale_price_source_store_keys and not stale_promo_source_store_keys
@@ -2359,6 +2458,8 @@ jobs:
               "store_readiness_ok": store_readiness_ok,
               "store_set_consistency_ok": store_set_consistency_ok,
               "artifact_self_check_ok": artifact_self_check["artifact_self_check_ok"],
+              "store_readiness_consistency_ok": store_readiness_consistency["consistency_ok"],
+              "artifact_self_check_reasons": artifact_self_check["reasons"],
               "product_hard_quality_ok": product_hard_quality_ok,
               "product_enrichment_quality_ok": product_enrichment_quality_ok,
               "product_enrichment_quality_blocks_write": False,
@@ -2450,6 +2551,8 @@ jobs:
                   coverage_errors.append(f"target_validation_failures={len(target_validation_failures)}")
               if not artifact_self_check["artifact_self_check_ok"]:
                   coverage_errors.append("artifact_self_check_ok=false")
+              if not store_readiness_consistency["consistency_ok"]:
+                  coverage_errors.append("store_readiness_consistency_ok=false")
               if missing_target_cities:
                   coverage_errors.append(f"missing_target_cities={len(missing_target_cities)}")
               if missing_covered_target_cities:
@@ -2625,6 +2728,7 @@ jobs:
             out/target_coverage_by_city_retailer.csv
             out/store_readiness.csv
             out/store_readiness_summary.json
+            out/store_readiness_consistency.json
             out/source_freshness_by_store.csv
             out/source_freshness_summary.json
             out/store_set_consistency.json
