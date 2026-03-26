@@ -1,4 +1,4 @@
-name: GlutiWise Current Sync to Supabase v21
+name: GlutiWise Current Sync to Supabase v23
 
 on:
   schedule:
@@ -7,33 +7,45 @@ on:
   workflow_dispatch:
     inputs:
       write_to_supabase:
-        description: "Write to Supabase (true/false)"
+        description: "Write to Supabase"
         required: true
-        default: "false"
+        type: boolean
+        default: false
       write_promotion_items:
-        description: "Write promotion_items_current debug layer (true/false). Keep false for the lightweight compare-ready model."
+        description: "Write promotion_items_current debug layer"
         required: true
-        default: "false"
+        type: boolean
+        default: false
       mvp_scope_profile:
-        description: "MVP scope profile (free_mvp_3_cities / free_plus_raanana / full_5_cities)"
+        description: "Locked MVP scope profile"
         required: true
-        default: "free_mvp_3_cities"
+        type: choice
+        options:
+          - free_mvp_3_cities
+        default: free_mvp_3_cities
       target_cities_csv:
-        description: "Optional comma-separated city override in Hebrew"
+        description: "Optional comma-separated subset override from the locked MVP cities only: Hod HaSharon, Kfar Saba, Ramat HaSharon"
         required: false
+        type: string
         default: ""
       allow_large_promotion_scope:
-        description: "Override Free-plan guardrails for large promotion-item writes (true/false)"
+        description: "Override Free-plan guardrails for large promotion-item writes"
         required: true
-        default: "false"
+        type: boolean
+        default: false
       scraper_today:
         description: "Optional UTC override for scraper TODAY, format YYYY-MM-DD HH:MM"
         required: false
+        type: string
         default: ""
 
 concurrency:
-  group: glutiwise-current-sync-v21
+  group: glutiwise-current-sync-live
   cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
 
 permissions:
   contents: read
@@ -41,7 +53,7 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 150
     env:
       GITHUB_EVENT_NAME: ${{ github.event_name }}
       WRITE_TO_SUPABASE: ${{ inputs.write_to_supabase || 'false' }}
@@ -51,12 +63,19 @@ jobs:
       ALLOW_LARGE_PROMOTION_SCOPE: ${{ inputs.allow_large_promotion_scope || 'false' }}
       SCRAPER_TODAY: ${{ inputs.scraper_today || '' }}
       SCHEDULED_SCOPE_PROFILE: "free_mvp_3_cities"
-      SCHEDULED_WRITE_TO_SUPABASE: "true"
+      SCHEDULED_WRITE_TO_SUPABASE: "false"
       SCHEDULED_WRITE_PROMOTION_ITEMS: "false"
       SCHEDULED_ALLOW_LARGE_PROMOTION_SCOPE: "false"
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
       WRITE_HEAVY_DEBUG_ARTIFACTS: "false"
+      SOURCE_MAX_AGE_HOURS: "48"
+      ARTIFACT_RETENTION_DAYS: "1"
+      LOCKED_MVP_STORE_LIMIT: "29"
+      MAX_TARGET_STORES_SAFE: "29"
+      SECONDARY_SOURCE_MODE: "cheapersal_qa_ready_no_fetch"
+      SECONDARY_SOURCE_CANDIDATE: "cheapersal"
+      SECONDARY_SOURCE_FETCH_ENABLED: "false"
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -66,10 +85,25 @@ jobs:
           mkdir -p dumps out out/chunks
 
       - name: Pull scraper image
+        timeout-minutes: 15
         run: |
-          docker pull erlichsefi/israeli-supermarket-scarpers:latest
+          set -euo pipefail
+          retry() {
+            local max_attempts="$1"
+            shift
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                return 1
+              fi
+              sleep $((attempt * 10))
+              attempt=$((attempt + 1))
+            done
+          }
+          retry 3 docker pull erlichsefi/israeli-supermarket-scarpers:latest
 
       - name: Download store, price, and promotion files
+        timeout-minutes: 55
         run: |
           set -euo pipefail
           ARGS=(
@@ -77,16 +111,29 @@ jobs:
             -v "${{ github.workspace }}/dumps:/usr/src/app/dumps"
             -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL,YOHANANOF"
             -e ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE,PROMO_FILE,PROMO_FULL_FILE"
-            -e NUMBER_OF_PROCESSES="3"
+            -e NUMBER_OF_PROCESSES="2"
             -e OUTPUT_MODE="disk"
             -e STORAGE_PATH="/usr/src/app/dumps"
           )
           if [ -n "${SCRAPER_TODAY}" ]; then
             ARGS+=( -e "TODAY=${SCRAPER_TODAY}" )
           fi
-          docker run "${ARGS[@]}" erlichsefi/israeli-supermarket-scarpers:latest
+          retry() {
+            local max_attempts="$1"
+            shift
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                return 1
+              fi
+              sleep $((attempt * 15))
+              attempt=$((attempt + 1))
+            done
+          }
+          retry 2 docker run "${ARGS[@]}" erlichsefi/israeli-supermarket-scarpers:latest
 
       - name: Build payload, validate, and sync
+        timeout-minutes: 85
         run: |
           cat > sync_glutiwise.py <<'PY'
           import csv
@@ -108,28 +155,40 @@ jobs:
           from pathlib import Path
           
           TARGET_RETAILERS = ("shufersal", "ramilevy", "yohananof")
-          FULL_TARGET_CITIES = (
+          LOCKED_MVP_CITIES = (
               "הוד השרון",
               "כפר סבא",
-              "פתח תקווה",
               "רמת השרון",
-              "רעננה",
           )
           SCOPE_PROFILES = {
-              "free_mvp_3_cities": ("הוד השרון", "כפר סבא", "רמת השרון"),
-              "free_plus_raanana": ("הוד השרון", "כפר סבא", "רמת השרון", "רעננה"),
-              "full_5_cities": FULL_TARGET_CITIES,
+              "free_mvp_3_cities": LOCKED_MVP_CITIES,
           }
           EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "workflow_dispatch").strip()
           IS_SCHEDULED_RUN = EVENT_NAME == "schedule"
           MANUAL_MVP_SCOPE_PROFILE = os.environ.get("MVP_SCOPE_PROFILE", "free_mvp_3_cities").strip().lower()
           SCHEDULED_SCOPE_PROFILE = os.environ.get("SCHEDULED_SCOPE_PROFILE", "free_mvp_3_cities").strip().lower()
           MVP_SCOPE_PROFILE = SCHEDULED_SCOPE_PROFILE if IS_SCHEDULED_RUN else MANUAL_MVP_SCOPE_PROFILE
+          if MVP_SCOPE_PROFILE not in SCOPE_PROFILES:
+              raise SystemExit(
+                  f"Unsupported MVP scope profile: {MVP_SCOPE_PROFILE}. "
+                  "This workflow is locked to free_mvp_3_cities."
+              )
           TARGET_CITIES_CSV = "" if IS_SCHEDULED_RUN else os.environ.get("TARGET_CITIES_CSV", "").strip()
           if TARGET_CITIES_CSV:
-              TARGET_CITIES = tuple(clean.strip() for clean in TARGET_CITIES_CSV.split(",") if clean.strip())
+              requested_cities = []
+              for clean in (city.strip() for city in TARGET_CITIES_CSV.split(",") if city.strip()):
+                  if clean not in LOCKED_MVP_CITIES:
+                      raise SystemExit(
+                          f"Unsupported target city override: {clean}. "
+                          f"Allowed cities: {', '.join(LOCKED_MVP_CITIES)}"
+                      )
+                  if clean not in requested_cities:
+                      requested_cities.append(clean)
+              TARGET_CITIES = tuple(requested_cities)
           else:
-              TARGET_CITIES = SCOPE_PROFILES.get(MVP_SCOPE_PROFILE, SCOPE_PROFILES["free_mvp_3_cities"])
+              TARGET_CITIES = SCOPE_PROFILES[MVP_SCOPE_PROFILE]
+          if not TARGET_CITIES:
+              raise SystemExit("TARGET_CITIES is empty after applying the locked MVP scope.")
           CHAIN_ID_TO_RETAILER = {
               "7290027600007": "shufersal",
               "7290058140886": "ramilevy",
@@ -138,6 +197,7 @@ jobs:
           RUN_TS = datetime.now(timezone.utc).replace(microsecond=0)
           RUN_TS_ISO = RUN_TS.isoformat().replace("+00:00", "Z")
           PRICE_STALE_BEFORE = (RUN_TS - timedelta(days=7)).isoformat().replace("+00:00", "Z")
+          SOURCE_MAX_AGE_HOURS = int(os.environ.get("SOURCE_MAX_AGE_HOURS", "48"))
           SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
           SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_JWT"]
           MANUAL_WRITE_TO_SUPABASE = os.environ.get("WRITE_TO_SUPABASE", "false").strip().lower() == "true"
@@ -151,8 +211,17 @@ jobs:
           MANUAL_ALLOW_LARGE_PROMOTION_SCOPE = os.environ.get("ALLOW_LARGE_PROMOTION_SCOPE", "false").strip().lower() == "true"
           SCHEDULED_ALLOW_LARGE_PROMOTION_SCOPE = os.environ.get("SCHEDULED_ALLOW_LARGE_PROMOTION_SCOPE", "false").strip().lower() == "true"
           ALLOW_LARGE_PROMOTION_SCOPE = SCHEDULED_ALLOW_LARGE_PROMOTION_SCOPE if IS_SCHEDULED_RUN else MANUAL_ALLOW_LARGE_PROMOTION_SCOPE
+          LOCKED_MVP_STORE_LIMIT = int(os.environ.get("LOCKED_MVP_STORE_LIMIT", "29"))
           PROMOTION_ITEMS_MAX_SAFE = int(os.environ.get("PROMOTION_ITEMS_MAX_SAFE", "1100000"))
-          MAX_TARGET_STORES_SAFE = int(os.environ.get("MAX_TARGET_STORES_SAFE", "30"))
+          MAX_TARGET_STORES_SAFE = int(os.environ.get("MAX_TARGET_STORES_SAFE", str(LOCKED_MVP_STORE_LIMIT)))
+          SECONDARY_SOURCE_MODE = os.environ.get("SECONDARY_SOURCE_MODE", "cheapersal_qa_ready_no_fetch").strip().lower()
+          SECONDARY_SOURCE_CANDIDATE = os.environ.get("SECONDARY_SOURCE_CANDIDATE", "cheapersal").strip().lower()
+          SECONDARY_SOURCE_FETCH_ENABLED = os.environ.get("SECONDARY_SOURCE_FETCH_ENABLED", "false").strip().lower() == "true"
+          if SECONDARY_SOURCE_FETCH_ENABLED:
+              raise SystemExit(
+                  "Secondary-source live fetch is intentionally disabled in this workflow. "
+                  "Official chain store/price/promotion files remain the only current-state source of truth."
+              )
           OUT_DIR = Path("out")
           DUMPS_DIR = Path("dumps")
           OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -393,6 +462,36 @@ jobs:
                       continue
               return None
           
+          def iso_to_utc_datetime(value: str):
+              parsed = parse_datetime_value(value)
+              if not parsed:
+                  return None
+              try:
+                  return datetime.fromisoformat(parsed.replace('Z', '+00:00')).astimezone(timezone.utc)
+              except Exception:
+                  return None
+
+          def iso_age_hours(value: str):
+              dt = iso_to_utc_datetime(value)
+              if not dt:
+                  return None
+              return round(max(0.0, (RUN_TS - dt).total_seconds() / 3600.0), 2)
+
+          def promotion_is_active(promo_header: dict, reference_iso: str) -> bool:
+              reference_dt = iso_to_utc_datetime(reference_iso) or RUN_TS
+              start_dt = iso_to_utc_datetime(promo_header.get("start_at"))
+              end_dt = iso_to_utc_datetime(promo_header.get("end_at"))
+              if not start_dt and not end_dt:
+                  return False
+              if start_dt and reference_dt < start_dt:
+                  return False
+              if end_dt and reference_dt > end_dt:
+                  return False
+              return True
+          
+          def active_windowed_promotions(headers, reference_iso: str):
+              return [header for header in headers if promotion_is_active(header, reference_iso)]
+
           def filename_timestamp(path: Path):
               matches = re.findall(r"(\d{12,14})", path.name)
               for candidate in reversed(matches):
@@ -653,13 +752,18 @@ jobs:
                       if 0 < candidate < regular_price:
                           return candidate, False
               return round(regular_price, 2), False
-
-          def promotion_sort_key(promo_header: dict, regular_price):
+          
+          def promotion_compare_price_state(promo_header: dict, regular_price):
               candidate_price, directly_applicable = compute_effective_price(regular_price, promo_header)
+              safe_for_compare_price = directly_applicable
+              return candidate_price, directly_applicable, safe_for_compare_price
+          
+          def promotion_sort_key(promo_header: dict, regular_price):
+              candidate_price, directly_applicable, safe_for_compare_price = promotion_compare_price_state(promo_header, regular_price)
               return (
-                  0 if directly_applicable else 1,
+                  0 if safe_for_compare_price else 1 if directly_applicable else 2,
                   candidate_price if candidate_price is not None else regular_price if regular_price is not None else 999999.0,
-                  0 if promo_header.get("is_club") else 1,
+                  0 if not promo_header.get("is_club") else 1,
                   clean_text(promo_header.get("title", "")),
                   clean_text(promo_header.get("promotion_key", "")),
               )
@@ -681,6 +785,7 @@ jobs:
                   "price_rows_total": len(price_rows),
                   "price_rows_with_any_promotion": 0,
                   "price_rows_with_direct_unit_effective_price": 0,
+                  "price_rows_with_club_member_promotion": 0,
                   "price_rows_with_quantity_dependent_promotion": 0,
                   "applied_promotion_type_counts": {},
               }
@@ -703,17 +808,29 @@ jobs:
                   if not headers:
                       continue
 
+                  active_headers = active_windowed_promotions(headers, RUN_TS_ISO)
+                  if not active_headers:
+                      continue
+          
                   compare_ready_summary["price_rows_with_any_promotion"] += 1
-                  selected = sorted(headers, key=lambda header: promotion_sort_key(header, regular_price))[0]
-                  selected_effective_price, directly_applicable = compute_effective_price(regular_price, selected)
+                  selected = sorted(active_headers, key=lambda header: promotion_sort_key(header, regular_price))[0]
+                  selected_effective_price, directly_applicable, safe_for_compare_price = promotion_compare_price_state(selected, regular_price)
                   if directly_applicable:
                       compare_ready_summary["price_rows_with_direct_unit_effective_price"] += 1
+                      if bool(selected.get("is_club")):
+                          compare_ready_summary["price_rows_with_club_member_promotion"] += 1
+                  elif bool(selected.get("is_club")):
+                      compare_ready_summary["price_rows_with_club_member_promotion"] += 1
                   elif clean_text(selected.get("promotion_type")) == "multibuy":
                       compare_ready_summary["price_rows_with_quantity_dependent_promotion"] += 1
-
+          
                   row["has_promotion"] = True
                   row["has_club_promotion"] = bool(selected.get("is_club"))
-                  row["effective_price"] = selected_effective_price if selected_effective_price is not None else regular_price
+                  row["effective_price"] = (
+                      selected_effective_price
+                      if safe_for_compare_price and selected_effective_price is not None
+                      else regular_price
+                  )
                   row["applied_promotion_key"] = selected.get("promotion_key")
                   row["applied_promotion_title"] = selected.get("title")
                   row["applied_promotion_type"] = selected.get("promotion_type")
@@ -1457,6 +1574,38 @@ jobs:
                   row["canonical_city"] = clean_text(row.get("city", "")) or clean_text(row.get("store_name", ""))
           
           discovered_store_keys = set(discovered_stores_map.keys())
+          def prune_dump_files(keep_paths):
+              keep_resolved = set()
+              for item in keep_paths:
+                  if not item:
+                      continue
+                  try:
+                      keep_resolved.add(str(Path(item).resolve()))
+                  except Exception:
+                      continue
+              removed_files = 0
+              removed_bytes = 0
+              for path in DUMPS_DIR.rglob('*'):
+                  if not path.is_file():
+                      continue
+                  resolved = str(path.resolve())
+                  if resolved in keep_resolved:
+                      continue
+                  try:
+                      removed_bytes += path.stat().st_size
+                  except Exception:
+                      pass
+                  try:
+                      path.unlink()
+                      removed_files += 1
+                  except Exception:
+                      continue
+              write_json(OUT_DIR / 'dump_prune_summary.json', {
+                  'kept_files': len(keep_resolved),
+                  'removed_files': removed_files,
+                  'removed_bytes': removed_bytes,
+              })
+
           discovered_target_stores = [row for row in discovered_stores_map.values() if row.get("is_target")]
           discovered_non_target_stores = [row for row in discovered_stores_map.values() if not row.get("is_target")]
           target_store_keys = {row["store_key"] for row in discovered_target_stores}
@@ -1465,6 +1614,11 @@ jobs:
           
           if not discovered_target_stores:
               raise SystemExit("No target stores were discovered from STORE files after source-only target validation. Aborting.")
+          if len(discovered_target_stores) > LOCKED_MVP_STORE_LIMIT:
+              raise SystemExit(
+                  f"Discovered {len(discovered_target_stores)} target stores, which exceeds the locked MVP limit "
+                  f"of {LOCKED_MVP_STORE_LIMIT}. Aborting to avoid unintended scope expansion."
+              )
           
           by_retailer = Counter(row["retailer"] for row in discovered_target_stores)
           missing_retailers = [ret for ret in TARGET_RETAILERS if by_retailer.get(ret, 0) == 0]
@@ -1543,10 +1697,62 @@ jobs:
               elif store_key in promo_partial_map:
                   promo_file_map[store_key] = promo_partial_map[store_key]
           missing_promo_store_keys = sorted(target_store_keys - set(promo_file_map.keys()))
+
+          keep_dump_paths = [row.get("source_file") for row in discovered_stores_map.values()]
+          keep_dump_paths.extend(selection["path"] for selection in price_file_map.values())
+          keep_dump_paths.extend(selection["path"] for selection in promo_file_map.values())
+          prune_dump_files(keep_dump_paths)
+
+          source_freshness_rows = []
+          stale_price_source_store_keys = []
+          stale_promo_source_store_keys = []
+          for store_key in sorted(target_store_keys):
+              price_selection = price_file_map.get(store_key)
+              promo_selection = promo_file_map.get(store_key)
+              price_source_age_hours = iso_age_hours(price_selection["timestamp"]) if price_selection else None
+              promo_source_age_hours = iso_age_hours(promo_selection["timestamp"]) if promo_selection else None
+              price_source_is_stale = bool(price_selection) and price_source_age_hours is not None and price_source_age_hours > SOURCE_MAX_AGE_HOURS
+              promo_source_is_stale = bool(promo_selection) and promo_source_age_hours is not None and promo_source_age_hours > SOURCE_MAX_AGE_HOURS
+              if price_source_is_stale:
+                  stale_price_source_store_keys.append(store_key)
+              if promo_source_is_stale:
+                  stale_promo_source_store_keys.append(store_key)
+              freshness_status = "fresh"
+              if price_source_is_stale and promo_source_is_stale:
+                  freshness_status = "stale_price_and_promo"
+              elif price_source_is_stale:
+                  freshness_status = "stale_price"
+              elif promo_source_is_stale:
+                  freshness_status = "stale_promo"
+              source_freshness_rows.append({
+                  "store_key": store_key,
+                  "retailer": discovered_stores_map[store_key]["retailer"],
+                  "store_name": discovered_stores_map[store_key]["store_name"],
+                  "city": discovered_stores_map[store_key]["canonical_city"],
+                  "price_source_ts": price_selection["timestamp"] if price_selection else "",
+                  "price_source_age_hours": price_source_age_hours,
+                  "price_source_is_stale": price_source_is_stale,
+                  "promo_source_ts": promo_selection["timestamp"] if promo_selection else "",
+                  "promo_source_age_hours": promo_source_age_hours,
+                  "promo_source_is_stale": promo_source_is_stale,
+                  "freshness_status": freshness_status,
+              })
+          write_csv(
+              OUT_DIR / "source_freshness_by_store.csv",
+              source_freshness_rows,
+              ["store_key", "retailer", "store_name", "city", "price_source_ts", "price_source_age_hours", "price_source_is_stale", "promo_source_ts", "promo_source_age_hours", "promo_source_is_stale", "freshness_status"],
+          )
+          write_json(OUT_DIR / "source_freshness_summary.json", {
+              "source_max_age_hours": SOURCE_MAX_AGE_HOURS,
+              "stale_price_source_store_keys": sorted(stale_price_source_store_keys),
+              "stale_promo_source_store_keys": sorted(stale_promo_source_store_keys),
+              "fresh_store_count": sum(1 for row in source_freshness_rows if row["freshness_status"] == "fresh"),
+              "stale_store_count": sum(1 for row in source_freshness_rows if row["freshness_status"] != "fresh"),
+          })
           
           stores_payload = [
               merge_store_row(discovered_stores_map[key], select_existing_store_for_discovered(key))
-              for key in sorted(discovered_store_keys)
+              for key in sorted(target_store_keys)
           ]
           for legacy_key in sorted(legacy_store_keys_to_deactivate):
               existing_row = existing_target_chain_by_key.get(legacy_key)
@@ -1791,10 +1997,36 @@ jobs:
               "mvp_scope_profile": MVP_SCOPE_PROFILE,
               "target_cities": list(TARGET_CITIES),
               "target_store_count": len(discovered_target_stores),
+              "locked_mvp_store_limit": LOCKED_MVP_STORE_LIMIT,
               "write_promotion_items": WRITE_PROMOTION_ITEMS,
               "compare_ready_summary": compare_ready_summary,
               "city_scope_summary": city_scope_summary,
               "recommended_for_supabase_free": len(discovered_target_stores) <= MAX_TARGET_STORES_SAFE,
+          })
+          write_json(OUT_DIR / "secondary_source_strategy.json", {
+              "mode": SECONDARY_SOURCE_MODE,
+              "candidate": SECONDARY_SOURCE_CANDIDATE,
+              "fetch_enabled": SECONDARY_SOURCE_FETCH_ENABLED,
+              "current_price_source_of_truth": "official_chain_files_only",
+              "chosen_strategy": "Cheapersal QA-ready only, no live integration yet",
+              "why_chosen_now": [
+                  "Cheapersal is the best realistic secondary-source candidate in the current MVP stage because it is well aligned with official supermarket transparency data, city/store-level benchmarking, and a low-maintenance QA role.",
+                  "The workflow does not safely prove a stable or approved secondary endpoint/schema for live enrichment, so keeping the secondary source in QA-ready/no-fetch mode avoids DB pollution and preserves official files as the only current-price truth.",
+                  "This keeps the door open for future coverage audits and completeness benchmarking without weakening freshness, publish gates, or latest-only current-state replacement."
+              ],
+              "option_evaluation": {
+                  "official_source_only": "Best for live current-state truth; remains mandatory for writes.",
+                  "pricez": "Useful public benchmark, but user-contributed metadata makes it riskier as a direct enrichment source for trusted current-state writes.",
+                  "cheapersal": "Best current secondary candidate for future QA benchmarking because it is focused on store/city comparison without requiring a paid dependency in the workflow.",
+                  "pricepilot": "Potentially powerful normalized/commercial option, but it adds vendor cost, dependency risk, and integration assumptions that are not proven in this workflow.",
+                  "direct_chain_catalog_pages": "Official metadata candidate in theory, but too fragile to integrate safely here without verified endpoints/selectors per chain."
+              },
+              "live_write_policy": "No secondary source may write prices_current/promotions_current/stores current-state rows in this workflow.",
+              "future_safe_uses": [
+                  "coverage_audit",
+                  "promotion_gap_detection",
+                  "metadata_enrichment_for_already_known_official_products"
+              ],
           })
           
           target_coverage_by_store_rows = build_target_coverage_by_store_rows(
@@ -1814,12 +2046,77 @@ jobs:
               target_coverage_by_store_rows,
               ["store_key", "retailer", "store_name", "city", "has_price_payload", "has_promo_payload", "missing_price_file", "missing_promo_file"],
           )
+          store_price_rows = defaultdict(list)
+          for row in prices_payload:
+              if row.get('store_key') in target_store_keys:
+                  store_price_rows[row['store_key']].append(row)
+
+          best_priced_products_count = max((len({row['barcode'] for row in rows}) for rows in store_price_rows.values()), default=0)
+          best_active_categories_count = max((len({clean_text(row.get('category')) for row in rows if clean_text(row.get('category'))}) for rows in store_price_rows.values()), default=0)
+          best_promoted_products_count = max((len({row['barcode'] for row in rows if row.get('has_promotion')}) for rows in store_price_rows.values()), default=0)
+
+          store_readiness_rows = []
+          weak_target_store_keys = []
+          partial_target_store_keys = []
+          ready_target_store_keys = []
+          stale_target_store_key_set = set(stale_price_source_store_keys) | set(stale_promo_source_store_keys)
+          for store in sorted(discovered_target_stores, key=lambda x: x['store_key']):
+              store_key = store['store_key']
+              rows = store_price_rows.get(store_key, [])
+              priced_products_count = len({row['barcode'] for row in rows})
+              active_categories_count = len({clean_text(row.get('category')) for row in rows if clean_text(row.get('category'))})
+              promoted_products_count = len({row['barcode'] for row in rows if row.get('has_promotion')})
+              priced_vs_best = round((100.0 * priced_products_count / best_priced_products_count), 1) if best_priced_products_count else 0.0
+              categories_vs_best = round((100.0 * active_categories_count / best_active_categories_count), 1) if best_active_categories_count else 0.0
+              promotions_vs_best = round((100.0 * promoted_products_count / best_promoted_products_count), 1) if best_promoted_products_count else 0.0
+              source_freshness_status = 'fresh' if store_key not in stale_target_store_key_set else 'stale_source'
+              if priced_products_count == 0:
+                  comparison_readiness = 'exclude_no_prices'
+              elif store_key in stale_target_store_key_set:
+                  comparison_readiness = 'stale_source'
+                  weak_target_store_keys.append(store_key)
+              elif priced_vs_best >= 80.0 and categories_vs_best >= 70.0:
+                  comparison_readiness = 'ready_for_comparison'
+                  ready_target_store_keys.append(store_key)
+              elif priced_vs_best >= 60.0:
+                  comparison_readiness = 'partial_review'
+                  partial_target_store_keys.append(store_key)
+              else:
+                  comparison_readiness = 'weak_coverage'
+                  weak_target_store_keys.append(store_key)
+              store_readiness_rows.append({
+                  'store_key': store_key,
+                  'retailer': store.get('retailer'),
+                  'store_name': store.get('store_name'),
+                  'city': store.get('canonical_city') or store.get('city'),
+                  'priced_products_count': priced_products_count,
+                  'active_categories_count': active_categories_count,
+                  'promoted_products_count': promoted_products_count,
+                  'priced_products_vs_best_store_pct': priced_vs_best,
+                  'active_categories_vs_best_store_pct': categories_vs_best,
+                  'promotions_vs_best_store_pct': promotions_vs_best,
+                  'source_freshness_status': source_freshness_status,
+                  'comparison_readiness': comparison_readiness,
+              })
           write_csv(
-              OUT_DIR / "target_coverage_by_city_retailer.csv",
-              target_coverage_by_city_retailer_rows,
-              ["city", "retailer", "target_stores", "price_payload_stores", "promo_payload_stores", "full_price_coverage", "full_promo_coverage"],
+              OUT_DIR / 'store_readiness.csv',
+              store_readiness_rows,
+              ['store_key', 'retailer', 'store_name', 'city', 'priced_products_count', 'active_categories_count', 'promoted_products_count', 'priced_products_vs_best_store_pct', 'active_categories_vs_best_store_pct', 'promotions_vs_best_store_pct', 'source_freshness_status', 'comparison_readiness'],
           )
-          
+          write_json(OUT_DIR / 'store_readiness_summary.json', {
+              'best_priced_products_count': best_priced_products_count,
+              'best_active_categories_count': best_active_categories_count,
+              'best_promoted_products_count': best_promoted_products_count,
+              'ready_target_store_count': len(ready_target_store_keys),
+              'partial_target_store_count': len(partial_target_store_keys),
+              'weak_target_store_count': len(weak_target_store_keys),
+              'stale_target_store_count': len(sorted(stale_target_store_key_set)),
+              'stale_target_store_keys': sorted(stale_target_store_key_set),
+              'ready_target_store_keys': ready_target_store_keys,
+              'partial_target_store_keys': partial_target_store_keys,
+              'weak_target_store_keys': weak_target_store_keys,
+          })
+
           target_store_key_set = set(target_store_keys)
           price_store_key_set = set(successful_price_store_keys)
           promo_store_key_set = set(successful_promo_store_keys)
@@ -1929,7 +2226,9 @@ jobs:
           artifact_self_check["artifact_self_check_ok"] = all(artifact_self_check.values())
           write_json(OUT_DIR / "artifact_self_check.json", artifact_self_check)
           
-          strict_target_coverage_ok = not missing_price_store_keys and not failed_price_store_rows and not missing_promo_store_keys and not failed_promo_store_rows
+          source_freshness_ok = not stale_price_source_store_keys and not stale_promo_source_store_keys
+          strict_target_coverage_ok = not missing_price_store_keys and not failed_price_store_rows and not missing_promo_store_keys and not failed_promo_store_rows and source_freshness_ok
+          store_readiness_ok = not weak_target_store_keys
           covered_target_store_keys = sorted(target_store_key_set & price_store_key_set & promo_store_key_set)
           uncovered_target_store_keys = sorted(target_store_key_set - set(covered_target_store_keys))
           covered_target_city_set = {discovered_stores_map[key]["canonical_city"] for key in covered_target_store_keys}
@@ -1937,7 +2236,7 @@ jobs:
           missing_covered_target_cities = sorted(set(TARGET_CITIES) - covered_target_city_set)
           missing_covered_target_retailers = sorted(set(TARGET_RETAILERS) - covered_target_retailer_set)
           write_scope_ok = bool(covered_target_store_keys) and not target_validation_failures and not missing_covered_target_cities and not missing_covered_target_retailers and artifact_self_check["artifact_self_check_ok"] and product_hard_quality_ok
-          full_comparison_scope_ok = strict_target_coverage_ok and store_set_consistency_ok and write_scope_ok
+          full_comparison_scope_ok = strict_target_coverage_ok and store_set_consistency_ok and store_readiness_ok and write_scope_ok and source_freshness_ok
           write_mode = "full" if full_comparison_scope_ok else "blocked"
           if write_mode == "full":
               for unresolved_row in unresolved_existing_target_rows:
@@ -1998,6 +2297,8 @@ jobs:
           write_json(OUT_DIR / "db_write_decision.json", {
               "write_mode": write_mode,
               "strict_target_coverage_ok": strict_target_coverage_ok,
+              "source_freshness_ok": source_freshness_ok,
+              "store_readiness_ok": store_readiness_ok,
               "store_set_consistency_ok": store_set_consistency_ok,
               "artifact_self_check_ok": artifact_self_check["artifact_self_check_ok"],
               "product_hard_quality_ok": product_hard_quality_ok,
@@ -2016,6 +2317,9 @@ jobs:
               "is_scheduled_run": IS_SCHEDULED_RUN,
               "write_to_supabase": WRITE_TO_SUPABASE,
               "write_promotion_items": WRITE_PROMOTION_ITEMS,
+              "secondary_source_mode": SECONDARY_SOURCE_MODE,
+              "secondary_source_candidate": SECONDARY_SOURCE_CANDIDATE,
+              "secondary_source_fetch_enabled": SECONDARY_SOURCE_FETCH_ENABLED,
               "stores_discovered": len(discovered_stores_map),
               "target_stores": len(discovered_target_stores),
               "non_target_stores": len(discovered_non_target_stores),
@@ -2025,6 +2329,7 @@ jobs:
               "promotion_items_payload": len(promotion_items_payload),
               "price_rows_with_any_promotion": compare_ready_summary.get("price_rows_with_any_promotion", 0),
               "price_rows_with_direct_unit_effective_price": compare_ready_summary.get("price_rows_with_direct_unit_effective_price", 0),
+              "price_rows_with_club_member_promotion": compare_ready_summary.get("price_rows_with_club_member_promotion", 0),
               "price_rows_with_quantity_dependent_promotion": compare_ready_summary.get("price_rows_with_quantity_dependent_promotion", 0),
               "successful_price_store_keys": len(successful_price_store_keys),
               "successful_promo_store_keys": len(successful_promo_store_keys),
@@ -2039,9 +2344,11 @@ jobs:
               "store_set_consistency_ok": store_set_consistency_ok,
               "artifact_self_check_ok": artifact_self_check["artifact_self_check_ok"],
               "strict_target_coverage_ok": strict_target_coverage_ok,
+              "store_readiness_ok": store_readiness_ok,
               "covered_target_store_keys": len(covered_target_store_keys),
               "uncovered_target_store_keys": len(uncovered_target_store_keys),
               "quarantined_target_store_keys": len(quarantined_target_store_keys),
+              "weak_target_store_keys": len(weak_target_store_keys),
               "missing_covered_target_cities": len(missing_covered_target_cities),
               "missing_covered_target_retailers": len(missing_covered_target_retailers),
               "product_hard_quality_ok": product_hard_quality_ok,
@@ -2071,9 +2378,9 @@ jobs:
               "price_parse_errors": price_parse_errors,
               "promo_parse_errors": promo_parse_errors,
           })
-          write_json(OUT_DIR / "products_upsert.json", products_payload)
-          write_json(OUT_DIR / "stores_upsert.json", stores_payload)
           if WRITE_HEAVY_DEBUG_ARTIFACTS:
+              write_json(OUT_DIR / "products_upsert.json", products_payload)
+              write_json(OUT_DIR / "stores_upsert.json", stores_payload)
               write_json(OUT_DIR / "prices_upsert.json", prices_payload)
               write_json(OUT_DIR / "promotions_upsert.json", promotions_payload)
               write_json(OUT_DIR / "promotion_items_upsert.json", promotion_items_payload)
@@ -2092,8 +2399,12 @@ jobs:
                   coverage_errors.append(f"missing_covered_target_retailers={len(missing_covered_target_retailers)}")
               if not strict_target_coverage_ok:
                   coverage_errors.append("strict_target_coverage_ok=false")
+              if not source_freshness_ok:
+                  coverage_errors.append("source_freshness_ok=false")
               if not store_set_consistency_ok:
                   coverage_errors.append("store_set_consistency_ok=false")
+              if not store_readiness_ok:
+                  coverage_errors.append(f"weak_target_store_keys={len(weak_target_store_keys)}")
               if not product_hard_quality_ok:
                   coverage_errors.append(
                       f"product_hard_quality_failed(name>={minimum_name_pct_hard},category>={minimum_category_pct},placeholder_leaks=0)"
@@ -2228,6 +2539,12 @@ jobs:
                   pause_after_batch=0.02,
               )
           
+          if not WRITE_HEAVY_DEBUG_ARTIFACTS:
+              for chunk_path in (OUT_DIR / "chunks").glob("*"):
+                  try:
+                      chunk_path.unlink()
+                  except Exception:
+                      pass
           log("GlutiWise current sync completed successfully in full-comparison compare-ready mode.")
           PY
           python3 -m py_compile sync_glutiwise.py
@@ -2235,7 +2552,33 @@ jobs:
 
       - name: Upload run artifacts
         if: always()
+        timeout-minutes: 10
         uses: actions/upload-artifact@v6
         with:
-          name: glutiwise-current-sync-v21-${{ github.run_id }}
-          path: out
+          name: glutiwise-current-sync-v23-${{ github.run_id }}
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          if-no-files-found: warn
+          path: |
+            out/run_summary.json
+            out/mvp_scope_summary.json
+            out/compare_ready_summary.json
+            out/target_coverage_by_store.csv
+            out/target_coverage_by_city_retailer.csv
+            out/store_readiness.csv
+            out/store_readiness_summary.json
+            out/source_freshness_by_store.csv
+            out/source_freshness_summary.json
+            out/store_set_consistency.json
+            out/product_quality_gate.json
+            out/db_write_decision.json
+            out/partial_safe_mode_summary.json
+            out/uncovered_target_stores.csv
+            out/failed_price_files.csv
+            out/failed_promo_files.csv
+            out/missing_price_files.csv
+            out/missing_promo_files.csv
+            out/target_validation_failures.csv
+            out/dump_prune_summary.json
+            out/artifact_self_check.json
+            out/promotion_items_write_plan.json
+            out/secondary_source_strategy.json
