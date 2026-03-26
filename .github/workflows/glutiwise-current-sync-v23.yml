@@ -2046,6 +2046,11 @@ jobs:
               target_coverage_by_store_rows,
               ["store_key", "retailer", "store_name", "city", "has_price_payload", "has_promo_payload", "missing_price_file", "missing_promo_file"],
           )
+          product_category_by_barcode = {
+              row["barcode"]: clean_text(row.get("category"))
+              for row in products_payload
+              if clean_text(row.get("category"))
+          }
           store_price_rows = defaultdict(list)
           barcode_store_key_map = defaultdict(set)
           for row in prices_payload:
@@ -2059,7 +2064,14 @@ jobs:
               if len(store_keys) >= 2
           }
           best_priced_products_count = max((len({row['barcode'] for row in rows}) for rows in store_price_rows.values()), default=0)
-          best_active_categories_count = max((len({clean_text(row.get('category')) for row in rows if clean_text(row.get('category'))}) for rows in store_price_rows.values()), default=0)
+          best_active_categories_count = max((
+              len({
+                  product_category_by_barcode.get(row['barcode'], '')
+                  for row in rows
+                  if product_category_by_barcode.get(row['barcode'], '')
+              })
+              for rows in store_price_rows.values()
+          ), default=0)
           best_promoted_products_count = max((len({row['barcode'] for row in rows if row.get('has_promotion')}) for rows in store_price_rows.values()), default=0)
           best_comparable_products_count = max((
               len({row['barcode'] for row in rows if row['barcode'] in comparison_universe_barcodes})
@@ -2067,9 +2079,9 @@ jobs:
           ), default=0)
           best_comparable_categories_count = max((
               len({
-                  clean_text(row.get('category'))
+                  product_category_by_barcode.get(row['barcode'], '')
                   for row in rows
-                  if row['barcode'] in comparison_universe_barcodes and clean_text(row.get('category'))
+                  if row['barcode'] in comparison_universe_barcodes and product_category_by_barcode.get(row['barcode'], '')
               })
               for rows in store_price_rows.values()
           ), default=0)
@@ -2084,10 +2096,18 @@ jobs:
               rows = store_price_rows.get(store_key, [])
               comparable_rows = [row for row in rows if row['barcode'] in comparison_universe_barcodes]
               priced_products_count = len({row['barcode'] for row in rows})
-              active_categories_count = len({clean_text(row.get('category')) for row in rows if clean_text(row.get('category'))})
+              active_categories_count = len({
+                  product_category_by_barcode.get(row['barcode'], '')
+                  for row in rows
+                  if product_category_by_barcode.get(row['barcode'], '')
+              })
               promoted_products_count = len({row['barcode'] for row in rows if row.get('has_promotion')})
               comparable_products_count = len({row['barcode'] for row in comparable_rows})
-              comparable_categories_count = len({clean_text(row.get('category')) for row in comparable_rows if clean_text(row.get('category'))})
+              comparable_categories_count = len({
+                  product_category_by_barcode.get(row['barcode'], '')
+                  for row in comparable_rows
+                  if product_category_by_barcode.get(row['barcode'], '')
+              })
               priced_vs_best = round((100.0 * priced_products_count / best_priced_products_count), 1) if best_priced_products_count else 0.0
               categories_vs_best = round((100.0 * active_categories_count / best_active_categories_count), 1) if best_active_categories_count else 0.0
               promotions_vs_best = round((100.0 * promoted_products_count / best_promoted_products_count), 1) if best_promoted_products_count else 0.0
