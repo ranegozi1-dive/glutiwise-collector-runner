@@ -3439,6 +3439,1067 @@ jobs:
                   "anchor_requires_gluten_preservation": anchor_requires_gf,
               }
 
+          legacy_selected_probe_items = list(selected_probe_items)
+          legacy_product_probe_metadata_by_barcode = product_probe_metadata_by_barcode
+
+          brand_identity_stopwords = {
+              "ltd", "inc", "co", "company", "corp", "foods", "food", "group",
+              "בעמ", "בע\"מ", "חברה", "תעשיות", "מזון", "ישראל",
+          }
+          family_signature_stopwords = {
+              "מארז", "יח", "יחידות", "אריזה", "pack", "packs", "pcs", "piece", "pieces",
+              "classic", "extra", "original", "new", "חדש",
+          }
+          explicit_non_food_tokens = {
+              "פיירי", "fairy", "ניקוי", "ניקיון", "כביסה", "טואלט", "חיתול", "ביוטי", "קוסמט", "פארם",
+              "beauty", "cosmetic", "pharm", "drug", "clean", "laundry", "diaper", "toilet", "paper",
+              "pet", "dog", "cat", "household", "bath",
+          }
+          non_core_food_tokens = {
+              "במבה", "אפרופו", "ציטוס", "צ'יטוס", "קליק", "מילקי", "דניאלה", "ויטמינציק", "קורנפלקס כריות",
+              "חטיף", "חטיפים", "נשנוש", "נשנושים", "ממתק", "ממתקים", "שוקולד", "עוגיה", "עוגיות", "ביסקוויט", "ביסקוויטים",
+              "משקה אנרגיה", "קולה", "סודה", "בירה", "יין", "snack", "chips", "candy", "chocolate", "cookie", "biscuit",
+              "energy", "cola", "soda", "beer", "wine",
+          }
+          suspicious_category_keys = {
+              "", "אחר", "other", "misc", "unknown", "1",
+          }
+          core_food_group_rules = [
+              ("bread_bakery", ("לחם", "פיתה", "חלה", "טורטיה", "bread", "pita", "tortilla")),
+              ("milk_dairy_basic", ("חלב", "גבינה", "יוגורט", "קוטג", "לבנה", "milk", "cheese", "yogurt", "cottage")),
+              ("eggs_basic", ("ביצה", "ביצים", "egg", "eggs")),
+              ("cereal_breakfast", ("דגני", "קורנפלקס", "שיבולת", "גרנולה", "cereal", "cornflakes", "oats", "granola")),
+              ("pasta_rice_grains", ("פסטה", "אטריות", "אורז", "קוסקוס", "pasta", "noodles", "rice", "couscous")),
+              ("pantry_oil_sauce", ("שמן", "רוטב", "טחינה", "עגבניות", "tomato", "oil", "sauce", "tahini")),
+              ("protein_canned_legumes", ("טונה", "קטניות", "שעועית", "עדשים", "חומוס", "tuna", "beans", "lentils", "legume")),
+              ("meat_poultry_fish", ("עוף", "בשר", "דג", "נקניק", "פסטרמה", "chicken", "meat", "fish", "sausage", "pastrami")),
+              ("water_basic", ("מים", "מים מינרליים", "water")),
+              ("frozen_vegetables", ("קפוא", "קפואים", "ירקות קפואים", "frozen vegetable")),
+          ]
+          core_food_group_priority = {
+              group_name: index for index, (group_name, _) in enumerate(core_food_group_rules, start=1)
+          }
+
+          def normalized_unique_tokens(values, stopwords=None):
+              blocked = set(stopwords or [])
+              tokens = []
+              seen = set()
+              for value in values:
+                  text = clean_lookup_text(value).lower()
+                  text = re.sub(r"[^0-9a-zA-Zא-ת]+", " ", text)
+                  for token in re.split(r"\s+", text):
+                      if not token or token in blocked:
+                          continue
+                      if re.fullmatch(r"\d+(?:\.\d+)?", token):
+                          continue
+                      if len(token) < 2:
+                          continue
+                      if token in seen:
+                          continue
+                      seen.add(token)
+                      tokens.append(token)
+              return tokens
+
+          def build_brand_identity_key_shadow(brand: str, manufacturer: str) -> str:
+              return " ".join(sorted(normalized_unique_tokens([brand, manufacturer], brand_identity_stopwords)))
+
+          def build_pack_signature_shadow(name: str):
+              legacy_signature = parse_pack_signature(name)
+              if legacy_signature:
+                  signature = dict(legacy_signature)
+                  signature["derivation_rule"] = "legacy_pack_signature"
+                  return signature
+              text = clean_lookup_text(name).lower().replace(",", ".")
+              if not text:
+                  return None
+              unit_pattern = pack_unit_pattern()
+              match = re.search(
+                  rf"(?P<amount>\d{{1,4}}(?:\.\d+)?)\s*[x*]\s*(?P<count>\d{{1,2}})\s*(?P<unit>{unit_pattern})\b",
+                  text,
+              )
+              if not match:
+                  return None
+              count = safe_positive_int(match.group("count"))
+              amount = safe_decimal(match.group("amount"))
+              unit_info = normalize_pack_unit(match.group("unit"))
+              if count is None or count <= 1 or count > 24 or amount is None or not unit_info:
+                  return None
+              dimension, multiplier, base_unit = unit_info
+              total_base_qty = round(amount * count * multiplier, 4)
+              if total_base_qty <= 0:
+                  return None
+              return {
+                  "dimension": dimension,
+                  "base_unit": base_unit,
+                  "total_base_qty": total_base_qty,
+                  "pack_expression": clean_text(match.group(0)),
+                  "derivation_rule": "amount_first_multipack",
+              }
+
+          def build_family_tokens_shadow(name: str, brand: str, manufacturer: str):
+              text = clean_lookup_text(name).lower()
+              if not text:
+                  return []
+              unit_pattern = pack_unit_pattern()
+              for pattern in (
+                  rf"\b\d{{1,3}}\s*[x*]\s*\d{{1,4}}(?:\.\d+)?\s*(?:{unit_pattern})\b",
+                  rf"\b\d{{1,4}}(?:\.\d+)?\s*[x*]\s*\d{{1,2}}\s*(?:{unit_pattern})\b",
+                  rf"\b\d{{1,4}}(?:\.\d+)?\s*(?:{unit_pattern})\b",
+              ):
+                  text = re.sub(pattern, " ", text)
+              removable_tokens = set(normalized_unique_tokens([brand, manufacturer], brand_identity_stopwords))
+              tokens = []
+              seen = set()
+              for token in re.split(r"\s+", re.sub(r"[^0-9a-zA-Zא-ת]+", " ", text)):
+                  if not token or token in removable_tokens or token in family_signature_stopwords:
+                      continue
+                  if re.fullmatch(r"\d+(?:\.\d+)?", token):
+                      continue
+                  if len(token) < 2 or token in seen:
+                      continue
+                  seen.add(token)
+                  tokens.append(token)
+              return tokens[:8]
+
+          def build_family_signature_key_shadow(tokens):
+              return " ".join(sorted(set(tokens)))
+
+          def build_form_factor_key_shadow(category_key: str, family_tokens):
+              if not category_key or not family_tokens:
+                  return None
+              return f"{category_key}|{' '.join(family_tokens[:2])}"
+
+          def classify_core_food_probe_candidate(candidate: dict, metadata: dict):
+              text = clean_lookup_text(" ".join(filter(None, [candidate.get("category"), candidate.get("name")]))).lower()
+              category_key = metadata.get("category_key") or ""
+              reasons = []
+              basket_group = None
+              for group_name, tokens in core_food_group_rules:
+                  if any(token in text for token in tokens):
+                      basket_group = group_name
+                      break
+              if not category_key or category_key in suspicious_category_keys or re.fullmatch(r"\d+", category_key):
+                  reasons.append("suspicious_or_low_reliability_category")
+              if any(token in text for token in explicit_non_food_tokens):
+                  reasons.append("explicit_non_food_signal")
+              if any(token in text for token in non_core_food_tokens):
+                  reasons.append("non_core_food_snack_or_sweet")
+              if not basket_group:
+                  reasons.append("no_strict_core_food_group")
+              return {
+                  "basket_group": basket_group,
+                  "is_selected_candidate": not reasons,
+                  "reasons": reasons,
+              }
+
+          def summarize_probe_selection_quality(items, candidate_info_by_barcode):
+              group_counts = Counter()
+              selected_core_food_count = 0
+              selected_non_food_or_suspicious_count = 0
+              selected_snack_or_sweet_count = 0
+              selected_with_equivalence_evidence = 0
+              selected_with_pack_signature = 0
+              for item in items:
+                  info = candidate_info_by_barcode.get(item["barcode"], {})
+                  group_name = info.get("basket_group")
+                  if group_name:
+                      group_counts[group_name] += 1
+                      selected_core_food_count += 1
+                  reasons = set(info.get("reasons") or [])
+                  if "explicit_non_food_signal" in reasons or "suspicious_or_low_reliability_category" in reasons:
+                      selected_non_food_or_suspicious_count += 1
+                  if "non_core_food_snack_or_sweet" in reasons:
+                      selected_snack_or_sweet_count += 1
+                  metadata = info.get("metadata", {})
+                  if metadata.get("equivalence_group_key"):
+                      selected_with_equivalence_evidence += 1
+                  if metadata.get("pack_signature"):
+                      selected_with_pack_signature += 1
+              return {
+                  "selected_item_count": len(items),
+                  "selected_core_food_count": selected_core_food_count,
+                  "selected_non_food_or_suspicious_count": selected_non_food_or_suspicious_count,
+                  "selected_snack_or_sweet_count": selected_snack_or_sweet_count,
+                  "selected_with_equivalence_evidence_count": selected_with_equivalence_evidence,
+                  "selected_with_pack_signature_count": selected_with_pack_signature,
+                  "basket_group_composition": dict(group_counts),
+                  "selected_item_names": [item.get("name") for item in items],
+              }
+
+          shadow_product_probe_metadata_by_barcode = {}
+          for barcode in all_barcodes:
+              payload_row = product_rows_by_barcode.get(barcode, {})
+              existing = existing_products.get(barcode, {})
+              name_value = payload_row.get("name") or sanitize_optional_text(existing.get("name")) or None
+              category_value = payload_row.get("category") or sanitize_optional_text(existing.get("category")) or None
+              brand_value = payload_row.get("brand") or sanitize_optional_text(existing.get("brand")) or None
+              manufacturer_value = payload_row.get("manufacturer") or sanitize_optional_text(existing.get("manufacturer")) or None
+              substitute_group_value = sanitize_optional_text(existing.get("substitute_group")) or None
+              gf_flag_value = normalize_boolean_flag(existing.get("gf_flag"))
+              gf_verified_value = normalize_boolean_flag(existing.get("gf_verified"))
+              category_key_value = normalized_category_key(category_value)
+              brand_identity_key_value = build_brand_identity_key_shadow(brand_value or "", manufacturer_value or "")
+              family_tokens_value = build_family_tokens_shadow(name_value or "", brand_value or "", manufacturer_value or "")
+              family_signature_key_value = build_family_signature_key_shadow(family_tokens_value)
+              line_signature_value = " ".join(family_tokens_value)
+              form_factor_key_value = build_form_factor_key_shadow(category_key_value, family_tokens_value)
+              pack_signature_value = build_pack_signature_shadow(name_value or "")
+              explicit_equivalence_group = clean_text(substitute_group_value).lower() if substitute_group_value else None
+              derived_equivalence_group = None
+              if not explicit_equivalence_group and category_key_value and len(family_tokens_value) >= 2 and form_factor_key_value:
+                  derived_equivalence_group = f"derived::{form_factor_key_value}"
+              equivalence_group_key_value = explicit_equivalence_group or derived_equivalence_group
+              equivalence_group_source = "explicit_substitute_group" if explicit_equivalence_group else "derived_category_form_factor" if derived_equivalence_group else None
+              same_product_identity_key_value = None
+              if category_key_value and brand_identity_key_value and family_signature_key_value and len(family_tokens_value) >= 2:
+                  same_product_identity_key_value = f"{category_key_value}|{brand_identity_key_value}|{family_signature_key_value}"
+              shadow_product_probe_metadata_by_barcode[barcode] = {
+                  "barcode": barcode,
+                  "name": name_value,
+                  "category": category_value,
+                  "brand": brand_value,
+                  "manufacturer": manufacturer_value,
+                  "substitute_group": substitute_group_value,
+                  "gf_flag": gf_flag_value,
+                  "gf_verified": gf_verified_value,
+                  "requires_gluten_preservation": bool(gf_flag_value is True or gf_verified_value is True),
+                  "pack_signature": pack_signature_value,
+                  "pack_signature_source": pack_signature_value.get("derivation_rule") if pack_signature_value else None,
+                  "line_signature": line_signature_value,
+                  "family_signature_key": family_signature_key_value,
+                  "family_tokens": family_tokens_value,
+                  "brand_key": brand_identity_key_value,
+                  "brand_identity_key": brand_identity_key_value,
+                  "category_key": category_key_value,
+                  "form_factor_key": form_factor_key_value,
+                  "equivalence_group_key": equivalence_group_key_value,
+                  "equivalence_group_source": equivalence_group_source,
+                  "same_product_identity_key": same_product_identity_key_value,
+              }
+
+          shadow_probe_candidates = []
+          probe_candidate_info_by_barcode = {}
+          for barcode in sorted(comparison_universe_barcodes):
+              metadata = shadow_product_probe_metadata_by_barcode.get(barcode, {})
+              candidate_row = {
+                  "barcode": barcode,
+                  "name": metadata.get("name"),
+                  "category": metadata.get("category"),
+                  "category_key": metadata.get("category_key"),
+                  "brand": metadata.get("brand"),
+                  "exact_store_coverage_count": len(barcode_store_key_map.get(barcode, set())),
+                  "has_pack_signature": bool(metadata.get("pack_signature")),
+                  "has_equivalence_group": bool(metadata.get("equivalence_group_key")),
+                  "has_same_product_identity": bool(metadata.get("same_product_identity_key")),
+              }
+              assessment = classify_core_food_probe_candidate(candidate_row, metadata)
+              candidate_record = {
+                  **candidate_row,
+                  "basket_group": assessment["basket_group"],
+                  "is_selected_candidate": assessment["is_selected_candidate"],
+                  "reasons": assessment["reasons"],
+                  "metadata": metadata,
+              }
+              shadow_probe_candidates.append(candidate_record)
+              probe_candidate_info_by_barcode[barcode] = candidate_record
+
+          shadow_probe_candidates.sort(
+              key=lambda row: (
+                  core_food_group_priority.get(row.get("basket_group") or "", 99),
+                  -(1 if row.get("has_equivalence_group") else 0),
+                  -(1 if row.get("has_same_product_identity") else 0),
+                  -row.get("exact_store_coverage_count", 0),
+                  -(1 if row.get("has_pack_signature") else 0),
+                  row.get("name") or "",
+                  row["barcode"],
+              )
+          )
+
+          improved_selected_probe_barcodes = []
+          improved_selected_probe_barcode_set = set()
+          improved_group_counts = Counter()
+          improved_selection_reason_by_barcode = {}
+          for group_name, _ in core_food_group_rules:
+              for candidate in shadow_probe_candidates:
+                  if candidate["barcode"] in improved_selected_probe_barcode_set or candidate.get("basket_group") != group_name:
+                      continue
+                  if not candidate.get("is_selected_candidate"):
+                      continue
+                  improved_selected_probe_barcodes.append(candidate["barcode"])
+                  improved_selected_probe_barcode_set.add(candidate["barcode"])
+                  improved_group_counts[group_name] += 1
+                  improved_selection_reason_by_barcode[candidate["barcode"]] = "group_priority_leader"
+                  break
+          for candidate in shadow_probe_candidates:
+              if len(improved_selected_probe_barcodes) >= max(probe_target_sizes):
+                  break
+              if candidate["barcode"] in improved_selected_probe_barcode_set or not candidate.get("is_selected_candidate"):
+                  continue
+              group_name = candidate.get("basket_group") or "__other__"
+              if improved_group_counts[group_name] >= 2:
+                  continue
+              improved_selected_probe_barcodes.append(candidate["barcode"])
+              improved_selected_probe_barcode_set.add(candidate["barcode"])
+              improved_group_counts[group_name] += 1
+              improved_selection_reason_by_barcode[candidate["barcode"]] = "best_remaining_core_food_candidate"
+          for candidate in shadow_probe_candidates:
+              if len(improved_selected_probe_barcodes) >= max(probe_target_sizes):
+                  break
+              if candidate["barcode"] in improved_selected_probe_barcode_set or not candidate.get("is_selected_candidate"):
+                  continue
+              improved_selected_probe_barcodes.append(candidate["barcode"])
+              improved_selected_probe_barcode_set.add(candidate["barcode"])
+              improved_group_counts[candidate.get("basket_group") or "__other__"] += 1
+              improved_selection_reason_by_barcode[candidate["barcode"]] = "core_food_fallback_after_group_cap"
+
+          improved_selected_probe_items = []
+          for probe_index, barcode in enumerate(improved_selected_probe_barcodes, start=1):
+              metadata = shadow_product_probe_metadata_by_barcode.get(barcode, {})
+              exact_rows = [
+                  price_row_by_store_barcode[(store_key, barcode)]
+                  for store_key in sorted(barcode_store_key_map.get(barcode, set()))
+                  if (store_key, barcode) in price_row_by_store_barcode
+              ]
+              reference_prices = [comparison_price_value(row) for row in exact_rows if comparison_price_value(row) is not None]
+              reference_unit_prices = [
+                  compute_unit_price_from_pack(comparison_price_value(row), metadata.get("pack_signature"))
+                  for row in exact_rows
+                  if comparison_price_value(row) is not None and metadata.get("pack_signature")
+              ]
+              improved_selected_probe_items.append({
+                  "probe_index": probe_index,
+                  "barcode": barcode,
+                  "name": metadata.get("name"),
+                  "category": metadata.get("category"),
+                  "brand": metadata.get("brand"),
+                  "substitute_group": metadata.get("substitute_group"),
+                  "gf_flag": metadata.get("gf_flag"),
+                  "gf_verified": metadata.get("gf_verified"),
+                  "requires_gluten_preservation": metadata.get("requires_gluten_preservation", False),
+                  "line_signature": metadata.get("line_signature"),
+                  "pack_signature": metadata.get("pack_signature"),
+                  "exact_store_coverage_count": len(barcode_store_key_map.get(barcode, set())),
+                  "reference_effective_price_median": median_number(reference_prices),
+                  "reference_unit_price_median": median_number(reference_unit_prices),
+                  "selection_reason": improved_selection_reason_by_barcode.get(barcode),
+                  "basket_group": probe_candidate_info_by_barcode.get(barcode, {}).get("basket_group"),
+              })
+
+          write_json(OUT_DIR / "core_food_basket_probe_items.json", {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "baseline_reference": "legacy_same_run_shadow_probe_selection",
+              "selected_probe_items": improved_selected_probe_items,
+              "excluded_candidates": [
+                  {
+                      "barcode": candidate["barcode"],
+                      "name": candidate.get("name"),
+                      "category": candidate.get("category"),
+                      "basket_group": candidate.get("basket_group"),
+                      "reasons": candidate.get("reasons") if candidate["barcode"] not in improved_selected_probe_barcode_set else [improved_selection_reason_by_barcode.get(candidate["barcode"])],
+                  }
+                  for candidate in shadow_probe_candidates
+                  if candidate["barcode"] not in improved_selected_probe_barcode_set
+              ],
+          })
+
+          legacy_probe_quality = summarize_probe_selection_quality(legacy_selected_probe_items[:max(probe_target_sizes)], probe_candidate_info_by_barcode)
+          improved_probe_quality = summarize_probe_selection_quality(improved_selected_probe_items[:max(probe_target_sizes)], probe_candidate_info_by_barcode)
+          write_json(OUT_DIR / "core_food_basket_probe_quality_summary.json", {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "baseline_reference": "legacy_same_run_shadow_probe_selection",
+              "before": legacy_probe_quality,
+              "after": improved_probe_quality,
+              "category_composition_after": improved_probe_quality["basket_group_composition"],
+              "probe_cleanliness_delta": {
+                  "core_food_count_delta": improved_probe_quality["selected_core_food_count"] - legacy_probe_quality["selected_core_food_count"],
+                  "non_food_or_suspicious_delta": improved_probe_quality["selected_non_food_or_suspicious_count"] - legacy_probe_quality["selected_non_food_or_suspicious_count"],
+                  "snack_or_sweet_delta": improved_probe_quality["selected_snack_or_sweet_count"] - legacy_probe_quality["selected_snack_or_sweet_count"],
+              },
+              "materially_cleaner_and_more_food_first": (
+                  improved_probe_quality["selected_non_food_or_suspicious_count"] < legacy_probe_quality["selected_non_food_or_suspicious_count"]
+                  and improved_probe_quality["selected_snack_or_sweet_count"] < legacy_probe_quality["selected_snack_or_sweet_count"]
+                  and improved_probe_quality["selected_core_food_count"] >= legacy_probe_quality["selected_core_food_count"]
+              ),
+          })
+
+          product_probe_metadata_by_barcode = shadow_product_probe_metadata_by_barcode
+          selected_probe_items = improved_selected_probe_items
+          basket_probe_definitions = [
+              {
+                  "basket_probe_name": "core_food_basket_10",
+                  "requested_probe_size": 10,
+                  "selected_probe_size": min(10, len(selected_probe_items)),
+                  "items": selected_probe_items[:min(10, len(selected_probe_items))],
+              },
+              {
+                  "basket_probe_name": "core_food_basket_20",
+                  "requested_probe_size": 20,
+                  "selected_probe_size": min(20, len(selected_probe_items)),
+                  "items": selected_probe_items[:min(20, len(selected_probe_items))],
+              },
+          ]
+
+          product_match_derivation_audit = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "deterministic_derivations_added": {
+                  "brand_identity_key": "normalized brand plus manufacturer tokens with corporate suffix removal",
+                  "line_signature": "name tokens with pack expressions, numeric noise, and brand/manufacturer tokens removed",
+                  "pack_signature": "legacy pack parsing plus amount-first multipack parsing when unit evidence is explicit",
+                  "equivalence_group_key": "explicit substitute_group first, otherwise derived category plus stable form-factor signature when at least two stable tokens exist",
+                  "same_product_identity_key": "category plus normalized brand identity plus exact family signature",
+              },
+              "selected_probe_metadata_coverage": {
+                  "selected_probe_item_count": len(selected_probe_items),
+                  "with_pack_signature_count": sum(1 for item in selected_probe_items if product_probe_metadata_by_barcode.get(item["barcode"], {}).get("pack_signature")),
+                  "with_equivalence_group_key_count": sum(1 for item in selected_probe_items if product_probe_metadata_by_barcode.get(item["barcode"], {}).get("equivalence_group_key")),
+                  "with_same_product_identity_key_count": sum(1 for item in selected_probe_items if product_probe_metadata_by_barcode.get(item["barcode"], {}).get("same_product_identity_key")),
+                  "derived_equivalence_group_count": sum(1 for item in selected_probe_items if product_probe_metadata_by_barcode.get(item["barcode"], {}).get("equivalence_group_source") == "derived_category_form_factor"),
+                  "legacy_pack_signature_count": sum(1 for item in selected_probe_items if product_probe_metadata_by_barcode.get(item["barcode"], {}).get("pack_signature_source") == "legacy_pack_signature"),
+                  "amount_first_multipack_count": sum(1 for item in selected_probe_items if product_probe_metadata_by_barcode.get(item["barcode"], {}).get("pack_signature_source") == "amount_first_multipack"),
+              },
+              "allowed_upgrade_rules": {
+                  "same_product_unit_normalized": "same_product_identity_key plus compatible pack dimension plus explicit unit-price normalization plus GF preservation when relevant",
+                  "canonical_equivalent": "equivalence_group_key plus same category plus same form_factor_key plus GF preservation when relevant",
+              },
+              "forbidden_shortcuts": [
+                  "same brand alone",
+                  "similar-looking product name alone",
+                  "same category alone",
+                  "same substitute group alone without supporting derived evidence",
+                  "cross-category replacement",
+                  "GF inference from product name",
+              ],
+          }
+          write_json(OUT_DIR / "product_match_derivation_audit.json", product_match_derivation_audit)
+
+          comparison_source_contract = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "price_source": {
+                  "source_name": "official_current_price_rows",
+                  "origin": "prices_payload built from official chain current price files in this workflow",
+                  "allowed_fields": ["effective_price", "regular_price", "price", "store_key", "barcode"],
+                  "refused_inference": "price is never inferred from product metadata or secondary sources",
+              },
+              "product_metadata_source": {
+                  "source_name": "workflow_product_metadata",
+                  "origin": ["products_payload", "existing_products lookup"],
+                  "available_existing_product_fields": existing_product_fields,
+                  "allowed_fields": ["barcode", "name", "category", "brand", "manufacturer", "substitute_group", "gf_flag", "gf_verified"],
+                  "deterministic_derivation": ["brand_identity_key", "line_signature", "family_signature_key", "form_factor_key", "equivalence_group_key", "same_product_identity_key", "pack_signature"],
+                  "refused_inference": "no loose fuzzy family inference outside explicit fields and deterministic signatures",
+              },
+              "gf_source": {
+                  "source_name": "explicit_gf_metadata_only",
+                  "allowed_fields": ["gf_flag", "gf_verified"],
+                  "refused_inference": "gluten-free status is never inferred from the product name",
+              },
+              "equivalence_source": {
+                  "source_name": "explicit_or_narrow_deterministic_metadata",
+                  "allowed_fields": ["substitute_group", "category", "brand", "manufacturer", "name", "gf_flag", "gf_verified"],
+                  "deterministic_derivation": ["equivalence_group_key", "family_signature_key", "form_factor_key", "same_product_identity_key"],
+                  "refused_inference": "no same-brand-only, same-category-only, or loose text-only equivalence",
+              },
+              "normalization_source": {
+                  "source_name": "pack_signature_from_explicit_pack_text",
+                  "allowed_fields": ["name"],
+                  "deterministic_derivation": ["pack_signature", "reference_unit_price_median"],
+                  "refused_inference": "no unit normalization without explicit unit and quantity evidence",
+              },
+          }
+          write_json(OUT_DIR / "comparison_source_contract.json", comparison_source_contract)
+
+          shadow_store_rows_by_equivalence_group = defaultdict(lambda: defaultdict(list))
+          shadow_store_rows_by_same_product_key = defaultdict(lambda: defaultdict(list))
+          for row in prices_payload:
+              store_key = row.get("store_key")
+              barcode = row.get("barcode")
+              if store_key not in target_store_keys or not barcode:
+                  continue
+              metadata = product_probe_metadata_by_barcode.get(barcode, {})
+              if metadata.get("equivalence_group_key"):
+                  shadow_store_rows_by_equivalence_group[store_key][metadata["equivalence_group_key"]].append(row)
+              if metadata.get("same_product_identity_key"):
+                  shadow_store_rows_by_same_product_key[store_key][metadata["same_product_identity_key"]].append(row)
+          for store_group_map in list(shadow_store_rows_by_equivalence_group.values()) + list(shadow_store_rows_by_same_product_key.values()):
+              for group_rows in store_group_map.values():
+                  group_rows.sort(
+                      key=lambda row: (
+                          comparison_price_value(row) is None,
+                          comparison_price_value(row) if comparison_price_value(row) is not None else 10**9,
+                          row.get("barcode", ""),
+                      )
+                  )
+
+          def normalized_anchor_line_price_from_metadata(metadata_by_barcode, anchor_probe: dict, candidate_unit_price):
+              if candidate_unit_price is None:
+                  return None
+              anchor_pack = anchor_probe.get("pack_signature") or metadata_by_barcode.get(anchor_probe["barcode"], {}).get("pack_signature")
+              if not anchor_pack:
+                  return None
+              anchor_qty = anchor_pack.get("total_base_qty")
+              if anchor_qty is None or anchor_qty <= 0:
+                  return None
+              return round(candidate_unit_price * anchor_qty, 6)
+
+          def budget_candidate_line_price_from_metadata(metadata_by_barcode, anchor_probe: dict, budget_match: dict):
+              comparison_basis = budget_match.get("comparison_basis")
+              if comparison_basis and comparison_basis.startswith("unit_price"):
+                  return normalized_anchor_line_price_from_metadata(metadata_by_barcode, anchor_probe, budget_match.get("candidate_compare_price"))
+              if comparison_basis and comparison_basis.startswith("same_pack_direct_price"):
+                  candidate_compare_price = budget_match.get("candidate_compare_price")
+                  if candidate_compare_price is None:
+                      return None
+                  return round(candidate_compare_price, 6)
+              return None
+
+          def legacy_find_unit_normalized_match(anchor_probe: dict, store_key: str):
+              anchor_barcode = anchor_probe["barcode"]
+              anchor_meta = legacy_product_probe_metadata_by_barcode.get(anchor_barcode, {})
+              substitute_group_value = clean_text(anchor_meta.get("substitute_group"))
+              if not substitute_group_value:
+                  return None, "not_proven_no_substitute_group"
+              anchor_pack = anchor_meta.get("pack_signature")
+              if not anchor_pack:
+                  return None, "not_proven_no_anchor_pack_signature"
+              if not anchor_meta.get("line_signature"):
+                  return None, "not_proven_no_anchor_line_signature"
+              if not anchor_meta.get("brand_key"):
+                  return None, "not_proven_no_anchor_brand_key"
+              anchor_category_key = anchor_meta.get("category_key")
+              any_family_candidate = False
+              for candidate_row in store_rows_by_substitute_group.get(store_key, {}).get(substitute_group_value, []):
+                  candidate_barcode = candidate_row.get("barcode")
+                  if candidate_barcode == anchor_barcode:
+                      continue
+                  any_family_candidate = True
+                  candidate_meta = legacy_product_probe_metadata_by_barcode.get(candidate_barcode, {})
+                  if candidate_meta.get("category_key") != anchor_category_key:
+                      continue
+                  if candidate_meta.get("brand_key") != anchor_meta.get("brand_key"):
+                      continue
+                  if candidate_meta.get("line_signature") != anchor_meta.get("line_signature"):
+                      continue
+                  candidate_pack = candidate_meta.get("pack_signature")
+                  if not candidate_pack:
+                      continue
+                  if candidate_pack.get("dimension") != anchor_pack.get("dimension"):
+                      continue
+                  if abs(candidate_pack.get("total_base_qty", 0.0) - anchor_pack.get("total_base_qty", 0.0)) < 0.0001:
+                      continue
+                  candidate_unit_price = compute_unit_price_from_pack(comparison_price_value(candidate_row), candidate_pack)
+                  if candidate_unit_price is None:
+                      continue
+                  return {
+                      "matched_barcode": candidate_barcode,
+                      "candidate_unit_price": candidate_unit_price,
+                  }, ""
+              if any_family_candidate:
+                  return None, "not_proven_no_unit_normalized_same_product_match"
+              return None, "no_store_candidate_in_substitute_group"
+
+          def legacy_find_canonical_equivalent_match(anchor_probe: dict, store_key: str):
+              anchor_barcode = anchor_probe["barcode"]
+              anchor_meta = legacy_product_probe_metadata_by_barcode.get(anchor_barcode, {})
+              substitute_group_value = clean_text(anchor_meta.get("substitute_group"))
+              if not substitute_group_value:
+                  return None, "not_proven_no_substitute_group"
+              anchor_category_key = anchor_meta.get("category_key")
+              if not anchor_category_key:
+                  return None, "not_proven_no_anchor_category"
+              if not anchor_meta.get("line_signature"):
+                  return None, "not_proven_no_anchor_line_signature"
+              any_family_candidate = False
+              any_category_candidate = False
+              gf_blocked = False
+              for candidate_row in store_rows_by_substitute_group.get(store_key, {}).get(substitute_group_value, []):
+                  candidate_barcode = candidate_row.get("barcode")
+                  if candidate_barcode == anchor_barcode:
+                      continue
+                  any_family_candidate = True
+                  candidate_meta = legacy_product_probe_metadata_by_barcode.get(candidate_barcode, {})
+                  if candidate_meta.get("category_key") != anchor_category_key:
+                      continue
+                  any_category_candidate = True
+                  gf_ok, _ = gluten_preservation_status(anchor_meta, candidate_meta)
+                  if not gf_ok:
+                      gf_blocked = True
+                      continue
+                  if candidate_meta.get("line_signature") != anchor_meta.get("line_signature"):
+                      continue
+                  return {"matched_barcode": candidate_barcode}, ""
+              if gf_blocked:
+                  return None, "not_proven_gf_constraint"
+              if any_category_candidate:
+                  return None, "not_proven_no_canonical_line_match"
+              if any_family_candidate:
+                  return None, "not_proven_no_same_category_candidate"
+              return None, "no_store_candidate_in_substitute_group"
+
+          def legacy_find_budget_alternative_match(anchor_probe: dict, store_key: str):
+              anchor_barcode = anchor_probe["barcode"]
+              anchor_meta = legacy_product_probe_metadata_by_barcode.get(anchor_barcode, {})
+              substitute_group_value = clean_text(anchor_meta.get("substitute_group"))
+              if not substitute_group_value:
+                  return None, "not_proven_no_substitute_group"
+              anchor_category_key = anchor_meta.get("category_key")
+              if not anchor_category_key:
+                  return None, "not_proven_no_anchor_category"
+              anchor_pack = anchor_meta.get("pack_signature")
+              reference_unit_price = anchor_probe.get("reference_unit_price_median")
+              reference_effective_price = anchor_probe.get("reference_effective_price_median")
+              any_family_candidate = False
+              any_price_comparable_candidate = False
+              gf_blocked = False
+              best_candidate = None
+              for candidate_row in store_rows_by_substitute_group.get(store_key, {}).get(substitute_group_value, []):
+                  candidate_barcode = candidate_row.get("barcode")
+                  if candidate_barcode == anchor_barcode:
+                      continue
+                  any_family_candidate = True
+                  candidate_meta = legacy_product_probe_metadata_by_barcode.get(candidate_barcode, {})
+                  if candidate_meta.get("category_key") != anchor_category_key:
+                      continue
+                  gf_ok, _ = gluten_preservation_status(anchor_meta, candidate_meta)
+                  if not gf_ok:
+                      gf_blocked = True
+                      continue
+                  candidate_compare_price = None
+                  reference_compare_price = None
+                  comparison_basis = None
+                  candidate_pack = candidate_meta.get("pack_signature")
+                  if reference_unit_price is not None and anchor_pack and candidate_pack and candidate_pack.get("dimension") == anchor_pack.get("dimension"):
+                      candidate_compare_price = compute_unit_price_from_pack(comparison_price_value(candidate_row), candidate_pack)
+                      reference_compare_price = reference_unit_price
+                      comparison_basis = "unit_price"
+                  elif reference_effective_price is not None and candidate_meta.get("line_signature") and candidate_meta.get("line_signature") == anchor_meta.get("line_signature"):
+                      candidate_compare_price = comparison_price_value(candidate_row)
+                      reference_compare_price = reference_effective_price
+                      comparison_basis = "same_line_price"
+                  if candidate_compare_price is None or reference_compare_price is None:
+                      continue
+                  any_price_comparable_candidate = True
+                  if reference_compare_price <= 0:
+                      continue
+                  savings_pct = round(((reference_compare_price - candidate_compare_price) / reference_compare_price) * 100.0, 2)
+                  if savings_pct < budget_alternative_min_savings_pct:
+                      continue
+                  candidate_payload = {
+                      "matched_barcode": candidate_barcode,
+                      "comparison_basis": comparison_basis,
+                      "candidate_compare_price": round(candidate_compare_price, 6),
+                      "savings_pct": savings_pct,
+                  }
+                  if best_candidate is None or candidate_compare_price < best_candidate["candidate_compare_price"]:
+                      best_candidate = candidate_payload
+              if best_candidate is not None:
+                  return best_candidate, ""
+              if gf_blocked:
+                  return None, "not_proven_gf_constraint"
+              if any_price_comparable_candidate:
+                  return None, "not_cheaper_enough_for_budget_alternative"
+              if any_family_candidate:
+                  return None, "not_proven_no_price_comparable_candidate"
+              return None, "no_store_candidate_in_substitute_group"
+
+          def legacy_resolve_basket_line_shadow_match(anchor_probe: dict, store_key: str):
+              anchor_barcode = anchor_probe["barcode"]
+              if price_row_by_store_barcode.get((store_key, anchor_barcode)):
+                  return {
+                      "source_item_id": anchor_barcode,
+                      "chosen_layer": "exact_identity",
+                      "reason_or_failure_reason": "exact_identity_available",
+                  }
+              unit_match, unit_reason = legacy_find_unit_normalized_match(anchor_probe, store_key)
+              if unit_match:
+                  return {
+                      "source_item_id": anchor_barcode,
+                      "chosen_layer": "same_product_unit_normalized",
+                      "reason_or_failure_reason": "unit_normalized_same_product_match",
+                  }
+              canonical_match, canonical_reason = legacy_find_canonical_equivalent_match(anchor_probe, store_key)
+              if canonical_match:
+                  return {
+                      "source_item_id": anchor_barcode,
+                      "chosen_layer": "canonical_equivalent",
+                      "reason_or_failure_reason": "canonical_equivalent_match",
+                  }
+              budget_match, budget_reason = legacy_find_budget_alternative_match(anchor_probe, store_key)
+              if budget_match:
+                  return {
+                      "source_item_id": anchor_barcode,
+                      "chosen_layer": "budget_alternative",
+                      "reason_or_failure_reason": "budget_alternative_match",
+                  }
+              failure_reason = next(
+                  (
+                      reason for reason in (canonical_reason, unit_reason, budget_reason)
+                      if clean_text(reason).lower().startswith("not_proven")
+                  ),
+                  None,
+              )
+              if not failure_reason:
+                  failure_reason = next(
+                      (
+                          reason for reason in (canonical_reason, unit_reason, budget_reason)
+                          if "gf_constraint" in clean_text(reason).lower()
+                      ),
+                      None,
+                  )
+              if not failure_reason:
+                  failure_reason = canonical_reason or unit_reason or budget_reason or "unmatched_no_proven_layer"
+              failure_reason_text = clean_text(failure_reason).lower()
+              chosen_layer = "not_proven" if failure_reason_text.startswith("not_proven") or "gf_constraint" in failure_reason_text else "unmatched"
+              return {
+                  "source_item_id": anchor_barcode,
+                  "chosen_layer": chosen_layer,
+                  "reason_or_failure_reason": failure_reason,
+              }
+
+          def shadow_find_unit_normalized_match(anchor_probe: dict, store_key: str):
+              anchor_barcode = anchor_probe["barcode"]
+              anchor_meta = product_probe_metadata_by_barcode.get(anchor_barcode, {})
+              same_product_identity_key = clean_text(anchor_meta.get("same_product_identity_key"))
+              if not same_product_identity_key:
+                  return None, "not_proven_no_same_product_identity_key"
+              anchor_pack = anchor_meta.get("pack_signature")
+              if not anchor_pack:
+                  return None, "not_proven_no_anchor_pack_signature"
+              gf_blocked = False
+              best_candidate = None
+              any_same_product_candidate = False
+              for candidate_row in shadow_store_rows_by_same_product_key.get(store_key, {}).get(same_product_identity_key, []):
+                  candidate_barcode = candidate_row.get("barcode")
+                  if candidate_barcode == anchor_barcode:
+                      continue
+                  any_same_product_candidate = True
+                  candidate_meta = product_probe_metadata_by_barcode.get(candidate_barcode, {})
+                  gf_ok, _ = gluten_preservation_status(anchor_meta, candidate_meta)
+                  if not gf_ok:
+                      gf_blocked = True
+                      continue
+                  candidate_pack = candidate_meta.get("pack_signature")
+                  if not candidate_pack:
+                      continue
+                  if candidate_pack.get("dimension") != anchor_pack.get("dimension"):
+                      continue
+                  if abs(candidate_pack.get("total_base_qty", 0.0) - anchor_pack.get("total_base_qty", 0.0)) < 0.0001:
+                      continue
+                  candidate_unit_price = compute_unit_price_from_pack(comparison_price_value(candidate_row), candidate_pack)
+                  if candidate_unit_price is None:
+                      continue
+                  candidate_payload = {
+                      "matched_barcode": candidate_barcode,
+                      "candidate_unit_price": candidate_unit_price,
+                      "normalization_basis": f"{anchor_pack.get('dimension')}_unit_price_normalization",
+                  }
+                  if best_candidate is None or candidate_unit_price < best_candidate["candidate_unit_price"]:
+                      best_candidate = candidate_payload
+              if best_candidate is not None:
+                  return best_candidate, ""
+              if gf_blocked:
+                  return None, "not_proven_gf_constraint"
+              if any_same_product_candidate:
+                  return None, "not_proven_no_unit_normalized_same_product_match"
+              return None, "no_store_candidate_in_same_product_identity_group"
+
+          def shadow_find_canonical_equivalent_match(anchor_probe: dict, store_key: str):
+              anchor_barcode = anchor_probe["barcode"]
+              anchor_meta = product_probe_metadata_by_barcode.get(anchor_barcode, {})
+              equivalence_group_key = clean_text(anchor_meta.get("equivalence_group_key"))
+              if not equivalence_group_key:
+                  return None, "not_proven_no_equivalence_group_key"
+              anchor_category_key = anchor_meta.get("category_key")
+              if not anchor_category_key:
+                  return None, "not_proven_no_anchor_category"
+              anchor_form_factor_key = clean_text(anchor_meta.get("form_factor_key"))
+              if not anchor_form_factor_key:
+                  return None, "not_proven_no_anchor_form_factor_key"
+              any_family_candidate = False
+              any_category_candidate = False
+              any_form_factor_candidate = False
+              gf_blocked = False
+              for candidate_row in shadow_store_rows_by_equivalence_group.get(store_key, {}).get(equivalence_group_key, []):
+                  candidate_barcode = candidate_row.get("barcode")
+                  if candidate_barcode == anchor_barcode:
+                      continue
+                  any_family_candidate = True
+                  candidate_meta = product_probe_metadata_by_barcode.get(candidate_barcode, {})
+                  if candidate_meta.get("category_key") != anchor_category_key:
+                      continue
+                  any_category_candidate = True
+                  if clean_text(candidate_meta.get("form_factor_key")) != anchor_form_factor_key:
+                      continue
+                  any_form_factor_candidate = True
+                  gf_ok, _ = gluten_preservation_status(anchor_meta, candidate_meta)
+                  if not gf_ok:
+                      gf_blocked = True
+                      continue
+                  if comparison_price_value(candidate_row) is None:
+                      continue
+                  return {
+                      "matched_barcode": candidate_barcode,
+                      "equivalence_basis": "same_equivalence_group_same_category_same_form_factor",
+                  }, ""
+              if gf_blocked:
+                  return None, "not_proven_gf_constraint"
+              if any_form_factor_candidate:
+                  return None, "not_proven_no_canonical_price_candidate"
+              if any_category_candidate:
+                  return None, "not_proven_no_matching_form_factor_candidate"
+              if any_family_candidate:
+                  return None, "not_proven_no_same_category_candidate"
+              return None, "no_store_candidate_in_equivalence_group"
+
+          def shadow_find_budget_alternative_match(anchor_probe: dict, store_key: str):
+              anchor_barcode = anchor_probe["barcode"]
+              anchor_meta = product_probe_metadata_by_barcode.get(anchor_barcode, {})
+              equivalence_group_key = clean_text(anchor_meta.get("equivalence_group_key"))
+              if not equivalence_group_key:
+                  return None, "not_proven_no_equivalence_group_key"
+              anchor_category_key = anchor_meta.get("category_key")
+              if not anchor_category_key:
+                  return None, "not_proven_no_anchor_category"
+              anchor_form_factor_key = clean_text(anchor_meta.get("form_factor_key"))
+              if not anchor_form_factor_key:
+                  return None, "not_proven_no_anchor_form_factor_key"
+              anchor_pack = anchor_meta.get("pack_signature")
+              reference_unit_price = anchor_probe.get("reference_unit_price_median")
+              reference_effective_price = anchor_probe.get("reference_effective_price_median")
+              any_family_candidate = False
+              any_price_comparable_candidate = False
+              gf_blocked = False
+              best_candidate = None
+              for candidate_row in shadow_store_rows_by_equivalence_group.get(store_key, {}).get(equivalence_group_key, []):
+                  candidate_barcode = candidate_row.get("barcode")
+                  if candidate_barcode == anchor_barcode:
+                      continue
+                  any_family_candidate = True
+                  candidate_meta = product_probe_metadata_by_barcode.get(candidate_barcode, {})
+                  if candidate_meta.get("category_key") != anchor_category_key:
+                      continue
+                  if clean_text(candidate_meta.get("form_factor_key")) != anchor_form_factor_key:
+                      continue
+                  gf_ok, _ = gluten_preservation_status(anchor_meta, candidate_meta)
+                  if not gf_ok:
+                      gf_blocked = True
+                      continue
+                  candidate_price_value = comparison_price_value(candidate_row)
+                  if candidate_price_value is None:
+                      continue
+                  candidate_compare_price = None
+                  reference_compare_price = None
+                  comparison_basis = None
+                  candidate_pack = candidate_meta.get("pack_signature")
+                  if reference_unit_price is not None and anchor_pack and candidate_pack and candidate_pack.get("dimension") == anchor_pack.get("dimension"):
+                      candidate_compare_price = compute_unit_price_from_pack(candidate_price_value, candidate_pack)
+                      reference_compare_price = reference_unit_price
+                      comparison_basis = "unit_price_same_form_factor"
+                  elif (
+                      reference_effective_price is not None
+                      and anchor_pack and candidate_pack
+                      and candidate_pack.get("dimension") == anchor_pack.get("dimension")
+                      and abs(candidate_pack.get("total_base_qty", 0.0) - anchor_pack.get("total_base_qty", 0.0)) < 0.0001
+                  ):
+                      candidate_compare_price = candidate_price_value
+                      reference_compare_price = reference_effective_price
+                      comparison_basis = "same_pack_direct_price"
+                  if candidate_compare_price is None or reference_compare_price is None:
+                      continue
+                  any_price_comparable_candidate = True
+                  if reference_compare_price <= 0:
+                      continue
+                  savings_pct = round(((reference_compare_price - candidate_compare_price) / reference_compare_price) * 100.0, 2)
+                  if savings_pct < budget_alternative_min_savings_pct:
+                      continue
+                  candidate_payload = {
+                      "matched_barcode": candidate_barcode,
+                      "comparison_basis": comparison_basis,
+                      "candidate_compare_price": round(candidate_compare_price, 6),
+                      "reference_compare_price": round(reference_compare_price, 6),
+                      "savings_pct": savings_pct,
+                  }
+                  if best_candidate is None or candidate_compare_price < best_candidate["candidate_compare_price"]:
+                      best_candidate = candidate_payload
+              if best_candidate is not None:
+                  return best_candidate, ""
+              if gf_blocked:
+                  return None, "not_proven_gf_constraint"
+              if any_price_comparable_candidate:
+                  return None, "not_cheaper_enough_for_budget_alternative"
+              if any_family_candidate:
+                  return None, "not_proven_no_price_comparable_candidate"
+              return None, "no_store_candidate_in_equivalence_group"
+
+          def basket_failure_bucket(reason: str) -> str:
+              reason_text = clean_text(reason).lower()
+              if not reason_text:
+                  return "unknown"
+              if "gf_constraint" in reason_text:
+                  return "gf_preservation_not_proven"
+              if any(token in reason_text for token in ("no_substitute_group", "no_equivalence_group_key", "no_anchor_category", "no_anchor_line_signature", "no_anchor_form_factor_key")):
+                  return "missing_equivalence_metadata"
+              if any(token in reason_text for token in ("pack", "unit_", "same_product_identity_key")):
+                  return "missing_pack_normalization_evidence"
+              if any(token in reason_text for token in ("no_store_candidate_in_substitute_group", "no_store_candidate_in_equivalence_group", "no_matching_form_factor_candidate", "no_same_category_candidate", "no_canonical_line_match", "no_canonical_price_candidate")):
+                  return "no_proven_equivalent_in_store"
+              if "not_cheaper_enough" in reason_text:
+                  return "budget_alternative_not_meaningfully_cheaper"
+              if "unmatched" in reason_text or "no_exact_identity_match" in reason_text:
+                  return "no_proven_match_in_store"
+              return "other"
+
+          def resolve_basket_line_shadow_match(anchor_probe: dict, store_key: str):
+              anchor_barcode = anchor_probe["barcode"]
+              anchor_meta = product_probe_metadata_by_barcode.get(anchor_barcode, {})
+              anchor_requires_gf = bool(anchor_meta.get("requires_gluten_preservation"))
+              default_gf_source = "explicit_gf_flag_or_gf_verified" if anchor_requires_gf else "not_required"
+              exact_row = price_row_by_store_barcode.get((store_key, anchor_barcode))
+              if exact_row:
+                  exact_price = comparison_price_value(exact_row)
+                  return {
+                      "source_item_id": anchor_barcode,
+                      "matched_item_id": anchor_barcode,
+                      "matched_item_name": anchor_meta.get("name"),
+                      "chosen_layer": "exact_identity",
+                      "confidence_class": line_confidence_class("exact_identity"),
+                      "price_evidence_source": "official_current_price_rows_exact_barcode",
+                      "metadata_evidence_source": "barcode_identity_from_official_price_row",
+                      "gf_evidence_source": default_gf_source,
+                      "equivalence_basis": "same_barcode",
+                      "normalization_basis": "not_required",
+                      "reason_or_failure_reason": "exact_identity_available",
+                      "baseline_line_price": exact_price,
+                      "budget_line_price": None,
+                      "matched_price_value": exact_price,
+                      "budget_savings_pct": None,
+                      "anchor_requires_gluten_preservation": anchor_requires_gf,
+                  }
+
+              unit_match, unit_reason = shadow_find_unit_normalized_match(anchor_probe, store_key)
+              if unit_match:
+                  matched_barcode = unit_match.get("matched_barcode")
+                  candidate_row = price_row_by_store_barcode.get((store_key, matched_barcode))
+                  normalized_line_price = normalized_anchor_line_price_from_metadata(product_probe_metadata_by_barcode, anchor_probe, unit_match.get("candidate_unit_price"))
+                  return {
+                      "source_item_id": anchor_barcode,
+                      "matched_item_id": matched_barcode,
+                      "matched_item_name": product_probe_metadata_by_barcode.get(matched_barcode, {}).get("name"),
+                      "chosen_layer": "same_product_unit_normalized",
+                      "confidence_class": line_confidence_class("same_product_unit_normalized"),
+                      "price_evidence_source": "official_current_price_rows_normalized_by_pack_signature",
+                      "metadata_evidence_source": "workflow_product_metadata_same_product_identity_key_pack_signature",
+                      "gf_evidence_source": default_gf_source,
+                      "equivalence_basis": "same_product_identity_key_same_category_same_brand_identity",
+                      "normalization_basis": unit_match.get("normalization_basis") or "pack_signature_dimension_unit_normalization",
+                      "reason_or_failure_reason": "unit_normalized_same_product_match",
+                      "baseline_line_price": normalized_line_price,
+                      "budget_line_price": None,
+                      "matched_price_value": comparison_price_value(candidate_row) if candidate_row else None,
+                      "budget_savings_pct": None,
+                      "anchor_requires_gluten_preservation": anchor_requires_gf,
+                  }
+
+              canonical_match, canonical_reason = shadow_find_canonical_equivalent_match(anchor_probe, store_key)
+              if canonical_match:
+                  matched_barcode = canonical_match.get("matched_barcode")
+                  candidate_row = price_row_by_store_barcode.get((store_key, matched_barcode))
+                  candidate_meta = product_probe_metadata_by_barcode.get(matched_barcode, {})
+                  anchor_pack = anchor_meta.get("pack_signature")
+                  candidate_pack = candidate_meta.get("pack_signature")
+                  normalization_basis = "direct_price_same_form_factor"
+                  if anchor_pack and candidate_pack and candidate_pack.get("dimension") == anchor_pack.get("dimension"):
+                      if abs(candidate_pack.get("total_base_qty", 0.0) - anchor_pack.get("total_base_qty", 0.0)) < 0.0001:
+                          normalization_basis = "same_pack_verified"
+                      else:
+                          normalization_basis = "direct_price_used_same_form_factor_diff_pack"
+                  return {
+                      "source_item_id": anchor_barcode,
+                      "matched_item_id": matched_barcode,
+                      "matched_item_name": candidate_meta.get("name"),
+                      "chosen_layer": "canonical_equivalent",
+                      "confidence_class": line_confidence_class("canonical_equivalent"),
+                      "price_evidence_source": "official_current_price_rows_canonical_candidate",
+                      "metadata_evidence_source": "workflow_product_metadata_equivalence_group_form_factor",
+                      "gf_evidence_source": default_gf_source,
+                      "equivalence_basis": canonical_match.get("equivalence_basis") or "same_equivalence_group_same_category_same_form_factor",
+                      "normalization_basis": normalization_basis,
+                      "reason_or_failure_reason": "canonical_equivalent_match",
+                      "baseline_line_price": comparison_price_value(candidate_row) if candidate_row else None,
+                      "budget_line_price": None,
+                      "matched_price_value": comparison_price_value(candidate_row) if candidate_row else None,
+                      "budget_savings_pct": None,
+                      "anchor_requires_gluten_preservation": anchor_requires_gf,
+                  }
+
+              budget_match, budget_reason = shadow_find_budget_alternative_match(anchor_probe, store_key)
+              if budget_match:
+                  matched_barcode = budget_match.get("matched_barcode")
+                  candidate_row = price_row_by_store_barcode.get((store_key, matched_barcode))
+                  return {
+                      "source_item_id": anchor_barcode,
+                      "matched_item_id": matched_barcode,
+                      "matched_item_name": product_probe_metadata_by_barcode.get(matched_barcode, {}).get("name"),
+                      "chosen_layer": "budget_alternative",
+                      "confidence_class": line_confidence_class("budget_alternative"),
+                      "price_evidence_source": "official_current_price_rows_budget_candidate",
+                      "metadata_evidence_source": "workflow_product_metadata_equivalence_group_form_factor",
+                      "gf_evidence_source": default_gf_source,
+                      "equivalence_basis": "same_equivalence_group_same_category_same_form_factor_budget_alternative",
+                      "normalization_basis": budget_match.get("comparison_basis") or "not_proven",
+                      "reason_or_failure_reason": "budget_alternative_match",
+                      "baseline_line_price": None,
+                      "budget_line_price": budget_candidate_line_price_from_metadata(product_probe_metadata_by_barcode, anchor_probe, budget_match),
+                      "matched_price_value": comparison_price_value(candidate_row) if candidate_row else None,
+                      "budget_savings_pct": budget_match.get("savings_pct"),
+                      "anchor_requires_gluten_preservation": anchor_requires_gf,
+                  }
+
+              failure_reason = next(
+                  (
+                      reason for reason in (canonical_reason, unit_reason, budget_reason)
+                      if clean_text(reason).lower().startswith("not_proven")
+                  ),
+                  None,
+              )
+              if not failure_reason:
+                  failure_reason = next(
+                      (
+                          reason for reason in (canonical_reason, unit_reason, budget_reason)
+                          if "gf_constraint" in clean_text(reason).lower()
+                      ),
+                      None,
+                  )
+              if not failure_reason:
+                  failure_reason = canonical_reason or unit_reason or budget_reason or "unmatched_no_proven_layer"
+              failure_reason_text = clean_text(failure_reason).lower()
+              chosen_layer = "not_proven" if failure_reason_text.startswith("not_proven") or "gf_constraint" in failure_reason_text else "unmatched"
+              normalization_basis = "not_proven" if chosen_layer == "not_proven" and ("pack" in failure_reason_text or "unit_" in failure_reason_text or "same_product_identity" in failure_reason_text) else "not_applicable"
+              gf_evidence_source = default_gf_source
+              if "gf_constraint" in failure_reason_text:
+                  gf_evidence_source = "gf_constraint_not_proven_from_explicit_metadata"
+              return {
+                  "source_item_id": anchor_barcode,
+                  "matched_item_id": None,
+                  "matched_item_name": None,
+                  "chosen_layer": chosen_layer,
+                  "confidence_class": line_confidence_class(chosen_layer),
+                  "price_evidence_source": "no_usable_official_current_price_match",
+                  "metadata_evidence_source": "workflow_product_metadata_incomplete_or_not_proven",
+                  "gf_evidence_source": gf_evidence_source,
+                  "equivalence_basis": "not_proven" if chosen_layer == "not_proven" else "no_proven_equivalence",
+                  "normalization_basis": normalization_basis,
+                  "reason_or_failure_reason": failure_reason,
+                  "baseline_line_price": None,
+                  "budget_line_price": None,
+                  "matched_price_value": None,
+                  "budget_savings_pct": None,
+                  "anchor_requires_gluten_preservation": anchor_requires_gf,
+              }
+
           basket_line_shadow_rows = []
           basket_store_shadow_rows = []
           for basket_probe in basket_probe_definitions:
@@ -3609,6 +4670,113 @@ jobs:
               ],
           )
 
+          legacy_basket_line_rows_for_impact = []
+          for basket_probe in basket_probe_definitions:
+              basket_probe_name = basket_probe["basket_probe_name"]
+              for store in sorted(discovered_target_stores, key=lambda row: row["store_key"]):
+                  store_key = store["store_key"]
+                  for anchor_probe in basket_probe["items"]:
+                      legacy_decision = legacy_resolve_basket_line_shadow_match(anchor_probe, store_key)
+                      legacy_basket_line_rows_for_impact.append({
+                          "basket_probe_name": basket_probe_name,
+                          "store_key": store_key,
+                          "source_item_id": anchor_probe["barcode"],
+                          "chosen_layer": legacy_decision["chosen_layer"],
+                          "reason_or_failure_reason": legacy_decision["reason_or_failure_reason"],
+                      })
+
+          non_exact_upgrade_impact_summary = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "matching_baseline_reference": "legacy_match_logic_on_improved_core_food_probe_items",
+              "probe_quality_baseline_reference": "legacy_same_run_shadow_probe_selection",
+              "probe_quality_before_after": {
+                  "before": legacy_probe_quality,
+                  "after": improved_probe_quality,
+                  "materially_cleaner_and_more_food_first": (
+                      improved_probe_quality["selected_non_food_or_suspicious_count"] < legacy_probe_quality["selected_non_food_or_suspicious_count"]
+                      and improved_probe_quality["selected_snack_or_sweet_count"] < legacy_probe_quality["selected_snack_or_sweet_count"]
+                      and improved_probe_quality["selected_core_food_count"] >= legacy_probe_quality["selected_core_food_count"]
+                  ),
+              },
+              "basket_probes": {},
+          }
+          for basket_probe in basket_probe_definitions:
+              basket_probe_name = basket_probe["basket_probe_name"]
+              baseline_rows = [
+                  row for row in legacy_basket_line_rows_for_impact
+                  if row["basket_probe_name"] == basket_probe_name
+              ]
+              improved_rows = [
+                  row for row in basket_line_shadow_rows
+                  if row["basket_probe_name"] == basket_probe_name
+              ]
+              baseline_counts = Counter(row["chosen_layer"] for row in baseline_rows)
+              improved_counts = Counter(row["chosen_layer"] for row in improved_rows)
+              improved_row_map = {
+                  (row["store_key"], row["source_item_id"]): row
+                  for row in improved_rows
+              }
+              transition_counts = Counter()
+              upgraded_from_not_proven_counts = Counter()
+              for row in baseline_rows:
+                  key = (row["store_key"], row["source_item_id"])
+                  improved_row = improved_row_map.get(key)
+                  if not improved_row:
+                      continue
+                  before_layer = row["chosen_layer"]
+                  after_layer = improved_row["chosen_layer"]
+                  if before_layer != after_layer:
+                      transition_counts[f"{before_layer}->{after_layer}"] += 1
+                  if before_layer == "not_proven" and after_layer in ("same_product_unit_normalized", "canonical_equivalent", "budget_alternative"):
+                      upgraded_from_not_proven_counts[after_layer] += 1
+              rows_newly_upgraded_from_not_proven = sum(upgraded_from_not_proven_counts.values())
+              non_exact_before = sum(
+                  baseline_counts.get(layer_name, 0)
+                  for layer_name in ("same_product_unit_normalized", "canonical_equivalent", "budget_alternative")
+              )
+              non_exact_after = sum(
+                  improved_counts.get(layer_name, 0)
+                  for layer_name in ("same_product_unit_normalized", "canonical_equivalent", "budget_alternative")
+              )
+              if rows_newly_upgraded_from_not_proven >= max(3, basket_probe["selected_probe_size"] // 4):
+                  derivation_materiality = "material"
+              elif rows_newly_upgraded_from_not_proven > 0 or non_exact_after > non_exact_before:
+                  derivation_materiality = "marginal"
+              else:
+                  derivation_materiality = "none"
+              non_exact_upgrade_impact_summary["basket_probes"][basket_probe_name] = {
+                  "selected_probe_size": basket_probe["selected_probe_size"],
+                  "before_counts": {
+                      "exact_identity": baseline_counts.get("exact_identity", 0),
+                      "same_product_unit_normalized": baseline_counts.get("same_product_unit_normalized", 0),
+                      "canonical_equivalent": baseline_counts.get("canonical_equivalent", 0),
+                      "budget_alternative": baseline_counts.get("budget_alternative", 0),
+                      "not_proven": baseline_counts.get("not_proven", 0),
+                      "unmatched": baseline_counts.get("unmatched", 0),
+                  },
+                  "after_counts": {
+                      "exact_identity": improved_counts.get("exact_identity", 0),
+                      "same_product_unit_normalized": improved_counts.get("same_product_unit_normalized", 0),
+                      "canonical_equivalent": improved_counts.get("canonical_equivalent", 0),
+                      "budget_alternative": improved_counts.get("budget_alternative", 0),
+                      "not_proven": improved_counts.get("not_proven", 0),
+                      "unmatched": improved_counts.get("unmatched", 0),
+                  },
+                  "rows_newly_upgraded_from_not_proven": rows_newly_upgraded_from_not_proven,
+                  "upgraded_from_not_proven_by_target_layer": dict(upgraded_from_not_proven_counts),
+                  "top_layer_transitions": dict(transition_counts.most_common(10)),
+                  "top_remaining_not_proven_reasons_after": dict(
+                      Counter(
+                          row["reason_or_failure_reason"]
+                          for row in improved_rows
+                          if row["chosen_layer"] == "not_proven"
+                      ).most_common(10)
+                  ),
+                  "derivation_improvement_materiality": derivation_materiality,
+              }
+          write_json(OUT_DIR / "non_exact_upgrade_impact_summary.json", non_exact_upgrade_impact_summary)
+
           basket_shadow_root_cause_summary = {
               "shadow_only": True,
               "publish_gate_impact": "none",
@@ -3682,19 +4850,17 @@ jobs:
           source_items_with_category_evidence = sum(
               1 for barcode in selected_basket_universe_barcodes
               if product_probe_metadata_by_barcode.get(barcode, {}).get("category_key")
+              and product_probe_metadata_by_barcode.get(barcode, {}).get("form_factor_key")
           )
           source_items_with_canonical_equivalence_evidence = sum(
               1 for barcode in selected_basket_universe_barcodes
-              if clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("substitute_group"))
+              if clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("equivalence_group_key"))
               and product_probe_metadata_by_barcode.get(barcode, {}).get("category_key")
-              and clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("line_signature"))
+              and clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("form_factor_key"))
           )
           source_items_with_pack_normalization_evidence = sum(
               1 for barcode in selected_basket_universe_barcodes
-              if clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("substitute_group"))
-              and product_probe_metadata_by_barcode.get(barcode, {}).get("category_key")
-              and clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("line_signature"))
-              and clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("brand_key"))
+              if clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("same_product_identity_key"))
               and product_probe_metadata_by_barcode.get(barcode, {}).get("pack_signature")
           )
           source_items_requiring_gf_preservation = sum(
@@ -3721,9 +4887,9 @@ jobs:
           )
           comparison_source_coverage_gaps = []
           if source_items_with_canonical_equivalence_evidence < len(selected_basket_universe_barcodes):
-              comparison_source_coverage_gaps.append("not every selected basket line has explicit substitute-group and canonical equivalence evidence")
+              comparison_source_coverage_gaps.append("not every selected basket line has provable equivalence-group plus form-factor evidence")
           if source_items_with_pack_normalization_evidence < len(selected_basket_universe_barcodes):
-              comparison_source_coverage_gaps.append("not every selected basket line has provable pack-size normalization evidence")
+              comparison_source_coverage_gaps.append("not every selected basket line has provable same-product identity plus pack-size normalization evidence")
           if source_items_requiring_gf_preservation and source_items_with_explicit_gf_evidence_when_required < source_items_requiring_gf_preservation:
               comparison_source_coverage_gaps.append("some gluten-sensitive basket lines lack explicit GF preservation evidence")
           if basket_20_failure_bucket_counts:
@@ -3744,6 +4910,17 @@ jobs:
                   "with_category_or_product_family_evidence_pct": pct_or_none(source_items_with_category_evidence, len(selected_basket_universe_barcodes)),
                   "with_substitute_or_equivalence_evidence_count": source_items_with_canonical_equivalence_evidence,
                   "with_substitute_or_equivalence_evidence_pct": pct_or_none(source_items_with_canonical_equivalence_evidence, len(selected_basket_universe_barcodes)),
+                  "with_same_product_identity_evidence_count": sum(
+                      1 for barcode in selected_basket_universe_barcodes
+                      if clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("same_product_identity_key"))
+                  ),
+                  "with_same_product_identity_evidence_pct": pct_or_none(
+                      sum(
+                          1 for barcode in selected_basket_universe_barcodes
+                          if clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("same_product_identity_key"))
+                      ),
+                      len(selected_basket_universe_barcodes),
+                  ),
                   "with_pack_or_normalization_evidence_count": source_items_with_pack_normalization_evidence,
                   "with_pack_or_normalization_evidence_pct": pct_or_none(source_items_with_pack_normalization_evidence, len(selected_basket_universe_barcodes)),
                   "requiring_explicit_gf_preservation_count": source_items_requiring_gf_preservation,
@@ -4133,11 +5310,15 @@ jobs:
             out/store_comparison_modes_probe.json
             out/store_comparison_modes_summary.json
             out/store_comparison_modes_root_cause_summary.json
+            out/core_food_basket_probe_items.json
+            out/core_food_basket_probe_quality_summary.json
+            out/product_match_derivation_audit.json
             out/basket_line_shadow_matches.csv
             out/basket_store_shadow_summary.csv
             out/basket_shadow_root_cause_summary.json
             out/comparison_source_coverage_audit.json
             out/comparison_source_contract.json
+            out/non_exact_upgrade_impact_summary.json
             out/source_freshness_by_store.csv
             out/source_freshness_summary.json
             out/store_set_consistency.json
