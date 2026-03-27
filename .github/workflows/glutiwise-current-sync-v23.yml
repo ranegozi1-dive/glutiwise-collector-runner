@@ -2607,10 +2607,43 @@ jobs:
               )
           )
 
+          def looks_like_core_food_probe_candidate(category: str, name: str) -> bool:
+              text = clean_lookup_text(" ".join(filter(None, [category, name]))).lower()
+              if not text:
+                  return False
+              exclude_tokens = {
+                  "beauty", "cosmetic", "pharm", "drug", "care", "clean", "laundry", "diaper", "toilet", "paper",
+                  "pet", "dog", "cat", "household", "kitchen", "bath", "electrical", "toy",
+                  "snack", "chips", "candy", "chocolate", "cookie", "biscuit", "energy", "cola", "soda", "beer", "wine",
+                  "ביוטי", "קוסמט", "פארם", "טואלט", "חיתול", "ניקוי", "כביסה", "חיות", "מחמד", "בית", "טיפוח",
+                  "חטיף", "חטיפים", "נשנוש", "נשנושים", "ממתק", "ממתקים", "שוקולד", "עוגיה", "עוגיות", "ביסקוויט", "ביסקוויטים",
+                  "משקה אנרגיה", "בירה", "יין",
+              }
+              include_tokens = {
+                  "food", "grocery", "bread", "bakery", "milk", "dairy", "cheese", "yogurt", "egg", "eggs",
+                  "cereal", "oats", "rice", "pasta", "flour", "oil", "sauce", "vegetable", "fruit", "frozen vegetable",
+                  "meat", "fish", "chicken", "legume", "bean", "lentil", "tuna", "water",
+                  "מזון", "מכולת", "לחם", "מאפה", "חלב", "מוצרי חלב", "גבינה", "יוגורט", "ביצה", "ביצים", "דגני", "שיבולת", "אורז",
+                  "פסטה", "קמח", "שמן", "רוטב", "ירק", "ירקות", "פירות", "פירות וירקות", "קפוא", "קפואים", "בשר", "דג", "עוף",
+                  "קטניות", "שעועית", "עדשים", "טונה", "מים",
+              }
+              if any(token in text for token in exclude_tokens):
+                  return False
+              return any(token in text for token in include_tokens)
+
           selected_probe_barcodes = []
           selected_probe_barcode_set = set()
           selected_probe_category_counts = Counter()
-          for candidate in probe_candidates:
+          preferred_probe_candidates = [
+              candidate for candidate in probe_candidates
+              if looks_like_core_food_probe_candidate(candidate.get("category") or "", candidate.get("name") or "")
+          ]
+          fallback_probe_candidates = [
+              candidate for candidate in probe_candidates
+              if candidate["barcode"] not in {row["barcode"] for row in preferred_probe_candidates}
+          ]
+          probe_candidate_scan_order = preferred_probe_candidates + fallback_probe_candidates
+          for candidate in probe_candidate_scan_order:
               if len(selected_probe_barcodes) >= max(probe_target_sizes):
                   break
               category_key = candidate.get("category_key") or "__uncategorized__"
@@ -3048,7 +3081,7 @@ jobs:
               "shadow_only": True,
               "publish_gate_impact": "none",
               "probe_method": {
-                  "selection_basis": "highest-coverage exact-barcode universe with category-capped diversity",
+                  "selection_basis": "core-food-first exact-barcode universe with category-capped diversity and fallback to highest-coverage exact items",
                   "category_cap_per_probe_category": probe_category_cap,
                   "probe_sizes": list(probe_target_sizes),
                   "budget_alternative_min_savings_pct": budget_alternative_min_savings_pct,
@@ -3142,6 +3175,592 @@ jobs:
                   "root_cause_signal_counts": root_cause_signal_counts,
               }
           write_json(OUT_DIR / "store_comparison_modes_root_cause_summary.json", comparison_modes_root_cause_summary)
+
+          def line_confidence_class(chosen_layer: str) -> str:
+              return {
+                  "exact_identity": "high",
+                  "same_product_unit_normalized": "high",
+                  "canonical_equivalent": "medium",
+                  "budget_alternative": "diagnostic_only",
+                  "not_proven": "not_proven",
+                  "unmatched": "no_match",
+              }.get(chosen_layer, "unknown")
+
+          def line_confidence_score(chosen_layer: str):
+              return {
+                  "exact_identity": 100.0,
+                  "same_product_unit_normalized": 95.0,
+                  "canonical_equivalent": 75.0,
+                  "budget_alternative": 40.0,
+                  "not_proven": 15.0,
+                  "unmatched": 0.0,
+              }.get(chosen_layer, 0.0)
+
+          def pct_or_none(part: int, total: int):
+              if total <= 0:
+                  return None
+              return round((part / total) * 100.0, 2)
+
+          def normalized_anchor_line_price(anchor_probe: dict, candidate_unit_price):
+              if candidate_unit_price is None:
+                  return None
+              anchor_pack = product_probe_metadata_by_barcode.get(anchor_probe["barcode"], {}).get("pack_signature")
+              if not anchor_pack:
+                  return None
+              anchor_qty = anchor_pack.get("total_base_qty")
+              if anchor_qty is None or anchor_qty <= 0:
+                  return None
+              return round(candidate_unit_price * anchor_qty, 6)
+
+          def budget_candidate_line_price(anchor_probe: dict, budget_match: dict):
+              comparison_basis = budget_match.get("comparison_basis")
+              if comparison_basis == "unit_price":
+                  return normalized_anchor_line_price(anchor_probe, budget_match.get("candidate_compare_price"))
+              if comparison_basis == "same_line_price":
+                  candidate_compare_price = budget_match.get("candidate_compare_price")
+                  if candidate_compare_price is None:
+                      return None
+                  return round(candidate_compare_price, 6)
+              return None
+
+          def basket_failure_bucket(reason: str) -> str:
+              reason_text = clean_text(reason).lower()
+              if not reason_text:
+                  return "unknown"
+              if "gf_constraint" in reason_text:
+                  return "gf_preservation_not_proven"
+              if "no_substitute_group" in reason_text or "no_anchor_category" in reason_text or "no_anchor_line_signature" in reason_text:
+                  return "missing_equivalence_metadata"
+              if "pack" in reason_text or "unit_" in reason_text:
+                  return "missing_pack_normalization_evidence"
+              if "no_store_candidate_in_substitute_group" in reason_text or "no_same_category_candidate" in reason_text or "no_canonical_line_match" in reason_text:
+                  return "no_proven_equivalent_in_store"
+              if "not_cheaper_enough" in reason_text:
+                  return "budget_alternative_not_meaningfully_cheaper"
+              if "unmatched" in reason_text or "no_exact_identity_match" in reason_text:
+                  return "no_proven_match_in_store"
+              return "other"
+
+          basket_probe_definitions = [
+              {
+                  "basket_probe_name": "core_food_basket_10",
+                  "requested_probe_size": 10,
+                  "selected_probe_size": min(10, len(selected_probe_items)),
+                  "items": selected_probe_items[:min(10, len(selected_probe_items))],
+              },
+              {
+                  "basket_probe_name": "core_food_basket_20",
+                  "requested_probe_size": 20,
+                  "selected_probe_size": min(20, len(selected_probe_items)),
+                  "items": selected_probe_items[:min(20, len(selected_probe_items))],
+              },
+          ]
+
+          comparison_source_contract = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "price_source": {
+                  "source_name": "official_current_price_rows",
+                  "origin": "prices_payload built from official chain current price files in this workflow",
+                  "allowed_fields": ["effective_price", "regular_price", "price", "store_key", "barcode"],
+                  "refused_inference": "price is never inferred from product metadata or secondary sources",
+              },
+              "product_metadata_source": {
+                  "source_name": "workflow_product_metadata",
+                  "origin": ["products_payload", "existing_products lookup"],
+                  "available_existing_product_fields": existing_product_fields,
+                  "allowed_fields": ["barcode", "name", "category", "brand", "manufacturer", "substitute_group"],
+                  "refused_inference": "no loose fuzzy family inference outside explicit fields and deterministic signatures",
+              },
+              "gf_source": {
+                  "source_name": "explicit_gf_metadata_only",
+                  "allowed_fields": ["gf_flag", "gf_verified"],
+                  "refused_inference": "gluten-free status is never inferred from the product name",
+              },
+              "equivalence_source": {
+                  "source_name": "explicit_or_narrow_deterministic_metadata",
+                  "allowed_fields": ["substitute_group", "category", "line_signature"],
+                  "deterministic_derivation": ["line_signature from cleaned name plus brand/manufacturer", "pack_signature from parsed name text"],
+                  "refused_inference": "no cross-category substitution and no unproven equivalent upgrades",
+              },
+              "normalization_source": {
+                  "source_name": "pack_signature_unit_normalization",
+                  "allowed_basis": "weight_or_volume normalization only when pack signature is provable and dimension-compatible",
+                  "refused_inference": "no normalization without provable pack evidence",
+              },
+          }
+          write_json(OUT_DIR / "comparison_source_contract.json", comparison_source_contract)
+
+          def resolve_basket_line_shadow_match(anchor_probe: dict, store_key: str):
+              anchor_barcode = anchor_probe["barcode"]
+              anchor_meta = product_probe_metadata_by_barcode.get(anchor_barcode, {})
+              anchor_requires_gf = bool(anchor_meta.get("requires_gluten_preservation"))
+              default_gf_source = "explicit_gf_flag_or_gf_verified" if anchor_requires_gf else "not_required"
+              exact_row = price_row_by_store_barcode.get((store_key, anchor_barcode))
+              if exact_row:
+                  exact_price = comparison_price_value(exact_row)
+                  return {
+                      "source_item_id": anchor_barcode,
+                      "matched_item_id": anchor_barcode,
+                      "matched_item_name": anchor_meta.get("name"),
+                      "chosen_layer": "exact_identity",
+                      "confidence_class": line_confidence_class("exact_identity"),
+                      "price_evidence_source": "official_current_price_rows_exact_barcode",
+                      "metadata_evidence_source": "barcode_identity_from_official_price_row",
+                      "gf_evidence_source": default_gf_source,
+                      "equivalence_basis": "same_barcode",
+                      "normalization_basis": "not_required",
+                      "reason_or_failure_reason": "exact_identity_available",
+                      "baseline_line_price": exact_price,
+                      "budget_line_price": None,
+                      "matched_price_value": exact_price,
+                      "budget_savings_pct": None,
+                      "anchor_requires_gluten_preservation": anchor_requires_gf,
+                  }
+
+              unit_match, unit_reason = find_unit_normalized_match(anchor_probe, store_key)
+              if unit_match:
+                  matched_barcode = unit_match.get("matched_barcode")
+                  candidate_row = price_row_by_store_barcode.get((store_key, matched_barcode))
+                  normalized_line_price = normalized_anchor_line_price(anchor_probe, unit_match.get("candidate_unit_price"))
+                  return {
+                      "source_item_id": anchor_barcode,
+                      "matched_item_id": matched_barcode,
+                      "matched_item_name": product_probe_metadata_by_barcode.get(matched_barcode, {}).get("name"),
+                      "chosen_layer": "same_product_unit_normalized",
+                      "confidence_class": line_confidence_class("same_product_unit_normalized"),
+                      "price_evidence_source": "official_current_price_rows_normalized_by_pack_signature",
+                      "metadata_evidence_source": "products_payload_plus_existing_products_substitute_group_category_brand_line_signature",
+                      "gf_evidence_source": default_gf_source,
+                      "equivalence_basis": "same_substitute_group_same_category_same_brand_same_line_signature",
+                      "normalization_basis": "pack_signature_dimension_unit_normalization",
+                      "reason_or_failure_reason": "unit_normalized_same_product_match",
+                      "baseline_line_price": normalized_line_price,
+                      "budget_line_price": None,
+                      "matched_price_value": comparison_price_value(candidate_row) if candidate_row else None,
+                      "budget_savings_pct": None,
+                      "anchor_requires_gluten_preservation": anchor_requires_gf,
+                  }
+
+              canonical_match, canonical_reason = find_canonical_equivalent_match(anchor_probe, store_key)
+              if canonical_match:
+                  matched_barcode = canonical_match.get("matched_barcode")
+                  candidate_row = price_row_by_store_barcode.get((store_key, matched_barcode))
+                  candidate_meta = product_probe_metadata_by_barcode.get(matched_barcode, {})
+                  anchor_pack = anchor_meta.get("pack_signature")
+                  candidate_pack = candidate_meta.get("pack_signature")
+                  normalization_basis = "not_required"
+                  if anchor_pack and candidate_pack and candidate_pack.get("dimension") == anchor_pack.get("dimension"):
+                      if abs(candidate_pack.get("total_base_qty", 0.0) - anchor_pack.get("total_base_qty", 0.0)) < 0.0001:
+                          normalization_basis = "same_pack_verified"
+                      else:
+                          normalization_basis = "direct_price_used_without_size_normalization"
+                  return {
+                      "source_item_id": anchor_barcode,
+                      "matched_item_id": matched_barcode,
+                      "matched_item_name": candidate_meta.get("name"),
+                      "chosen_layer": "canonical_equivalent",
+                      "confidence_class": line_confidence_class("canonical_equivalent"),
+                      "price_evidence_source": "official_current_price_rows_canonical_candidate",
+                      "metadata_evidence_source": "products_payload_plus_existing_products_substitute_group_category_line_signature",
+                      "gf_evidence_source": default_gf_source,
+                      "equivalence_basis": "same_substitute_group_same_category_same_line_signature",
+                      "normalization_basis": normalization_basis,
+                      "reason_or_failure_reason": "canonical_equivalent_match",
+                      "baseline_line_price": comparison_price_value(candidate_row) if candidate_row else None,
+                      "budget_line_price": None,
+                      "matched_price_value": comparison_price_value(candidate_row) if candidate_row else None,
+                      "budget_savings_pct": None,
+                      "anchor_requires_gluten_preservation": anchor_requires_gf,
+                  }
+
+              budget_match, budget_reason = find_budget_alternative_match(anchor_probe, store_key)
+              if budget_match:
+                  matched_barcode = budget_match.get("matched_barcode")
+                  candidate_row = price_row_by_store_barcode.get((store_key, matched_barcode))
+                  return {
+                      "source_item_id": anchor_barcode,
+                      "matched_item_id": matched_barcode,
+                      "matched_item_name": product_probe_metadata_by_barcode.get(matched_barcode, {}).get("name"),
+                      "chosen_layer": "budget_alternative",
+                      "confidence_class": line_confidence_class("budget_alternative"),
+                      "price_evidence_source": "official_current_price_rows_budget_candidate",
+                      "metadata_evidence_source": "products_payload_plus_existing_products_substitute_group_category_line_signature",
+                      "gf_evidence_source": default_gf_source,
+                      "equivalence_basis": "same_substitute_group_same_category_budget_alternative",
+                      "normalization_basis": budget_match.get("comparison_basis") or "not_proven",
+                      "reason_or_failure_reason": "budget_alternative_match",
+                      "baseline_line_price": None,
+                      "budget_line_price": budget_candidate_line_price(anchor_probe, budget_match),
+                      "matched_price_value": comparison_price_value(candidate_row) if candidate_row else None,
+                      "budget_savings_pct": budget_match.get("savings_pct"),
+                      "anchor_requires_gluten_preservation": anchor_requires_gf,
+                  }
+
+              failure_reason = next(
+                  (
+                      reason for reason in (canonical_reason, unit_reason, budget_reason)
+                      if clean_text(reason).lower().startswith("not_proven")
+                  ),
+                  None,
+              )
+              if not failure_reason:
+                  failure_reason = next(
+                      (
+                          reason for reason in (canonical_reason, unit_reason, budget_reason)
+                          if "gf_constraint" in clean_text(reason).lower()
+                      ),
+                      None,
+                  )
+              if not failure_reason:
+                  failure_reason = canonical_reason or unit_reason or budget_reason or "unmatched_no_proven_layer"
+              failure_reason_text = clean_text(failure_reason).lower()
+              chosen_layer = "not_proven" if failure_reason_text.startswith("not_proven") or "gf_constraint" in failure_reason_text else "unmatched"
+              normalization_basis = "not_proven" if chosen_layer == "not_proven" and ("pack" in failure_reason_text or "unit_" in failure_reason_text) else "not_applicable"
+              gf_evidence_source = default_gf_source
+              if "gf_constraint" in failure_reason_text:
+                  gf_evidence_source = "gf_constraint_not_proven_from_explicit_metadata"
+              return {
+                  "source_item_id": anchor_barcode,
+                  "matched_item_id": None,
+                  "matched_item_name": None,
+                  "chosen_layer": chosen_layer,
+                  "confidence_class": line_confidence_class(chosen_layer),
+                  "price_evidence_source": "no_usable_official_current_price_match",
+                  "metadata_evidence_source": "products_payload_plus_existing_products_incomplete_or_not_proven",
+                  "gf_evidence_source": gf_evidence_source,
+                  "equivalence_basis": "not_proven" if chosen_layer == "not_proven" else "no_proven_equivalence",
+                  "normalization_basis": normalization_basis,
+                  "reason_or_failure_reason": failure_reason,
+                  "baseline_line_price": None,
+                  "budget_line_price": None,
+                  "matched_price_value": None,
+                  "budget_savings_pct": None,
+                  "anchor_requires_gluten_preservation": anchor_requires_gf,
+              }
+
+          basket_line_shadow_rows = []
+          basket_store_shadow_rows = []
+          for basket_probe in basket_probe_definitions:
+              basket_probe_name = basket_probe["basket_probe_name"]
+              probe_items = basket_probe["items"]
+              selected_probe_size = basket_probe["selected_probe_size"]
+              for store in sorted(discovered_target_stores, key=lambda row: row["store_key"]):
+                  store_key = store["store_key"]
+                  store_line_decisions = []
+                  for anchor_probe in probe_items:
+                      decision = resolve_basket_line_shadow_match(anchor_probe, store_key)
+                      store_line_decisions.append(decision)
+                      basket_line_shadow_rows.append({
+                          "basket_probe_name": basket_probe_name,
+                          "source_item_id": decision["source_item_id"],
+                          "source_item_name": anchor_probe.get("name"),
+                          "store_key": store_key,
+                          "retailer": store.get("retailer"),
+                          "city": store.get("canonical_city") or store.get("city"),
+                          "matched_item_id": decision["matched_item_id"],
+                          "matched_item_name": decision["matched_item_name"],
+                          "chosen_layer": decision["chosen_layer"],
+                          "confidence_class": decision["confidence_class"],
+                          "price_evidence_source": decision["price_evidence_source"],
+                          "metadata_evidence_source": decision["metadata_evidence_source"],
+                          "gf_evidence_source": decision["gf_evidence_source"],
+                          "gf_constraint_required": decision["anchor_requires_gluten_preservation"],
+                          "equivalence_basis": decision["equivalence_basis"],
+                          "normalization_basis": decision["normalization_basis"],
+                          "matched_price_value": decision["matched_price_value"],
+                          "baseline_line_price": decision["baseline_line_price"],
+                          "budget_line_price": decision["budget_line_price"],
+                          "budget_savings_pct": decision["budget_savings_pct"],
+                          "reason_or_failure_reason": decision["reason_or_failure_reason"],
+                      })
+                  layer_counts = Counter(decision["chosen_layer"] for decision in store_line_decisions)
+                  baseline_line_count = (
+                      layer_counts.get("exact_identity", 0)
+                      + layer_counts.get("same_product_unit_normalized", 0)
+                      + layer_counts.get("canonical_equivalent", 0)
+                  )
+                  full_baseline_coverage = (
+                      baseline_line_count == selected_probe_size
+                      and layer_counts.get("not_proven", 0) == 0
+                      and layer_counts.get("unmatched", 0) == 0
+                  )
+                  high_confidence_baseline_coverage = (
+                      layer_counts.get("exact_identity", 0) + layer_counts.get("same_product_unit_normalized", 0) == selected_probe_size
+                      and layer_counts.get("canonical_equivalent", 0) == 0
+                      and layer_counts.get("not_proven", 0) == 0
+                      and layer_counts.get("unmatched", 0) == 0
+                  )
+                  complete_with_budget_alternatives = (
+                      baseline_line_count + layer_counts.get("budget_alternative", 0) == selected_probe_size
+                      and layer_counts.get("not_proven", 0) == 0
+                      and layer_counts.get("unmatched", 0) == 0
+                  )
+                  baseline_basket_total = None
+                  baseline_line_prices = [
+                      decision["baseline_line_price"]
+                      for decision in store_line_decisions
+                      if decision["chosen_layer"] in ("exact_identity", "same_product_unit_normalized", "canonical_equivalent")
+                  ]
+                  if (
+                      full_baseline_coverage
+                      and len(baseline_line_prices) == selected_probe_size
+                      and all(price is not None for price in baseline_line_prices)
+                  ):
+                      baseline_basket_total = round(sum(baseline_line_prices), 4)
+                  optional_lower_cost_total_with_budget_alternatives = None
+                  if complete_with_budget_alternatives:
+                      basket_line_prices = []
+                      for decision in store_line_decisions:
+                          price_value = decision["baseline_line_price"] if decision["baseline_line_price"] is not None else decision["budget_line_price"]
+                          if price_value is None:
+                              basket_line_prices = []
+                              break
+                          basket_line_prices.append(price_value)
+                      if len(basket_line_prices) == selected_probe_size:
+                          optional_lower_cost_total_with_budget_alternatives = round(sum(basket_line_prices), 4)
+                  failure_reason_counts = Counter(
+                      decision["reason_or_failure_reason"]
+                      for decision in store_line_decisions
+                      if decision["chosen_layer"] in ("not_proven", "unmatched")
+                  )
+                  if high_confidence_baseline_coverage:
+                      basket_summary_reason = "full_high_confidence_baseline_coverage"
+                  elif full_baseline_coverage:
+                      basket_summary_reason = "full_baseline_coverage_with_canonical_equivalent_lines"
+                  elif complete_with_budget_alternatives:
+                      basket_summary_reason = "complete_only_with_budget_alternatives"
+                  else:
+                      basket_summary_reason = ", ".join(
+                          f"{reason}:{count}" for reason, count in failure_reason_counts.most_common(3)
+                      ) or "incomplete_baseline_coverage"
+                  overall_basket_confidence_score = round(
+                      sum(line_confidence_score(decision["chosen_layer"]) for decision in store_line_decisions) / selected_probe_size,
+                      2,
+                  ) if selected_probe_size else None
+                  basket_store_shadow_rows.append({
+                      "basket_probe_name": basket_probe_name,
+                      "store_key": store_key,
+                      "retailer": store.get("retailer"),
+                      "city": store.get("canonical_city") or store.get("city"),
+                      "exact_line_count": layer_counts.get("exact_identity", 0),
+                      "normalized_line_count": layer_counts.get("same_product_unit_normalized", 0),
+                      "canonical_line_count": layer_counts.get("canonical_equivalent", 0),
+                      "budget_alternative_line_count": layer_counts.get("budget_alternative", 0),
+                      "unmatched_line_count": layer_counts.get("unmatched", 0),
+                      "not_proven_line_count": layer_counts.get("not_proven", 0),
+                      "baseline_basket_total": baseline_basket_total,
+                      "optional_lower_cost_total_with_budget_alternatives": optional_lower_cost_total_with_budget_alternatives,
+                      "overall_basket_confidence_score": overall_basket_confidence_score,
+                      "high_confidence_baseline_coverage": high_confidence_baseline_coverage,
+                      "full_baseline_coverage": full_baseline_coverage,
+                      "complete_with_budget_alternatives": complete_with_budget_alternatives,
+                      "reason_passed_or_failed": basket_summary_reason,
+                  })
+
+          write_csv(
+              OUT_DIR / "basket_line_shadow_matches.csv",
+              basket_line_shadow_rows,
+              [
+                  "basket_probe_name",
+                  "source_item_id",
+                  "source_item_name",
+                  "store_key",
+                  "retailer",
+                  "city",
+                  "matched_item_id",
+                  "matched_item_name",
+                  "chosen_layer",
+                  "confidence_class",
+                  "price_evidence_source",
+                  "metadata_evidence_source",
+                  "gf_evidence_source",
+                  "gf_constraint_required",
+                  "equivalence_basis",
+                  "normalization_basis",
+                  "matched_price_value",
+                  "baseline_line_price",
+                  "budget_line_price",
+                  "budget_savings_pct",
+                  "reason_or_failure_reason",
+              ],
+          )
+          write_csv(
+              OUT_DIR / "basket_store_shadow_summary.csv",
+              basket_store_shadow_rows,
+              [
+                  "basket_probe_name",
+                  "store_key",
+                  "retailer",
+                  "city",
+                  "exact_line_count",
+                  "normalized_line_count",
+                  "canonical_line_count",
+                  "budget_alternative_line_count",
+                  "unmatched_line_count",
+                  "not_proven_line_count",
+                  "baseline_basket_total",
+                  "optional_lower_cost_total_with_budget_alternatives",
+                  "overall_basket_confidence_score",
+                  "high_confidence_baseline_coverage",
+                  "full_baseline_coverage",
+                  "complete_with_budget_alternatives",
+                  "reason_passed_or_failed",
+              ],
+          )
+
+          basket_shadow_root_cause_summary = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "budget_alternative_remains_separate_from_baseline": True,
+              "basket_probes": {},
+          }
+          for basket_probe in basket_probe_definitions:
+              basket_probe_name = basket_probe["basket_probe_name"]
+              selected_probe_size = basket_probe["selected_probe_size"]
+              material_line_threshold = max(2, (selected_probe_size + 4) // 5)
+              probe_store_rows = [row for row in basket_store_shadow_rows if row["basket_probe_name"] == basket_probe_name]
+              probe_line_rows = [row for row in basket_line_shadow_rows if row["basket_probe_name"] == basket_probe_name]
+              failure_reason_counts = Counter(
+                  row["reason_or_failure_reason"]
+                  for row in probe_line_rows
+                  if row["chosen_layer"] in ("not_proven", "unmatched")
+              )
+              failure_bucket_counts = Counter(
+                  basket_failure_bucket(row["reason_or_failure_reason"])
+                  for row in probe_line_rows
+                  if row["chosen_layer"] in ("not_proven", "unmatched")
+              )
+              basket_shadow_root_cause_summary["basket_probes"][basket_probe_name] = {
+                  "requested_probe_size": basket_probe["requested_probe_size"],
+                  "selected_probe_size": selected_probe_size,
+                  "stores_supporting_high_confidence_baseline_coverage": sum(
+                      1 for row in probe_store_rows if row["high_confidence_baseline_coverage"]
+                  ),
+                  "stores_supporting_baseline_coverage_including_canonical": sum(
+                      1 for row in probe_store_rows if row["full_baseline_coverage"]
+                  ),
+                  "stores_relying_materially_on_normalized_same_product_matching": sum(
+                      1 for row in probe_store_rows
+                      if row["full_baseline_coverage"] and row["normalized_line_count"] >= material_line_threshold
+                  ),
+                  "stores_relying_materially_on_canonical_equivalents": sum(
+                      1 for row in probe_store_rows
+                      if row["full_baseline_coverage"] and row["canonical_line_count"] >= material_line_threshold
+                  ),
+                  "stores_only_complete_with_budget_alternatives": sum(
+                      1 for row in probe_store_rows
+                      if not row["full_baseline_coverage"] and row["complete_with_budget_alternatives"]
+                  ),
+                  "stores_remaining_incomplete_even_with_budget_alternatives": sum(
+                      1 for row in probe_store_rows
+                      if not row["complete_with_budget_alternatives"]
+                  ),
+                  "current_weak_stores_supporting_high_confidence_baseline_coverage": sum(
+                      1 for row in probe_store_rows
+                      if row["store_key"] in weak_target_store_key_set and row["high_confidence_baseline_coverage"]
+                  ),
+                  "current_weak_stores_supporting_baseline_coverage_including_canonical": sum(
+                      1 for row in probe_store_rows
+                      if row["store_key"] in weak_target_store_key_set and row["full_baseline_coverage"]
+                  ),
+                  "current_weak_stores_only_complete_with_budget_alternatives": sum(
+                      1 for row in probe_store_rows
+                      if row["store_key"] in weak_target_store_key_set and not row["full_baseline_coverage"] and row["complete_with_budget_alternatives"]
+                  ),
+                  "main_blockers": dict(failure_bucket_counts.most_common(5)),
+                  "top_failure_reasons": dict(failure_reason_counts.most_common(10)),
+              }
+          write_json(OUT_DIR / "basket_shadow_root_cause_summary.json", basket_shadow_root_cause_summary)
+
+          selected_basket_universe = selected_probe_items[:min(max(probe_target_sizes), len(selected_probe_items))]
+          selected_basket_universe_barcodes = [item["barcode"] for item in selected_basket_universe]
+          source_items_with_price_evidence = sum(
+              1 for item in selected_basket_universe
+              if item.get("reference_effective_price_median") is not None or item.get("reference_unit_price_median") is not None
+          )
+          source_items_with_category_evidence = sum(
+              1 for barcode in selected_basket_universe_barcodes
+              if product_probe_metadata_by_barcode.get(barcode, {}).get("category_key")
+          )
+          source_items_with_canonical_equivalence_evidence = sum(
+              1 for barcode in selected_basket_universe_barcodes
+              if clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("substitute_group"))
+              and product_probe_metadata_by_barcode.get(barcode, {}).get("category_key")
+              and clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("line_signature"))
+          )
+          source_items_with_pack_normalization_evidence = sum(
+              1 for barcode in selected_basket_universe_barcodes
+              if clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("substitute_group"))
+              and product_probe_metadata_by_barcode.get(barcode, {}).get("category_key")
+              and clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("line_signature"))
+              and clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("brand_key"))
+              and product_probe_metadata_by_barcode.get(barcode, {}).get("pack_signature")
+          )
+          source_items_requiring_gf_preservation = sum(
+              1 for barcode in selected_basket_universe_barcodes
+              if product_probe_metadata_by_barcode.get(barcode, {}).get("requires_gluten_preservation")
+          )
+          source_items_with_explicit_gf_evidence_when_required = sum(
+              1 for barcode in selected_basket_universe_barcodes
+              if product_probe_metadata_by_barcode.get(barcode, {}).get("requires_gluten_preservation")
+              and (
+                  product_probe_metadata_by_barcode.get(barcode, {}).get("gf_flag") is True
+                  or product_probe_metadata_by_barcode.get(barcode, {}).get("gf_verified") is True
+              )
+          )
+          basket_20_line_rows = [
+              row for row in basket_line_shadow_rows
+              if row["basket_probe_name"] == "core_food_basket_20"
+          ]
+          basket_20_layer_counts = Counter(row["chosen_layer"] for row in basket_20_line_rows)
+          basket_20_failure_bucket_counts = Counter(
+              basket_failure_bucket(row["reason_or_failure_reason"])
+              for row in basket_20_line_rows
+              if row["chosen_layer"] in ("not_proven", "unmatched")
+          )
+          comparison_source_coverage_gaps = []
+          if source_items_with_canonical_equivalence_evidence < len(selected_basket_universe_barcodes):
+              comparison_source_coverage_gaps.append("not every selected basket line has explicit substitute-group and canonical equivalence evidence")
+          if source_items_with_pack_normalization_evidence < len(selected_basket_universe_barcodes):
+              comparison_source_coverage_gaps.append("not every selected basket line has provable pack-size normalization evidence")
+          if source_items_requiring_gf_preservation and source_items_with_explicit_gf_evidence_when_required < source_items_requiring_gf_preservation:
+              comparison_source_coverage_gaps.append("some gluten-sensitive basket lines lack explicit GF preservation evidence")
+          if basket_20_failure_bucket_counts:
+              comparison_source_coverage_gaps.append(
+                  "20-item shadow basket still fails mainly due to: "
+                  + ", ".join(
+                      f"{reason}:{count}" for reason, count in basket_20_failure_bucket_counts.most_common(3)
+                  )
+              )
+          write_json(OUT_DIR / "comparison_source_coverage_audit.json", {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "selected_basket_universe_item_count": len(selected_basket_universe_barcodes),
+              "source_item_coverage": {
+                  "with_explicit_price_evidence_count": source_items_with_price_evidence,
+                  "with_explicit_price_evidence_pct": pct_or_none(source_items_with_price_evidence, len(selected_basket_universe_barcodes)),
+                  "with_category_or_product_family_evidence_count": source_items_with_category_evidence,
+                  "with_category_or_product_family_evidence_pct": pct_or_none(source_items_with_category_evidence, len(selected_basket_universe_barcodes)),
+                  "with_substitute_or_equivalence_evidence_count": source_items_with_canonical_equivalence_evidence,
+                  "with_substitute_or_equivalence_evidence_pct": pct_or_none(source_items_with_canonical_equivalence_evidence, len(selected_basket_universe_barcodes)),
+                  "with_pack_or_normalization_evidence_count": source_items_with_pack_normalization_evidence,
+                  "with_pack_or_normalization_evidence_pct": pct_or_none(source_items_with_pack_normalization_evidence, len(selected_basket_universe_barcodes)),
+                  "requiring_explicit_gf_preservation_count": source_items_requiring_gf_preservation,
+                  "with_explicit_gf_evidence_when_required_count": source_items_with_explicit_gf_evidence_when_required,
+                  "with_explicit_gf_evidence_when_required_pct": pct_or_none(source_items_with_explicit_gf_evidence_when_required, source_items_requiring_gf_preservation),
+              },
+              "store_line_shadow_coverage_for_core_food_basket_20": {
+                  "evaluated_store_line_count": len(basket_20_line_rows),
+                  "exact_identity_count": basket_20_layer_counts.get("exact_identity", 0),
+                  "same_product_unit_normalized_count": basket_20_layer_counts.get("same_product_unit_normalized", 0),
+                  "canonical_equivalent_count": basket_20_layer_counts.get("canonical_equivalent", 0),
+                  "budget_alternative_count": basket_20_layer_counts.get("budget_alternative", 0),
+                  "not_proven_count": basket_20_layer_counts.get("not_proven", 0),
+                  "unmatched_count": basket_20_layer_counts.get("unmatched", 0),
+              },
+              "gaps_preventing_stronger_trustworthy_comparison": comparison_source_coverage_gaps,
+          })
 
           price_summary_store_key_set = {row["store_key"] for row in prices_summary_rows}
           promo_summary_store_key_set = {row["store_key"] for row in promotions_summary_rows}
@@ -3514,6 +4133,11 @@ jobs:
             out/store_comparison_modes_probe.json
             out/store_comparison_modes_summary.json
             out/store_comparison_modes_root_cause_summary.json
+            out/basket_line_shadow_matches.csv
+            out/basket_store_shadow_summary.csv
+            out/basket_shadow_root_cause_summary.json
+            out/comparison_source_coverage_audit.json
+            out/comparison_source_contract.json
             out/source_freshness_by_store.csv
             out/source_freshness_summary.json
             out/store_set_consistency.json
