@@ -3480,6 +3480,171 @@ jobs:
               group_name: index for index, (group_name, _) in enumerate(core_food_group_rules, start=1)
           }
 
+          comparison_family_registry = [
+              {
+                  "comparison_family_key": "bread_basic",
+                  "why": "staple bread items only; excludes pretzels, cakes, and snack bakery",
+                  "probe_priority": 1,
+                  "allowed_category_tokens": ["לחם", "מאפים"],
+                  "required_any_tokens": ["לחם", "פיתה", "חלה", "bread", "pita", "challah"],
+                  "forbidden_tokens": ["בייגלה", "pretzel", "עוג", "cake", "cookie", "biscuit", "חטיף", "snack", "שוקולד"],
+                  "identity_strip_tokens": ["לחם", "פיתה", "חלה", "bread", "pita", "challah"],
+                  "unit_basis": "weight",
+                  "allow_unit_normalization": True,
+                  "allow_canonical_equivalent": True,
+                  "probe_max_items": 2,
+              },
+              {
+                  "comparison_family_key": "eggs",
+                  "why": "shell eggs sold by count",
+                  "probe_priority": 2,
+                  "allowed_category_tokens": ["ביצ"],
+                  "required_any_tokens": ["ביצ", "egg"],
+                  "forbidden_tokens": ["שוקולד", "cake"],
+                  "identity_strip_tokens": ["ביצ", "ביצי", "egg", "eggs", "משק", "טריות"],
+                  "unit_basis": "count",
+                  "allow_unit_normalization": False,
+                  "allow_canonical_equivalent": True,
+                  "probe_max_items": 2,
+              },
+              {
+                  "comparison_family_key": "milk_basic",
+                  "why": "plain dairy milk only; excludes oat, soy, and flavored beverages",
+                  "probe_priority": 3,
+                  "allowed_category_tokens": ["מוצרי חלב", "משקאות"],
+                  "required_any_tokens": ["חלב", "milk"],
+                  "forbidden_tokens": ["שיבולת", "שקדים", "סויה", "soy", "oat", "almond", "שוקו", "צ'יטוס"],
+                  "identity_strip_tokens": ["חלב", "milk"],
+                  "unit_basis": "volume",
+                  "allow_unit_normalization": True,
+                  "allow_canonical_equivalent": True,
+                  "probe_max_items": 2,
+              },
+              {
+                  "comparison_family_key": "soft_cheese_basic",
+                  "why": "basic white cheese, cottage, and labneh family only",
+                  "probe_priority": 4,
+                  "allowed_category_tokens": ["מוצרי חלב"],
+                  "required_any_tokens": ["לבנה", "קוטג", "cottage", "labneh", "גבינה לבנה"],
+                  "forbidden_tokens": ["צ'יטוס", "yellow", "צהובה", "snack", "חטיף"],
+                  "identity_strip_tokens": ["גבינה", "cheese"],
+                  "unit_basis": "weight",
+                  "allow_unit_normalization": True,
+                  "allow_canonical_equivalent": True,
+                  "probe_max_items": 2,
+              },
+              {
+                  "comparison_family_key": "cereal_basic",
+                  "why": "breakfast cereals and oats, excluding snack bars and candy-like items",
+                  "probe_priority": 5,
+                  "allowed_category_tokens": ["דגני"],
+                  "required_any_tokens": ["קורנפלקס", "cornflakes", "גרנולה", "granola", "שיבולת", "oats", "cereal"],
+                  "forbidden_tokens": ["בר", "bar", "חטיף", "snack", "שוקולד", "כריות"],
+                  "identity_strip_tokens": ["דגני", "בוקר", "cereal"],
+                  "unit_basis": "weight",
+                  "allow_unit_normalization": True,
+                  "allow_canonical_equivalent": True,
+                  "probe_max_items": 2,
+              },
+              {
+                  "comparison_family_key": "pasta_basic",
+                  "why": "dry pasta and noodles only; excludes instant cups, ravioli, and sauces",
+                  "probe_priority": 6,
+                  "allowed_category_tokens": ["פסטה", "אטריות"],
+                  "required_any_tokens": ["פסטה", "ספגטי", "פנה", "פוזילי", "לינג", "אטריות", "pasta", "spaghetti"],
+                  "forbidden_tokens": ["מנה חמה", "ראמן", "נודלס", "ravioli", "רביולי", "רוטב", "לזניה", "instant"],
+                  "identity_strip_tokens": ["פסטה", "אטריות", "pasta", "spaghetti"],
+                  "unit_basis": "weight",
+                  "allow_unit_normalization": True,
+                  "allow_canonical_equivalent": True,
+                  "probe_max_items": 2,
+              },
+              {
+                  "comparison_family_key": "rice_couscous_basic",
+                  "why": "dry rice and couscous staples only",
+                  "probe_priority": 7,
+                  "allowed_category_tokens": ["אורז", "אחר", "דגנים", "פסטה"],
+                  "required_any_tokens": ["אורז", "rice", "קוסקוס", "couscous"],
+                  "forbidden_tokens": ["מנה חמה", "instant", "ראמן", "נודלס"],
+                  "identity_strip_tokens": ["אורז", "rice", "קוסקוס", "couscous"],
+                  "unit_basis": "weight",
+                  "allow_unit_normalization": True,
+                  "allow_canonical_equivalent": True,
+                  "probe_max_items": 2,
+              },
+              {
+                  "comparison_family_key": "tuna_basic",
+                  "why": "canned tuna by preserved style such as water or oil",
+                  "probe_priority": 8,
+                  "allowed_category_tokens": ["דגים", "שימורים"],
+                  "required_any_tokens": ["טונה", "tuna"],
+                  "forbidden_tokens": [],
+                  "identity_strip_tokens": ["טונה", "tuna", "שימורים"],
+                  "unit_basis": "weight",
+                  "allow_unit_normalization": True,
+                  "allow_canonical_equivalent": True,
+                  "probe_max_items": 2,
+              },
+              {
+                  "comparison_family_key": "legumes_basic",
+                  "why": "dry or canned legumes such as lentils and beans, excluding prepared dips",
+                  "probe_priority": 9,
+                  "allowed_category_tokens": ["קטניות", "שימורים", "ירקות", "אחר"],
+                  "required_any_tokens": ["עדשים", "שעועית", "lentils", "beans", "חומוס יבש"],
+                  "forbidden_tokens": ["ממרח", "סלט", "dip", "spread"],
+                  "identity_strip_tokens": ["קטניות", "legumes"],
+                  "unit_basis": "weight",
+                  "allow_unit_normalization": True,
+                  "allow_canonical_equivalent": True,
+                  "probe_max_items": 2,
+              },
+              {
+                  "comparison_family_key": "tahini_basic",
+                  "why": "plain tahini products only",
+                  "probe_priority": 10,
+                  "allowed_category_tokens": ["שימורים", "ממרחים", "אחר"],
+                  "required_any_tokens": ["טחינה", "tahini"],
+                  "forbidden_tokens": ["חלבה", "halva"],
+                  "identity_strip_tokens": ["טחינה", "tahini", "גולמית", "raw"],
+                  "unit_basis": "weight",
+                  "allow_unit_normalization": True,
+                  "allow_canonical_equivalent": True,
+                  "probe_max_items": 2,
+              },
+              {
+                  "comparison_family_key": "bottled_water",
+                  "why": "plain bottled water only; excludes flavored and carbonated drinks",
+                  "probe_priority": 11,
+                  "allowed_category_tokens": ["משקאות"],
+                  "required_any_tokens": ["מים", "water"],
+                  "forbidden_tokens": ["סודה", "cola", "קולה", "מוגז", "טעמים", "flavor", "ויטמינ"],
+                  "identity_strip_tokens": ["מים", "מינרליים", "water"],
+                  "unit_basis": "volume",
+                  "allow_unit_normalization": True,
+                  "allow_canonical_equivalent": True,
+                  "probe_max_items": 2,
+              },
+              {
+                  "comparison_family_key": "frozen_vegetables",
+                  "why": "plain frozen vegetable mixes only; excludes desserts, fries, and non-food misclassifications",
+                  "probe_priority": 12,
+                  "allowed_category_tokens": ["קפוא", "ירקות"],
+                  "required_any_tokens": ["לקט", "אפונה", "ברוקולי", "כרובית", "ירקות", "frozen"],
+                  "forbidden_tokens": ["גלידה", "dessert", "צ'יפס", "פיינט", "pizza", "דולצ'ה"],
+                  "identity_strip_tokens": ["קפוא", "קפואים", "ירקות", "frozen", "vegetables"],
+                  "unit_basis": "weight",
+                  "allow_unit_normalization": True,
+                  "allow_canonical_equivalent": True,
+                  "probe_max_items": 2,
+              },
+          ]
+          comparison_family_registry_by_key = {
+              rule["comparison_family_key"]: rule for rule in comparison_family_registry
+          }
+          core_food_group_priority = {
+              rule["comparison_family_key"]: rule["probe_priority"] for rule in comparison_family_registry
+          }
+
           def normalized_unique_tokens(values, stopwords=None):
               blocked = set(stopwords or [])
               tokens = []
@@ -3503,7 +3668,7 @@ jobs:
           def build_brand_identity_key_shadow(brand: str, manufacturer: str) -> str:
               return " ".join(sorted(normalized_unique_tokens([brand, manufacturer], brand_identity_stopwords)))
 
-          def build_pack_signature_shadow(name: str):
+          def build_pack_signature_shadow(name: str, family_rule=None):
               legacy_signature = parse_pack_signature(name)
               if legacy_signature:
                   signature = dict(legacy_signature)
@@ -3513,33 +3678,68 @@ jobs:
               if not text:
                   return None
               unit_pattern = pack_unit_pattern()
-              match = re.search(
-                  rf"(?P<amount>\d{{1,4}}(?:\.\d+)?)\s*[x*]\s*(?P<count>\d{{1,2}})\s*(?P<unit>{unit_pattern})\b",
-                  text,
-              )
-              if not match:
-                  return None
-              count = safe_positive_int(match.group("count"))
-              amount = safe_decimal(match.group("amount"))
-              unit_info = normalize_pack_unit(match.group("unit"))
-              if count is None or count <= 1 or count > 24 or amount is None or not unit_info:
-                  return None
-              dimension, multiplier, base_unit = unit_info
-              total_base_qty = round(amount * count * multiplier, 4)
-              if total_base_qty <= 0:
-                  return None
-              return {
-                  "dimension": dimension,
-                  "base_unit": base_unit,
-                  "total_base_qty": total_base_qty,
-                  "pack_expression": clean_text(match.group(0)),
-                  "derivation_rule": "amount_first_multipack",
-              }
+              for pattern, derivation_rule in (
+                  (rf"(?P<amount>\d{{1,4}}(?:\.\d+)?)\s*[x*]\s*(?P<count>\d{{1,2}})\s*(?P<unit>{unit_pattern})\b", "amount_first_multipack"),
+                  (rf"(?P<count>\d{{1,2}})\s*[x*]\s*(?P<amount>\d{{1,4}}(?:\.\d+)?)\s*(?P<unit>{unit_pattern})\b", "count_first_multipack"),
+              ):
+                  match = re.search(pattern, text)
+                  if not match:
+                      continue
+                  count = safe_positive_int(match.group("count"))
+                  amount = safe_decimal(match.group("amount"))
+                  unit_info = normalize_pack_unit(match.group("unit"))
+                  if count is None or count <= 1 or count > 24 or amount is None or not unit_info:
+                      continue
+                  dimension, multiplier, base_unit = unit_info
+                  total_base_qty = round(amount * count * multiplier, 4)
+                  if total_base_qty <= 0:
+                      continue
+                  return {
+                      "dimension": dimension,
+                      "base_unit": base_unit,
+                      "total_base_qty": total_base_qty,
+                      "pack_expression": clean_text(match.group(0)),
+                      "derivation_rule": derivation_rule,
+                  }
+              family_key = (family_rule or {}).get("comparison_family_key")
+              if family_key == "eggs":
+                  match = re.search(r"\b(?P<count>\d{1,2})\s*(?:ביצ(?:ה|ים)?|egg|eggs)\b", text)
+                  if match:
+                      count = safe_positive_int(match.group("count"))
+                      if count is not None and 4 <= count <= 30:
+                          return {
+                              "dimension": "count",
+                              "base_unit": "ea",
+                              "total_base_qty": float(count),
+                              "pack_expression": clean_text(match.group(0)),
+                              "derivation_rule": "eggs_count_pack",
+                          }
+              if family_key == "bottled_water":
+                  for pattern, derivation_rule in (
+                      (r"\b(?P<amount>\d(?:\.\d+)?)\s*[x*]\s*(?P<count>\d{1,2})\b", "water_amount_first_liter_multipack"),
+                      (r"\b(?P<count>\d{1,2})\s*[x*]\s*(?P<amount>\d(?:\.\d+)?)\b", "water_count_first_liter_multipack"),
+                  ):
+                      match = re.search(pattern, text)
+                      if not match:
+                          continue
+                      count = safe_positive_int(match.group("count"))
+                      amount = safe_decimal(match.group("amount"))
+                      if count is None or count <= 1 or count > 24 or amount is None or amount <= 0 or amount > 3:
+                          continue
+                      return {
+                          "dimension": "volume",
+                          "base_unit": "ml",
+                          "total_base_qty": round(amount * count * 1000.0, 4),
+                          "pack_expression": clean_text(match.group(0)),
+                          "derivation_rule": derivation_rule,
+                      }
+              return None
 
           def build_family_tokens_shadow(name: str, brand: str, manufacturer: str):
               text = clean_lookup_text(name).lower()
               if not text:
                   return []
+              text = re.sub(r"(\d+(?:\.\d+)?)\s*%", lambda match: f" fatpct_{match.group(1).replace('.', '_')} ", text)
               unit_pattern = pack_unit_pattern()
               for pattern in (
                   rf"\b\d{{1,3}}\s*[x*]\s*\d{{1,4}}(?:\.\d+)?\s*(?:{unit_pattern})\b",
@@ -3550,12 +3750,15 @@ jobs:
               removable_tokens = set(normalized_unique_tokens([brand, manufacturer], brand_identity_stopwords))
               tokens = []
               seen = set()
+              allowed_short_tokens = {"s", "m", "l", "xl", "xxl"}
               for token in re.split(r"\s+", re.sub(r"[^0-9a-zA-Zא-ת]+", " ", text)):
                   if not token or token in removable_tokens or token in family_signature_stopwords:
                       continue
                   if re.fullmatch(r"\d+(?:\.\d+)?", token):
                       continue
-                  if len(token) < 2 or token in seen:
+                  if len(token) < 2 and token not in allowed_short_tokens and not token.startswith("fatpct_"):
+                      continue
+                  if token in seen:
                       continue
                   seen.add(token)
                   tokens.append(token)
@@ -3563,6 +3766,45 @@ jobs:
 
           def build_family_signature_key_shadow(tokens):
               return " ".join(sorted(set(tokens)))
+
+          def category_matches_family_rule(category_key: str, family_rule: dict) -> bool:
+              allowed_category_tokens = family_rule.get("allowed_category_tokens") or []
+              if not allowed_category_tokens:
+                  return True
+              return any(token in category_key for token in allowed_category_tokens)
+
+          def match_comparison_family_rule(name: str, category_key: str, family_tokens):
+              text = clean_lookup_text(name).lower()
+              if not text or not category_key:
+                  return None
+              for family_rule in comparison_family_registry:
+                  if not category_matches_family_rule(category_key, family_rule):
+                      continue
+                  if any(token in text for token in family_rule.get("forbidden_tokens", [])):
+                      continue
+                  if not any(token in text for token in family_rule.get("required_any_tokens", [])):
+                      continue
+                  return family_rule
+              return None
+
+          def derive_base_product_identity_key_shadow(family_rule: dict, family_tokens):
+              if not family_rule:
+                  return None
+              strip_tokens = set(family_rule.get("identity_strip_tokens") or [])
+              base_tokens = [token for token in family_tokens if token not in strip_tokens]
+              if not base_tokens:
+                  return "generic"
+              return " ".join(base_tokens[:4])
+
+          def build_comparison_form_factor_key_shadow(family_rule: dict, base_product_identity_key: str):
+              if not family_rule:
+                  return None
+              family_key = family_rule.get("comparison_family_key")
+              if not family_key:
+                  return None
+              if base_product_identity_key and base_product_identity_key != "generic":
+                  return f"{family_key}|{base_product_identity_key}"
+              return family_key
 
           def build_form_factor_key_shadow(category_key: str, family_tokens):
               if not category_key or not family_tokens:
@@ -3573,19 +3815,16 @@ jobs:
               text = clean_lookup_text(" ".join(filter(None, [candidate.get("category"), candidate.get("name")]))).lower()
               category_key = metadata.get("category_key") or ""
               reasons = []
-              basket_group = None
-              for group_name, tokens in core_food_group_rules:
-                  if any(token in text for token in tokens):
-                      basket_group = group_name
-                      break
+              family_rule = comparison_family_registry_by_key.get(metadata.get("comparison_family_key")) if metadata.get("comparison_family_key") else None
+              basket_group = metadata.get("comparison_family_key")
               if not category_key or category_key in suspicious_category_keys or re.fullmatch(r"\d+", category_key):
                   reasons.append("suspicious_or_low_reliability_category")
               if any(token in text for token in explicit_non_food_tokens):
                   reasons.append("explicit_non_food_signal")
               if any(token in text for token in non_core_food_tokens):
                   reasons.append("non_core_food_snack_or_sweet")
-              if not basket_group:
-                  reasons.append("no_strict_core_food_group")
+              if not family_rule:
+                  reasons.append("no_curated_comparison_family")
               return {
                   "basket_group": basket_group,
                   "is_selected_candidate": not reasons,
@@ -3642,17 +3881,32 @@ jobs:
               family_tokens_value = build_family_tokens_shadow(name_value or "", brand_value or "", manufacturer_value or "")
               family_signature_key_value = build_family_signature_key_shadow(family_tokens_value)
               line_signature_value = " ".join(family_tokens_value)
-              form_factor_key_value = build_form_factor_key_shadow(category_key_value, family_tokens_value)
-              pack_signature_value = build_pack_signature_shadow(name_value or "")
+              comparison_family_rule_value = match_comparison_family_rule(name_value or "", category_key_value, family_tokens_value)
+              comparison_family_key_value = comparison_family_rule_value.get("comparison_family_key") if comparison_family_rule_value else None
+              base_product_identity_key_value = derive_base_product_identity_key_shadow(comparison_family_rule_value, family_tokens_value)
+              comparison_form_factor_key_value = build_comparison_form_factor_key_shadow(comparison_family_rule_value, base_product_identity_key_value)
+              form_factor_key_value = comparison_form_factor_key_value or build_form_factor_key_shadow(category_key_value, family_tokens_value)
+              pack_signature_value = build_pack_signature_shadow(name_value or "", comparison_family_rule_value)
               explicit_equivalence_group = clean_text(substitute_group_value).lower() if substitute_group_value else None
               derived_equivalence_group = None
-              if not explicit_equivalence_group and category_key_value and len(family_tokens_value) >= 2 and form_factor_key_value:
-                  derived_equivalence_group = f"derived::{form_factor_key_value}"
-              equivalence_group_key_value = explicit_equivalence_group or derived_equivalence_group
-              equivalence_group_source = "explicit_substitute_group" if explicit_equivalence_group else "derived_category_form_factor" if derived_equivalence_group else None
+              if comparison_family_key_value and comparison_form_factor_key_value:
+                  derived_equivalence_group = f"derived::{comparison_form_factor_key_value}"
+              elif not explicit_equivalence_group and category_key_value and len(family_tokens_value) >= 2 and form_factor_key_value:
+                  derived_equivalence_group = f"generic::{form_factor_key_value}"
+              if explicit_equivalence_group and comparison_form_factor_key_value and comparison_family_key_value:
+                  equivalence_group_key_value = f"{comparison_family_key_value}|sg::{explicit_equivalence_group}|ff::{comparison_form_factor_key_value}"
+                  equivalence_group_source = "explicit_substitute_group_plus_curated_family"
+              elif explicit_equivalence_group and form_factor_key_value:
+                  equivalence_group_key_value = f"generic|sg::{explicit_equivalence_group}|ff::{form_factor_key_value}"
+                  equivalence_group_source = "explicit_substitute_group_plus_generic_form_factor"
+              else:
+                  equivalence_group_key_value = derived_equivalence_group
+                  equivalence_group_source = "derived_curated_family_form_factor" if comparison_family_key_value and derived_equivalence_group else "derived_generic_form_factor" if derived_equivalence_group else None
               same_product_identity_key_value = None
-              if category_key_value and brand_identity_key_value and family_signature_key_value and len(family_tokens_value) >= 2:
-                  same_product_identity_key_value = f"{category_key_value}|{brand_identity_key_value}|{family_signature_key_value}"
+              if comparison_family_key_value and base_product_identity_key_value:
+                  same_product_identity_key_value = f"{comparison_family_key_value}|{brand_identity_key_value or 'generic_brand'}|{base_product_identity_key_value}"
+              elif category_key_value and brand_identity_key_value and family_signature_key_value and len(family_tokens_value) >= 2:
+                  same_product_identity_key_value = f"generic|{category_key_value}|{brand_identity_key_value}|{family_signature_key_value}"
               shadow_product_probe_metadata_by_barcode[barcode] = {
                   "barcode": barcode,
                   "name": name_value,
@@ -3671,6 +3925,9 @@ jobs:
                   "brand_key": brand_identity_key_value,
                   "brand_identity_key": brand_identity_key_value,
                   "category_key": category_key_value,
+                  "comparison_family_key": comparison_family_key_value,
+                  "comparison_family_source": "curated_registry" if comparison_family_key_value else None,
+                  "base_product_identity_key": base_product_identity_key_value,
                   "form_factor_key": form_factor_key_value,
                   "equivalence_group_key": equivalence_group_key_value,
                   "equivalence_group_source": equivalence_group_source,
@@ -3719,7 +3976,8 @@ jobs:
           improved_selected_probe_barcode_set = set()
           improved_group_counts = Counter()
           improved_selection_reason_by_barcode = {}
-          for group_name, _ in core_food_group_rules:
+          for family_rule in comparison_family_registry:
+              group_name = family_rule["comparison_family_key"]
               for candidate in shadow_probe_candidates:
                   if candidate["barcode"] in improved_selected_probe_barcode_set or candidate.get("basket_group") != group_name:
                       continue
@@ -3736,7 +3994,7 @@ jobs:
               if candidate["barcode"] in improved_selected_probe_barcode_set or not candidate.get("is_selected_candidate"):
                   continue
               group_name = candidate.get("basket_group") or "__other__"
-              if improved_group_counts[group_name] >= 2:
+              if improved_group_counts[group_name] >= comparison_family_registry_by_key.get(group_name, {}).get("probe_max_items", 2):
                   continue
               improved_selected_probe_barcodes.append(candidate["barcode"])
               improved_selected_probe_barcode_set.add(candidate["barcode"])
@@ -3782,6 +4040,8 @@ jobs:
                   "reference_effective_price_median": median_number(reference_prices),
                   "reference_unit_price_median": median_number(reference_unit_prices),
                   "selection_reason": improved_selection_reason_by_barcode.get(barcode),
+                  "comparison_family_key": metadata.get("comparison_family_key"),
+                  "comparison_family_source": metadata.get("comparison_family_source"),
                   "basket_group": probe_candidate_info_by_barcode.get(barcode, {}).get("basket_group"),
               })
 
@@ -3795,6 +4055,7 @@ jobs:
                       "barcode": candidate["barcode"],
                       "name": candidate.get("name"),
                       "category": candidate.get("category"),
+                      "comparison_family_key": candidate.get("basket_group"),
                       "basket_group": candidate.get("basket_group"),
                       "reasons": candidate.get("reasons") if candidate["barcode"] not in improved_selected_probe_barcode_set else [improved_selection_reason_by_barcode.get(candidate["barcode"])],
                   }
@@ -3812,6 +4073,7 @@ jobs:
               "before": legacy_probe_quality,
               "after": improved_probe_quality,
               "category_composition_after": improved_probe_quality["basket_group_composition"],
+              "comparison_family_composition_after": improved_probe_quality["basket_group_composition"],
               "probe_cleanliness_delta": {
                   "core_food_count_delta": improved_probe_quality["selected_core_food_count"] - legacy_probe_quality["selected_core_food_count"],
                   "non_food_or_suspicious_delta": improved_probe_quality["selected_non_food_or_suspicious_count"] - legacy_probe_quality["selected_non_food_or_suspicious_count"],
@@ -3822,6 +4084,34 @@ jobs:
                   and improved_probe_quality["selected_snack_or_sweet_count"] < legacy_probe_quality["selected_snack_or_sweet_count"]
                   and improved_probe_quality["selected_core_food_count"] >= legacy_probe_quality["selected_core_food_count"]
               ),
+          })
+          write_json(OUT_DIR / "comparison_family_registry_audit.json", {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "registry_drives_probe_selection": True,
+              "registry_drives_non_exact_matching": True,
+              "registry_family_count": len(comparison_family_registry),
+              "registry_families": comparison_family_registry,
+              "selected_probe_family_composition": improved_probe_quality["basket_group_composition"],
+              "selected_probe_families": sorted(improved_probe_quality["basket_group_composition"].keys()),
+              "families_allowing_unit_normalization": [
+                  rule["comparison_family_key"]
+                  for rule in comparison_family_registry
+                  if rule.get("allow_unit_normalization")
+              ],
+              "families_allowing_canonical_equivalent": [
+                  rule["comparison_family_key"]
+                  for rule in comparison_family_registry
+                  if rule.get("allow_canonical_equivalent")
+              ],
+              "what_the_workflow_refuses_to_infer": [
+                  "same category alone",
+                  "same brand alone",
+                  "similar product name alone",
+                  "same substitute group alone without curated family support",
+                  "cross-category substitution",
+                  "GF status from product name",
+              ],
           })
 
           product_probe_metadata_by_barcode = shadow_product_probe_metadata_by_barcode
@@ -3845,24 +4135,29 @@ jobs:
               "shadow_only": True,
               "publish_gate_impact": "none",
               "deterministic_derivations_added": {
+                  "comparison_family_key": "assigned from a small curated comparison_family_registry using allowed categories plus required and forbidden tokens",
                   "brand_identity_key": "normalized brand plus manufacturer tokens with corporate suffix removal",
-                  "line_signature": "name tokens with pack expressions, numeric noise, and brand/manufacturer tokens removed",
-                  "pack_signature": "legacy pack parsing plus amount-first multipack parsing when unit evidence is explicit",
-                  "equivalence_group_key": "explicit substitute_group first, otherwise derived category plus stable form-factor signature when at least two stable tokens exist",
-                  "same_product_identity_key": "category plus normalized brand identity plus exact family signature",
+                  "line_signature": "name tokens with pack expressions, numeric noise, and brand/manufacturer tokens removed while preserving fat and size qualifiers when explicit",
+                  "pack_signature": "legacy pack parsing plus count-first multipack parsing, eggs count parsing, and bottled-water liter multipack parsing when family rules allow it",
+                  "base_product_identity_key": "curated family identity built from normalized family tokens after family-specific strip tokens are removed",
+                  "equivalence_group_key": "explicit substitute_group plus curated family/form-factor when available, otherwise derived curated family plus form-factor",
+                  "same_product_identity_key": "comparison family plus normalized brand identity plus curated base product identity",
               },
               "selected_probe_metadata_coverage": {
                   "selected_probe_item_count": len(selected_probe_items),
+                  "with_comparison_family_key_count": sum(1 for item in selected_probe_items if product_probe_metadata_by_barcode.get(item["barcode"], {}).get("comparison_family_key")),
                   "with_pack_signature_count": sum(1 for item in selected_probe_items if product_probe_metadata_by_barcode.get(item["barcode"], {}).get("pack_signature")),
                   "with_equivalence_group_key_count": sum(1 for item in selected_probe_items if product_probe_metadata_by_barcode.get(item["barcode"], {}).get("equivalence_group_key")),
                   "with_same_product_identity_key_count": sum(1 for item in selected_probe_items if product_probe_metadata_by_barcode.get(item["barcode"], {}).get("same_product_identity_key")),
-                  "derived_equivalence_group_count": sum(1 for item in selected_probe_items if product_probe_metadata_by_barcode.get(item["barcode"], {}).get("equivalence_group_source") == "derived_category_form_factor"),
+                  "derived_equivalence_group_count": sum(1 for item in selected_probe_items if clean_text(product_probe_metadata_by_barcode.get(item["barcode"], {}).get("equivalence_group_source")).startswith("derived_")),
                   "legacy_pack_signature_count": sum(1 for item in selected_probe_items if product_probe_metadata_by_barcode.get(item["barcode"], {}).get("pack_signature_source") == "legacy_pack_signature"),
                   "amount_first_multipack_count": sum(1 for item in selected_probe_items if product_probe_metadata_by_barcode.get(item["barcode"], {}).get("pack_signature_source") == "amount_first_multipack"),
+                  "count_first_multipack_count": sum(1 for item in selected_probe_items if product_probe_metadata_by_barcode.get(item["barcode"], {}).get("pack_signature_source") == "count_first_multipack"),
+                  "family_specific_pack_signature_count": sum(1 for item in selected_probe_items if product_probe_metadata_by_barcode.get(item["barcode"], {}).get("pack_signature_source") in ("eggs_count_pack", "water_amount_first_liter_multipack", "water_count_first_liter_multipack")),
               },
               "allowed_upgrade_rules": {
-                  "same_product_unit_normalized": "same_product_identity_key plus compatible pack dimension plus explicit unit-price normalization plus GF preservation when relevant",
-                  "canonical_equivalent": "equivalence_group_key plus same category plus same form_factor_key plus GF preservation when relevant",
+                  "same_product_unit_normalized": "same comparison_family_key plus same_product_identity_key plus compatible pack dimension plus explicit unit-price normalization plus GF preservation when relevant",
+                  "canonical_equivalent": "same curated comparison_family_key plus same equivalence_group_key plus same form_factor_key plus GF preservation when relevant",
               },
               "forbidden_shortcuts": [
                   "same brand alone",
@@ -3889,8 +4184,8 @@ jobs:
                   "origin": ["products_payload", "existing_products lookup"],
                   "available_existing_product_fields": existing_product_fields,
                   "allowed_fields": ["barcode", "name", "category", "brand", "manufacturer", "substitute_group", "gf_flag", "gf_verified"],
-                  "deterministic_derivation": ["brand_identity_key", "line_signature", "family_signature_key", "form_factor_key", "equivalence_group_key", "same_product_identity_key", "pack_signature"],
-                  "refused_inference": "no loose fuzzy family inference outside explicit fields and deterministic signatures",
+                  "deterministic_derivation": ["comparison_family_key", "brand_identity_key", "line_signature", "family_signature_key", "base_product_identity_key", "form_factor_key", "equivalence_group_key", "same_product_identity_key", "pack_signature"],
+                  "refused_inference": "no loose fuzzy family inference outside the curated registry and deterministic signatures",
               },
               "gf_source": {
                   "source_name": "explicit_gf_metadata_only",
@@ -3900,8 +4195,8 @@ jobs:
               "equivalence_source": {
                   "source_name": "explicit_or_narrow_deterministic_metadata",
                   "allowed_fields": ["substitute_group", "category", "brand", "manufacturer", "name", "gf_flag", "gf_verified"],
-                  "deterministic_derivation": ["equivalence_group_key", "family_signature_key", "form_factor_key", "same_product_identity_key"],
-                  "refused_inference": "no same-brand-only, same-category-only, or loose text-only equivalence",
+                  "deterministic_derivation": ["comparison_family_key", "equivalence_group_key", "base_product_identity_key", "form_factor_key", "same_product_identity_key"],
+                  "refused_inference": "no same-brand-only, same-category-only, same-substitute-group-only, or loose text-only equivalence",
               },
               "normalization_source": {
                   "source_name": "pack_signature_from_explicit_pack_text",
@@ -4162,6 +4457,9 @@ jobs:
           def shadow_find_unit_normalized_match(anchor_probe: dict, store_key: str):
               anchor_barcode = anchor_probe["barcode"]
               anchor_meta = product_probe_metadata_by_barcode.get(anchor_barcode, {})
+              family_rule = comparison_family_registry_by_key.get(anchor_meta.get("comparison_family_key"))
+              if family_rule and not family_rule.get("allow_unit_normalization"):
+                  return None, "not_proven_family_disallows_unit_normalization"
               same_product_identity_key = clean_text(anchor_meta.get("same_product_identity_key"))
               if not same_product_identity_key:
                   return None, "not_proven_no_same_product_identity_key"
@@ -4209,6 +4507,9 @@ jobs:
           def shadow_find_canonical_equivalent_match(anchor_probe: dict, store_key: str):
               anchor_barcode = anchor_probe["barcode"]
               anchor_meta = product_probe_metadata_by_barcode.get(anchor_barcode, {})
+              family_rule = comparison_family_registry_by_key.get(anchor_meta.get("comparison_family_key"))
+              if family_rule and not family_rule.get("allow_canonical_equivalent"):
+                  return None, "not_proven_family_disallows_canonical_equivalent"
               equivalence_group_key = clean_text(anchor_meta.get("equivalence_group_key"))
               if not equivalence_group_key:
                   return None, "not_proven_no_equivalence_group_key"
@@ -4257,6 +4558,9 @@ jobs:
           def shadow_find_budget_alternative_match(anchor_probe: dict, store_key: str):
               anchor_barcode = anchor_probe["barcode"]
               anchor_meta = product_probe_metadata_by_barcode.get(anchor_barcode, {})
+              family_rule = comparison_family_registry_by_key.get(anchor_meta.get("comparison_family_key"))
+              if family_rule and not family_rule.get("allow_canonical_equivalent"):
+                  return None, "not_proven_family_disallows_canonical_equivalent"
               equivalence_group_key = clean_text(anchor_meta.get("equivalence_group_key"))
               if not equivalence_group_key:
                   return None, "not_proven_no_equivalence_group_key"
@@ -4340,6 +4644,8 @@ jobs:
                   return "unknown"
               if "gf_constraint" in reason_text:
                   return "gf_preservation_not_proven"
+              if "family_disallows" in reason_text:
+                  return "curated_family_restriction"
               if any(token in reason_text for token in ("no_substitute_group", "no_equivalence_group_key", "no_anchor_category", "no_anchor_line_signature", "no_anchor_form_factor_key")):
                   return "missing_equivalence_metadata"
               if any(token in reason_text for token in ("pack", "unit_", "same_product_identity_key")):
@@ -4391,7 +4697,7 @@ jobs:
                       "chosen_layer": "same_product_unit_normalized",
                       "confidence_class": line_confidence_class("same_product_unit_normalized"),
                       "price_evidence_source": "official_current_price_rows_normalized_by_pack_signature",
-                      "metadata_evidence_source": "workflow_product_metadata_same_product_identity_key_pack_signature",
+                      "metadata_evidence_source": "workflow_product_metadata_comparison_family_same_product_identity_key_pack_signature",
                       "gf_evidence_source": default_gf_source,
                       "equivalence_basis": "same_product_identity_key_same_category_same_brand_identity",
                       "normalization_basis": unit_match.get("normalization_basis") or "pack_signature_dimension_unit_normalization",
@@ -4423,7 +4729,7 @@ jobs:
                       "chosen_layer": "canonical_equivalent",
                       "confidence_class": line_confidence_class("canonical_equivalent"),
                       "price_evidence_source": "official_current_price_rows_canonical_candidate",
-                      "metadata_evidence_source": "workflow_product_metadata_equivalence_group_form_factor",
+                      "metadata_evidence_source": "workflow_product_metadata_comparison_family_equivalence_group_form_factor",
                       "gf_evidence_source": default_gf_source,
                       "equivalence_basis": canonical_match.get("equivalence_basis") or "same_equivalence_group_same_category_same_form_factor",
                       "normalization_basis": normalization_basis,
@@ -4446,7 +4752,7 @@ jobs:
                       "chosen_layer": "budget_alternative",
                       "confidence_class": line_confidence_class("budget_alternative"),
                       "price_evidence_source": "official_current_price_rows_budget_candidate",
-                      "metadata_evidence_source": "workflow_product_metadata_equivalence_group_form_factor",
+                      "metadata_evidence_source": "workflow_product_metadata_comparison_family_equivalence_group_form_factor",
                       "gf_evidence_source": default_gf_source,
                       "equivalence_basis": "same_equivalence_group_same_category_same_form_factor_budget_alternative",
                       "normalization_basis": budget_match.get("comparison_basis") or "not_proven",
@@ -4688,6 +4994,7 @@ jobs:
           non_exact_upgrade_impact_summary = {
               "shadow_only": True,
               "publish_gate_impact": "none",
+              "improvement_driver": "curated_comparison_family_registry_and_registry_aware_match_derivations",
               "matching_baseline_reference": "legacy_match_logic_on_improved_core_food_probe_items",
               "probe_quality_baseline_reference": "legacy_same_run_shadow_probe_selection",
               "probe_quality_before_after": {
@@ -4847,6 +5154,10 @@ jobs:
               1 for item in selected_basket_universe
               if item.get("reference_effective_price_median") is not None or item.get("reference_unit_price_median") is not None
           )
+          source_items_with_curated_family_evidence = sum(
+              1 for barcode in selected_basket_universe_barcodes
+              if clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("comparison_family_key"))
+          )
           source_items_with_category_evidence = sum(
               1 for barcode in selected_basket_universe_barcodes
               if product_probe_metadata_by_barcode.get(barcode, {}).get("category_key")
@@ -4854,13 +5165,20 @@ jobs:
           )
           source_items_with_canonical_equivalence_evidence = sum(
               1 for barcode in selected_basket_universe_barcodes
-              if clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("equivalence_group_key"))
+              if clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("comparison_family_key"))
+              and clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("equivalence_group_key"))
               and product_probe_metadata_by_barcode.get(barcode, {}).get("category_key")
               and clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("form_factor_key"))
           )
+          source_items_with_same_product_identity_evidence = sum(
+              1 for barcode in selected_basket_universe_barcodes
+              if clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("comparison_family_key"))
+              and clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("same_product_identity_key"))
+          )
           source_items_with_pack_normalization_evidence = sum(
               1 for barcode in selected_basket_universe_barcodes
-              if clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("same_product_identity_key"))
+              if clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("comparison_family_key"))
+              and clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("same_product_identity_key"))
               and product_probe_metadata_by_barcode.get(barcode, {}).get("pack_signature")
           )
           source_items_requiring_gf_preservation = sum(
@@ -4886,10 +5204,12 @@ jobs:
               if row["chosen_layer"] in ("not_proven", "unmatched")
           )
           comparison_source_coverage_gaps = []
+          if source_items_with_curated_family_evidence < len(selected_basket_universe_barcodes):
+              comparison_source_coverage_gaps.append("not every selected basket line has curated comparison-family assignment")
           if source_items_with_canonical_equivalence_evidence < len(selected_basket_universe_barcodes):
-              comparison_source_coverage_gaps.append("not every selected basket line has provable equivalence-group plus form-factor evidence")
+              comparison_source_coverage_gaps.append("not every selected basket line has curated equivalence-group plus form-factor evidence")
           if source_items_with_pack_normalization_evidence < len(selected_basket_universe_barcodes):
-              comparison_source_coverage_gaps.append("not every selected basket line has provable same-product identity plus pack-size normalization evidence")
+              comparison_source_coverage_gaps.append("not every selected basket line has curated same-product identity plus pack-size normalization evidence")
           if source_items_requiring_gf_preservation and source_items_with_explicit_gf_evidence_when_required < source_items_requiring_gf_preservation:
               comparison_source_coverage_gaps.append("some gluten-sensitive basket lines lack explicit GF preservation evidence")
           if basket_20_failure_bucket_counts:
@@ -4906,21 +5226,14 @@ jobs:
               "source_item_coverage": {
                   "with_explicit_price_evidence_count": source_items_with_price_evidence,
                   "with_explicit_price_evidence_pct": pct_or_none(source_items_with_price_evidence, len(selected_basket_universe_barcodes)),
+                  "with_curated_comparison_family_evidence_count": source_items_with_curated_family_evidence,
+                  "with_curated_comparison_family_evidence_pct": pct_or_none(source_items_with_curated_family_evidence, len(selected_basket_universe_barcodes)),
                   "with_category_or_product_family_evidence_count": source_items_with_category_evidence,
                   "with_category_or_product_family_evidence_pct": pct_or_none(source_items_with_category_evidence, len(selected_basket_universe_barcodes)),
                   "with_substitute_or_equivalence_evidence_count": source_items_with_canonical_equivalence_evidence,
                   "with_substitute_or_equivalence_evidence_pct": pct_or_none(source_items_with_canonical_equivalence_evidence, len(selected_basket_universe_barcodes)),
-                  "with_same_product_identity_evidence_count": sum(
-                      1 for barcode in selected_basket_universe_barcodes
-                      if clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("same_product_identity_key"))
-                  ),
-                  "with_same_product_identity_evidence_pct": pct_or_none(
-                      sum(
-                          1 for barcode in selected_basket_universe_barcodes
-                          if clean_text(product_probe_metadata_by_barcode.get(barcode, {}).get("same_product_identity_key"))
-                      ),
-                      len(selected_basket_universe_barcodes),
-                  ),
+                  "with_same_product_identity_evidence_count": source_items_with_same_product_identity_evidence,
+                  "with_same_product_identity_evidence_pct": pct_or_none(source_items_with_same_product_identity_evidence, len(selected_basket_universe_barcodes)),
                   "with_pack_or_normalization_evidence_count": source_items_with_pack_normalization_evidence,
                   "with_pack_or_normalization_evidence_pct": pct_or_none(source_items_with_pack_normalization_evidence, len(selected_basket_universe_barcodes)),
                   "requiring_explicit_gf_preservation_count": source_items_requiring_gf_preservation,
@@ -5312,6 +5625,7 @@ jobs:
             out/store_comparison_modes_root_cause_summary.json
             out/core_food_basket_probe_items.json
             out/core_food_basket_probe_quality_summary.json
+            out/comparison_family_registry_audit.json
             out/product_match_derivation_audit.json
             out/basket_line_shadow_matches.csv
             out/basket_store_shadow_summary.csv
