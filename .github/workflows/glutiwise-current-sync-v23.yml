@@ -684,6 +684,7 @@ jobs:
                   "kg": ("weight", 1000.0, "g"),
                   "g": ("weight", 1.0, "g"),
                   "gr": ("weight", 1.0, "g"),
+                  "ג": ("weight", 1.0, "g"),
                   "קג": ("weight", 1000.0, "g"),
                   "גר": ("weight", 1.0, "g"),
                   "גרם": ("weight", 1.0, "g"),
@@ -699,7 +700,7 @@ jobs:
               return aliases.get(unit)
 
           def pack_unit_pattern():
-              return r"(?:kg|g|gr|ml|l|lt|liter|litre|ק\"?ג|גרם|גר|ליטר|ל|מ\"?ל|מל)"
+              return r"(?:kg|g|gr|ml|l|lt|liter|litre|ק\"?ג|גרם|גר|ג|ליטר|ל|מ\"?ל|מל)"
 
           def parse_pack_signature(name: str):
               text = clean_lookup_text(name).lower().replace(",", ".")
@@ -3716,8 +3717,8 @@ jobs:
                           }
               if family_key == "bottled_water":
                   for pattern, derivation_rule in (
-                      (r"\b(?P<amount>\d(?:\.\d+)?)\s*[x*]\s*(?P<count>\d{1,2})\b", "water_amount_first_liter_multipack"),
-                      (r"\b(?P<count>\d{1,2})\s*[x*]\s*(?P<amount>\d(?:\.\d+)?)\b", "water_count_first_liter_multipack"),
+                      (r"(?P<amount>\d(?:\.\d+)?)\s*[x*]\s*(?P<count>\d{1,2})\b", "water_amount_first_liter_multipack"),
+                      (r"(?P<count>\d{1,2})\s*[x*]\s*(?P<amount>\d(?:\.\d+)?)\b", "water_count_first_liter_multipack"),
                   ):
                       match = re.search(pattern, text)
                       if not match:
@@ -4170,7 +4171,7 @@ jobs:
                   "comparison_family_key": "assigned from a small curated comparison_family_registry using token-aware required and forbidden pattern matching instead of loose substring hits",
                   "brand_identity_key": "normalized brand plus manufacturer tokens with corporate suffix removal",
                   "line_signature": "name tokens with pack expressions, numeric noise, and brand/manufacturer tokens removed while preserving fat and size qualifiers when explicit",
-                  "pack_signature": "legacy pack parsing plus count-first multipack parsing, eggs count parsing, and bottled-water liter multipack parsing when family rules allow it",
+                  "pack_signature": "legacy pack parsing plus compact Hebrew unit suffix parsing, count-first multipack parsing, eggs count parsing, and bottled-water liter multipack parsing when family rules allow it",
                   "base_product_identity_key": "curated family identity built from normalized family tokens after family-specific strip tokens are removed",
                   "equivalence_group_key": "explicit substitute_group plus curated family/form-factor when available, otherwise derived curated family plus form-factor",
                   "same_product_identity_key": "comparison family plus normalized brand identity plus curated base product identity",
