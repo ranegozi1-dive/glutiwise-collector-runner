@@ -3767,25 +3767,54 @@ jobs:
           def build_family_signature_key_shadow(tokens):
               return " ".join(sorted(set(tokens)))
 
+          def normalized_lookup_tokens_shadow(text: str):
+              normalized = clean_lookup_text(text).lower()
+              if not normalized:
+                  return []
+              normalized = re.sub(r"[^0-9a-zA-Z׳א-׳ת]+", " ", normalized)
+              return [token for token in re.split(r"\s+", normalized) if token]
+
+          def first_matching_rule_pattern(patterns, text_tokens):
+              if not patterns or not text_tokens:
+                  return None
+              token_set = set(text_tokens)
+              for pattern in patterns:
+                  pattern_tokens = normalized_lookup_tokens_shadow(pattern)
+                  if not pattern_tokens:
+                      continue
+                  if len(pattern_tokens) == 1:
+                      if pattern_tokens[0] in token_set:
+                          return clean_text(pattern)
+                      continue
+                  for index in range(0, len(text_tokens) - len(pattern_tokens) + 1):
+                      if text_tokens[index:index + len(pattern_tokens)] == pattern_tokens:
+                          return clean_text(pattern)
+              return None
+
           def category_matches_family_rule(category_key: str, family_rule: dict) -> bool:
               allowed_category_tokens = family_rule.get("allowed_category_tokens") or []
               if not allowed_category_tokens:
                   return True
-              return any(token in category_key for token in allowed_category_tokens)
+              return bool(first_matching_rule_pattern(allowed_category_tokens, normalized_lookup_tokens_shadow(category_key)))
 
           def match_comparison_family_rule(name: str, category_key: str, family_tokens):
-              text = clean_lookup_text(name).lower()
-              if not text or not category_key:
-                  return None
+              text_tokens = normalized_lookup_tokens_shadow(name)
+              if not text_tokens or not category_key:
+                  return None, None
               for family_rule in comparison_family_registry:
                   if not category_matches_family_rule(category_key, family_rule):
                       continue
-                  if any(token in text for token in family_rule.get("forbidden_tokens", [])):
+                  matched_forbidden_pattern = first_matching_rule_pattern(family_rule.get("forbidden_tokens"), text_tokens)
+                  if matched_forbidden_pattern:
                       continue
-                  if not any(token in text for token in family_rule.get("required_any_tokens", [])):
+                  matched_required_pattern = first_matching_rule_pattern(family_rule.get("required_any_tokens"), text_tokens)
+                  if not matched_required_pattern:
                       continue
-                  return family_rule
-              return None
+                  return family_rule, {
+                      "matched_required_pattern": matched_required_pattern,
+                      "category_key": category_key,
+                  }
+              return None, None
 
           def derive_base_product_identity_key_shadow(family_rule: dict, family_tokens):
               if not family_rule:
@@ -3881,7 +3910,7 @@ jobs:
               family_tokens_value = build_family_tokens_shadow(name_value or "", brand_value or "", manufacturer_value or "")
               family_signature_key_value = build_family_signature_key_shadow(family_tokens_value)
               line_signature_value = " ".join(family_tokens_value)
-              comparison_family_rule_value = match_comparison_family_rule(name_value or "", category_key_value, family_tokens_value)
+              comparison_family_rule_value, comparison_family_assignment_basis_value = match_comparison_family_rule(name_value or "", category_key_value, family_tokens_value)
               comparison_family_key_value = comparison_family_rule_value.get("comparison_family_key") if comparison_family_rule_value else None
               base_product_identity_key_value = derive_base_product_identity_key_shadow(comparison_family_rule_value, family_tokens_value)
               comparison_form_factor_key_value = build_comparison_form_factor_key_shadow(comparison_family_rule_value, base_product_identity_key_value)
@@ -3927,6 +3956,7 @@ jobs:
                   "category_key": category_key_value,
                   "comparison_family_key": comparison_family_key_value,
                   "comparison_family_source": "curated_registry" if comparison_family_key_value else None,
+                  "comparison_family_assignment_basis": comparison_family_assignment_basis_value,
                   "base_product_identity_key": base_product_identity_key_value,
                   "form_factor_key": form_factor_key_value,
                   "equivalence_group_key": equivalence_group_key_value,
@@ -4042,6 +4072,7 @@ jobs:
                   "selection_reason": improved_selection_reason_by_barcode.get(barcode),
                   "comparison_family_key": metadata.get("comparison_family_key"),
                   "comparison_family_source": metadata.get("comparison_family_source"),
+                  "comparison_family_assignment_basis": metadata.get("comparison_family_assignment_basis"),
                   "basket_group": probe_candidate_info_by_barcode.get(barcode, {}).get("basket_group"),
               })
 
@@ -4056,6 +4087,7 @@ jobs:
                       "name": candidate.get("name"),
                       "category": candidate.get("category"),
                       "comparison_family_key": candidate.get("basket_group"),
+                      "comparison_family_assignment_basis": candidate.get("metadata", {}).get("comparison_family_assignment_basis"),
                       "basket_group": candidate.get("basket_group"),
                       "reasons": candidate.get("reasons") if candidate["barcode"] not in improved_selected_probe_barcode_set else [improved_selection_reason_by_barcode.get(candidate["barcode"])],
                   }
@@ -4135,7 +4167,7 @@ jobs:
               "shadow_only": True,
               "publish_gate_impact": "none",
               "deterministic_derivations_added": {
-                  "comparison_family_key": "assigned from a small curated comparison_family_registry using allowed categories plus required and forbidden tokens",
+                  "comparison_family_key": "assigned from a small curated comparison_family_registry using token-aware required and forbidden pattern matching instead of loose substring hits",
                   "brand_identity_key": "normalized brand plus manufacturer tokens with corporate suffix removal",
                   "line_signature": "name tokens with pack expressions, numeric noise, and brand/manufacturer tokens removed while preserving fat and size qualifiers when explicit",
                   "pack_signature": "legacy pack parsing plus count-first multipack parsing, eggs count parsing, and bottled-water liter multipack parsing when family rules allow it",
