@@ -3331,9 +3331,9 @@ jobs:
                       "chosen_layer": "same_product_unit_normalized",
                       "confidence_class": line_confidence_class("same_product_unit_normalized"),
                       "price_evidence_source": "official_current_price_rows_normalized_by_pack_signature",
-                      "metadata_evidence_source": "products_payload_plus_existing_products_substitute_group_category_brand_line_signature",
+                      "metadata_evidence_source": "products_payload_plus_existing_products_curated_family_same_product_identity_pack_signature",
                       "gf_evidence_source": default_gf_source,
-                      "equivalence_basis": "same_substitute_group_same_category_same_brand_same_line_signature",
+                      "equivalence_basis": "same_same_product_identity_key_different_pack_same_dimension",
                       "normalization_basis": "pack_signature_dimension_unit_normalization",
                       "reason_or_failure_reason": "unit_normalized_same_product_match",
                       "baseline_line_price": normalized_line_price,
@@ -3363,9 +3363,9 @@ jobs:
                       "chosen_layer": "canonical_equivalent",
                       "confidence_class": line_confidence_class("canonical_equivalent"),
                       "price_evidence_source": "official_current_price_rows_canonical_candidate",
-                      "metadata_evidence_source": "products_payload_plus_existing_products_substitute_group_category_line_signature",
+                      "metadata_evidence_source": "products_payload_plus_existing_products_curated_family_equivalence_group_category_form_factor",
                       "gf_evidence_source": default_gf_source,
-                      "equivalence_basis": "same_substitute_group_same_category_same_line_signature",
+                      "equivalence_basis": "same_equivalence_group_same_category_same_form_factor",
                       "normalization_basis": normalization_basis,
                       "reason_or_failure_reason": "canonical_equivalent_match",
                       "baseline_line_price": comparison_price_value(candidate_row) if candidate_row else None,
@@ -3386,9 +3386,9 @@ jobs:
                       "chosen_layer": "budget_alternative",
                       "confidence_class": line_confidence_class("budget_alternative"),
                       "price_evidence_source": "official_current_price_rows_budget_candidate",
-                      "metadata_evidence_source": "products_payload_plus_existing_products_substitute_group_category_line_signature",
+                      "metadata_evidence_source": "products_payload_plus_existing_products_curated_family_equivalence_group_category_form_factor",
                       "gf_evidence_source": default_gf_source,
-                      "equivalence_basis": "same_substitute_group_same_category_budget_alternative",
+                      "equivalence_basis": "same_equivalence_group_same_category_same_form_factor_budget_alternative",
                       "normalization_basis": budget_match.get("comparison_basis") or "not_proven",
                       "reason_or_failure_reason": "budget_alternative_match",
                       "baseline_line_price": None,
@@ -3493,6 +3493,15 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "form_factor_patterns": [
+                      {"key": "pita", "any_tokens": ["\u05e4\u05d9\u05ea\u05d4", "pita"]},
+                      {"key": "challah", "any_tokens": ["\u05d7\u05dc\u05d4", "challah"]},
+                      {"key": "tortilla", "any_tokens": ["\u05d8\u05d5\u05e8\u05d8\u05d9\u05d4", "tortilla"]},
+                      {"key": "spelt", "any_tokens": ["\u05db\u05d5\u05e1\u05de\u05d9\u05df", "spelt"]},
+                      {"key": "rye", "any_tokens": ["\u05e9\u05d9\u05e4\u05d5\u05df", "rye"]},
+                      {"key": "whole_wheat", "any_tokens": ["\u05de\u05dc\u05d0", "whole wheat"]},
+                  ],
+                  "form_factor_default": "loaf_basic",
                   "probe_max_items": 2,
               },
               {
@@ -3519,6 +3528,11 @@ jobs:
                   "unit_basis": "volume",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "form_factor_patterns": [
+                      {"key": "lactose_free", "any_tokens": ["\u05d3\u05dc \u05dc\u05e7\u05d8\u05d5\u05d6", "\u05dc\u05dc\u05d0 \u05dc\u05e7\u05d8\u05d5\u05d6", "lactose free"]},
+                  ],
+                  "include_fatpct_in_form_factor": True,
+                  "form_factor_default": "plain_milk",
                   "probe_max_items": 2,
               },
               {
@@ -3545,6 +3559,12 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "form_factor_patterns": [
+                      {"key": "cornflakes", "any_tokens": ["\u05e7\u05d5\u05e8\u05e0\u05e4\u05dc\u05e7\u05e1", "cornflakes"]},
+                      {"key": "granola", "any_tokens": ["\u05d2\u05e8\u05e0\u05d5\u05dc\u05d4", "granola"]},
+                      {"key": "oats", "any_tokens": ["\u05e9\u05d9\u05d1\u05d5\u05dc\u05ea", "oats"]},
+                  ],
+                  "form_factor_default": "generic_cereal",
                   "probe_max_items": 2,
               },
               {
@@ -3558,6 +3578,14 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "form_factor_patterns": [
+                      {"key": "spaghetti", "any_tokens": ["\u05e1\u05e4\u05d2\u05d8\u05d9", "spaghetti"]},
+                      {"key": "fusilli", "any_tokens": ["\u05de\u05e1\u05d5\u05dc\u05e1\u05dc\u05ea", "fusilli"]},
+                      {"key": "penne", "any_tokens": ["\u05e4\u05e0\u05d4", "penne"]},
+                      {"key": "noodles", "any_tokens": ["\u05d0\u05d8\u05e8\u05d9\u05d5\u05ea", "noodles"]},
+                      {"key": "linguine", "any_tokens": ["\u05dc\u05d9\u05e0\u05d2", "linguine"]},
+                  ],
+                  "form_factor_default": "dry_pasta_other",
                   "probe_max_items": 2,
               },
               {
@@ -3571,6 +3599,12 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "form_factor_patterns": [
+                      {"key": "rice", "any_tokens": ["\u05d0\u05d5\u05e8\u05d6", "rice"]},
+                      {"key": "couscous", "any_tokens": ["\u05e7\u05d5\u05e1\u05e7\u05d5\u05e1", "couscous"]},
+                      {"key": "ptitim", "any_tokens": ["\u05e4\u05ea\u05d9\u05ea\u05d9\u05dd", "ptitim"]},
+                  ],
+                  "form_factor_default": "dry_grain_staple",
                   "probe_max_items": 2,
               },
               {
@@ -3584,6 +3618,11 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "form_factor_patterns": [
+                      {"key": "oil", "any_tokens": ["\u05d1\u05e9\u05de\u05df", "oil"]},
+                      {"key": "water", "any_tokens": ["\u05d1\u05de\u05d9\u05dd", "water"]},
+                  ],
+                  "form_factor_default": "tuna_other",
                   "probe_max_items": 2,
               },
               {
@@ -3610,6 +3649,10 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "form_factor_patterns": [
+                      {"key": "whole", "any_tokens": ["\u05d2\u05d5\u05dc\u05de\u05d9\u05ea", "raw"]},
+                  ],
+                  "form_factor_default": "plain_tahini",
                   "probe_max_items": 2,
               },
               {
@@ -3623,6 +3666,7 @@ jobs:
                   "unit_basis": "volume",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "form_factor_default": "plain_water",
                   "probe_max_items": 2,
               },
               {
@@ -3792,6 +3836,28 @@ jobs:
                           return clean_text(pattern)
               return None
 
+          def derive_curated_form_factor_parts_shadow(family_rule: dict, text_tokens, pack_signature):
+              if not family_rule:
+                  return []
+              derived_parts = []
+              for pattern_rule in family_rule.get("form_factor_patterns") or []:
+                  matched_pattern = first_matching_rule_pattern(pattern_rule.get("any_tokens"), text_tokens)
+                  if not matched_pattern:
+                      continue
+                  key = clean_text(pattern_rule.get("key"))
+                  if key and key not in derived_parts:
+                      derived_parts.append(key)
+              if family_rule.get("include_fatpct_in_form_factor"):
+                  fatpct_tokens = sorted({
+                      token for token in (text_tokens or [])
+                      if clean_text(token).startswith("fatpct_")
+                  })
+                  if fatpct_tokens:
+                      derived_parts.append(fatpct_tokens[0])
+              if family_rule.get("comparison_family_key") == "bottled_water" and not derived_parts and pack_signature:
+                  derived_parts.append("plain_water")
+              return derived_parts
+
           def category_matches_family_rule(category_key: str, family_rule: dict) -> bool:
               allowed_category_tokens = family_rule.get("allowed_category_tokens") or []
               if not allowed_category_tokens:
@@ -3826,12 +3892,18 @@ jobs:
                   return "generic"
               return " ".join(base_tokens[:4])
 
-          def build_comparison_form_factor_key_shadow(family_rule: dict, base_product_identity_key: str):
+          def build_comparison_form_factor_key_shadow(family_rule: dict, base_product_identity_key: str, family_tokens=None, pack_signature=None):
               if not family_rule:
                   return None
               family_key = family_rule.get("comparison_family_key")
               if not family_key:
                   return None
+              curated_parts = derive_curated_form_factor_parts_shadow(family_rule, family_tokens or [], pack_signature)
+              if curated_parts:
+                  return f"{family_key}|{'|'.join(curated_parts[:3])}"
+              form_factor_default = clean_text(family_rule.get("form_factor_default"))
+              if form_factor_default:
+                  return f"{family_key}|{form_factor_default}"
               if base_product_identity_key and base_product_identity_key != "generic":
                   return f"{family_key}|{base_product_identity_key}"
               return family_key
@@ -3914,9 +3986,14 @@ jobs:
               comparison_family_rule_value, comparison_family_assignment_basis_value = match_comparison_family_rule(name_value or "", category_key_value, family_tokens_value)
               comparison_family_key_value = comparison_family_rule_value.get("comparison_family_key") if comparison_family_rule_value else None
               base_product_identity_key_value = derive_base_product_identity_key_shadow(comparison_family_rule_value, family_tokens_value)
-              comparison_form_factor_key_value = build_comparison_form_factor_key_shadow(comparison_family_rule_value, base_product_identity_key_value)
-              form_factor_key_value = comparison_form_factor_key_value or build_form_factor_key_shadow(category_key_value, family_tokens_value)
               pack_signature_value = build_pack_signature_shadow(name_value or "", comparison_family_rule_value)
+              comparison_form_factor_key_value = build_comparison_form_factor_key_shadow(
+                  comparison_family_rule_value,
+                  base_product_identity_key_value,
+                  family_tokens_value,
+                  pack_signature_value,
+              )
+              form_factor_key_value = comparison_form_factor_key_value or build_form_factor_key_shadow(category_key_value, family_tokens_value)
               explicit_equivalence_group = clean_text(substitute_group_value).lower() if substitute_group_value else None
               derived_equivalence_group = None
               if comparison_family_key_value and comparison_form_factor_key_value:
@@ -4174,6 +4251,7 @@ jobs:
                   "pack_signature": "legacy pack parsing plus compact Hebrew unit suffix parsing, count-first multipack parsing, eggs count parsing, and bottled-water liter multipack parsing when family rules allow it",
                   "base_product_identity_key": "curated family identity built from normalized family tokens after family-specific strip tokens are removed",
                   "equivalence_group_key": "explicit substitute_group plus curated family when available, with form-factor enforced separately at match time; otherwise derived curated family plus form-factor",
+                  "comparison_form_factor_key": "curated family-specific use-case/form-factor rules first, such as milk fat+lactose-free, tuna water-vs-oil, pasta shape, cereal subtype, bread type, and water plainness; only then reduced base product identity fallback",
                   "same_product_identity_key": "comparison family plus normalized brand identity plus curated base product identity",
               },
               "selected_probe_metadata_coverage": {
