@@ -4240,6 +4240,7 @@ jobs:
           }
           write_json(OUT_DIR / "comparison_source_contract.json", comparison_source_contract)
 
+          shadow_store_rows_by_family = defaultdict(lambda: defaultdict(list))
           shadow_store_rows_by_equivalence_group = defaultdict(lambda: defaultdict(list))
           shadow_store_rows_by_same_product_key = defaultdict(lambda: defaultdict(list))
           for row in prices_payload:
@@ -4248,11 +4249,13 @@ jobs:
               if store_key not in target_store_keys or not barcode:
                   continue
               metadata = product_probe_metadata_by_barcode.get(barcode, {})
+              if metadata.get("comparison_family_key"):
+                  shadow_store_rows_by_family[store_key][metadata["comparison_family_key"]].append(row)
               if metadata.get("equivalence_group_key"):
                   shadow_store_rows_by_equivalence_group[store_key][metadata["equivalence_group_key"]].append(row)
               if metadata.get("same_product_identity_key"):
                   shadow_store_rows_by_same_product_key[store_key][metadata["same_product_identity_key"]].append(row)
-          for store_group_map in list(shadow_store_rows_by_equivalence_group.values()) + list(shadow_store_rows_by_same_product_key.values()):
+          for store_group_map in list(shadow_store_rows_by_family.values()) + list(shadow_store_rows_by_equivalence_group.values()) + list(shadow_store_rows_by_same_product_key.values()):
               for group_rows in store_group_map.values():
                   group_rows.sort(
                       key=lambda row: (
@@ -4691,6 +4694,87 @@ jobs:
                   return "no_proven_match_in_store"
               return "other"
 
+          def shadow_store_candidate_snapshot(anchor_probe: dict, store_key: str):
+              anchor_barcode = anchor_probe["barcode"]
+              anchor_meta = product_probe_metadata_by_barcode.get(anchor_barcode, {})
+              comparison_family_key = clean_text(anchor_meta.get("comparison_family_key"))
+              equivalence_group_key = clean_text(anchor_meta.get("equivalence_group_key"))
+              same_product_identity_key = clean_text(anchor_meta.get("same_product_identity_key"))
+              anchor_category_key = anchor_meta.get("category_key")
+              anchor_form_factor_key = clean_text(anchor_meta.get("form_factor_key"))
+              anchor_requires_gf = bool(anchor_meta.get("requires_gluten_preservation"))
+              exact_identity_available = bool(price_row_by_store_barcode.get((store_key, anchor_barcode)))
+              family_candidates = [
+                  row for row in shadow_store_rows_by_family.get(store_key, {}).get(comparison_family_key, [])
+                  if row.get("barcode") != anchor_barcode
+              ] if comparison_family_key else []
+              same_product_candidates = [
+                  row for row in shadow_store_rows_by_same_product_key.get(store_key, {}).get(same_product_identity_key, [])
+                  if row.get("barcode") != anchor_barcode
+              ] if same_product_identity_key else []
+              equivalence_group_candidates = [
+                  row for row in shadow_store_rows_by_equivalence_group.get(store_key, {}).get(equivalence_group_key, [])
+                  if row.get("barcode") != anchor_barcode
+              ] if equivalence_group_key else []
+              same_category_candidates = []
+              for candidate_row in equivalence_group_candidates:
+                  candidate_meta = product_probe_metadata_by_barcode.get(candidate_row.get("barcode"), {})
+                  if candidate_meta.get("category_key") == anchor_category_key:
+                      same_category_candidates.append(candidate_row)
+              same_form_factor_candidates = []
+              for candidate_row in same_category_candidates:
+                  candidate_meta = product_probe_metadata_by_barcode.get(candidate_row.get("barcode"), {})
+                  if clean_text(candidate_meta.get("form_factor_key")) == anchor_form_factor_key:
+                      same_form_factor_candidates.append(candidate_row)
+              gf_preserved_candidates = []
+              for candidate_row in same_form_factor_candidates:
+                  candidate_meta = product_probe_metadata_by_barcode.get(candidate_row.get("barcode"), {})
+                  gf_ok, _ = gluten_preservation_status(anchor_meta, candidate_meta)
+                  if gf_ok:
+                      gf_preserved_candidates.append(candidate_row)
+              priced_candidates = [
+                  row for row in gf_preserved_candidates
+                  if comparison_price_value(row) is not None
+              ]
+              diagnostic_root_cause_bucket = "exact_identity_present"
+              if not exact_identity_available:
+                  if not comparison_family_key:
+                      diagnostic_root_cause_bucket = "anchor_missing_comparison_family_key"
+                  elif not family_candidates:
+                      diagnostic_root_cause_bucket = "no_store_candidate_in_comparison_family"
+                  elif not equivalence_group_key:
+                      diagnostic_root_cause_bucket = "anchor_missing_equivalence_group_key"
+                  elif not equivalence_group_candidates:
+                      diagnostic_root_cause_bucket = "no_store_candidate_in_equivalence_group"
+                  elif not anchor_category_key:
+                      diagnostic_root_cause_bucket = "anchor_missing_category_key"
+                  elif not same_category_candidates:
+                      diagnostic_root_cause_bucket = "equivalence_group_without_same_category_candidate"
+                  elif not anchor_form_factor_key:
+                      diagnostic_root_cause_bucket = "anchor_missing_form_factor_key"
+                  elif not same_form_factor_candidates:
+                      diagnostic_root_cause_bucket = "same_category_without_same_form_factor_candidate"
+                  elif anchor_requires_gf and not gf_preserved_candidates:
+                      diagnostic_root_cause_bucket = "same_form_factor_but_gf_not_preserved"
+                  elif not priced_candidates:
+                      diagnostic_root_cause_bucket = "same_form_factor_candidate_without_usable_price"
+                  else:
+                      diagnostic_root_cause_bucket = "priced_equivalent_candidate_exists"
+              return {
+                  "comparison_family_key": comparison_family_key,
+                  "equivalence_group_key": equivalence_group_key,
+                  "same_product_identity_key": same_product_identity_key,
+                  "exact_identity_available": exact_identity_available,
+                  "store_family_candidate_count": len(family_candidates),
+                  "store_same_product_candidate_count": len(same_product_candidates),
+                  "store_equivalence_group_candidate_count": len(equivalence_group_candidates),
+                  "store_same_category_equivalence_candidate_count": len(same_category_candidates),
+                  "store_same_form_factor_equivalence_candidate_count": len(same_form_factor_candidates),
+                  "store_gf_preserved_equivalence_candidate_count": len(gf_preserved_candidates),
+                  "store_priced_equivalence_candidate_count": len(priced_candidates),
+                  "diagnostic_root_cause_bucket": diagnostic_root_cause_bucket,
+              }
+
           def resolve_basket_line_shadow_match(anchor_probe: dict, store_key: str):
               anchor_barcode = anchor_probe["barcode"]
               anchor_meta = product_probe_metadata_by_barcode.get(anchor_barcode, {})
@@ -4841,6 +4925,7 @@ jobs:
 
           basket_line_shadow_rows = []
           basket_store_shadow_rows = []
+          store_side_equivalence_candidate_rows = []
           for basket_probe in basket_probe_definitions:
               basket_probe_name = basket_probe["basket_probe_name"]
               probe_items = basket_probe["items"]
@@ -4849,6 +4934,7 @@ jobs:
                   store_key = store["store_key"]
                   store_line_decisions = []
                   for anchor_probe in probe_items:
+                      candidate_snapshot = shadow_store_candidate_snapshot(anchor_probe, store_key)
                       decision = resolve_basket_line_shadow_match(anchor_probe, store_key)
                       store_line_decisions.append(decision)
                       basket_line_shadow_rows.append({
@@ -4873,6 +4959,28 @@ jobs:
                           "budget_line_price": decision["budget_line_price"],
                           "budget_savings_pct": decision["budget_savings_pct"],
                           "reason_or_failure_reason": decision["reason_or_failure_reason"],
+                      })
+                      store_side_equivalence_candidate_rows.append({
+                          "basket_probe_name": basket_probe_name,
+                          "source_item_id": decision["source_item_id"],
+                          "source_item_name": anchor_probe.get("name"),
+                          "store_key": store_key,
+                          "retailer": store.get("retailer"),
+                          "city": store.get("canonical_city") or store.get("city"),
+                          "chosen_layer": decision["chosen_layer"],
+                          "reason_or_failure_reason": decision["reason_or_failure_reason"],
+                          "comparison_family_key": candidate_snapshot["comparison_family_key"],
+                          "equivalence_group_key": candidate_snapshot["equivalence_group_key"],
+                          "same_product_identity_key": candidate_snapshot["same_product_identity_key"],
+                          "exact_identity_available": candidate_snapshot["exact_identity_available"],
+                          "store_family_candidate_count": candidate_snapshot["store_family_candidate_count"],
+                          "store_same_product_candidate_count": candidate_snapshot["store_same_product_candidate_count"],
+                          "store_equivalence_group_candidate_count": candidate_snapshot["store_equivalence_group_candidate_count"],
+                          "store_same_category_equivalence_candidate_count": candidate_snapshot["store_same_category_equivalence_candidate_count"],
+                          "store_same_form_factor_equivalence_candidate_count": candidate_snapshot["store_same_form_factor_equivalence_candidate_count"],
+                          "store_gf_preserved_equivalence_candidate_count": candidate_snapshot["store_gf_preserved_equivalence_candidate_count"],
+                          "store_priced_equivalence_candidate_count": candidate_snapshot["store_priced_equivalence_candidate_count"],
+                          "diagnostic_root_cause_bucket": candidate_snapshot["diagnostic_root_cause_bucket"],
                       })
                   layer_counts = Counter(decision["chosen_layer"] for decision in store_line_decisions)
                   baseline_line_count = (
@@ -5007,6 +5115,78 @@ jobs:
                   "complete_with_budget_alternatives",
                   "reason_passed_or_failed",
               ],
+          )
+          write_csv(
+              OUT_DIR / "store_side_equivalence_candidate_coverage.csv",
+              store_side_equivalence_candidate_rows,
+              [
+                  "basket_probe_name",
+                  "source_item_id",
+                  "source_item_name",
+                  "store_key",
+                  "retailer",
+                  "city",
+                  "chosen_layer",
+                  "reason_or_failure_reason",
+                  "comparison_family_key",
+                  "equivalence_group_key",
+                  "same_product_identity_key",
+                  "exact_identity_available",
+                  "store_family_candidate_count",
+                  "store_same_product_candidate_count",
+                  "store_equivalence_group_candidate_count",
+                  "store_same_category_equivalence_candidate_count",
+                  "store_same_form_factor_equivalence_candidate_count",
+                  "store_gf_preserved_equivalence_candidate_count",
+                  "store_priced_equivalence_candidate_count",
+                  "diagnostic_root_cause_bucket",
+              ],
+          )
+
+          store_side_equivalence_candidate_coverage_summary = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "basket_probes": {},
+          }
+          for basket_probe in basket_probe_definitions:
+              basket_probe_name = basket_probe["basket_probe_name"]
+              probe_candidate_rows = [
+                  row for row in store_side_equivalence_candidate_rows
+                  if row["basket_probe_name"] == basket_probe_name
+                  and row["chosen_layer"] in ("not_proven", "unmatched")
+              ]
+              bucket_counts = Counter(row["diagnostic_root_cause_bucket"] for row in probe_candidate_rows)
+              family_counts = Counter((row["comparison_family_key"] or "unknown") for row in probe_candidate_rows)
+              if bucket_counts.get("no_store_candidate_in_comparison_family", 0) >= max(
+                  bucket_counts.get("no_store_candidate_in_equivalence_group", 0),
+                  bucket_counts.get("equivalence_group_without_same_category_candidate", 0),
+                  bucket_counts.get("same_category_without_same_form_factor_candidate", 0),
+                  bucket_counts.get("same_form_factor_candidate_without_usable_price", 0),
+              ):
+                  dominant_diagnosis = "likely_genuinely_shallow_store_assortment"
+              elif bucket_counts.get("no_store_candidate_in_equivalence_group", 0):
+                  dominant_diagnosis = "likely_store_side_family_assignment_or_equivalence_grouping_gap"
+              elif bucket_counts.get("equivalence_group_without_same_category_candidate", 0) or bucket_counts.get("same_category_without_same_form_factor_candidate", 0):
+                  dominant_diagnosis = "likely_category_or_form_factor_alignment_gap"
+              elif bucket_counts.get("same_form_factor_candidate_without_usable_price", 0):
+                  dominant_diagnosis = "likely_price_eligibility_gap_for_equivalent_candidates"
+              else:
+                  dominant_diagnosis = "mixed_or_unclear"
+              store_side_equivalence_candidate_coverage_summary["basket_probes"][basket_probe_name] = {
+                  "unmatched_or_not_proven_line_count": len(probe_candidate_rows),
+                  "dominant_diagnostic_root_cause": dominant_diagnosis,
+                  "diagnostic_root_cause_buckets": dict(bucket_counts.most_common(10)),
+                  "top_unmatched_comparison_families": dict(family_counts.most_common(10)),
+                  "rows_with_any_store_family_candidate": sum(1 for row in probe_candidate_rows if row["store_family_candidate_count"] > 0),
+                  "rows_with_any_store_same_product_candidate": sum(1 for row in probe_candidate_rows if row["store_same_product_candidate_count"] > 0),
+                  "rows_with_any_store_equivalence_group_candidate": sum(1 for row in probe_candidate_rows if row["store_equivalence_group_candidate_count"] > 0),
+                  "rows_with_any_same_category_equivalence_candidate": sum(1 for row in probe_candidate_rows if row["store_same_category_equivalence_candidate_count"] > 0),
+                  "rows_with_any_same_form_factor_equivalence_candidate": sum(1 for row in probe_candidate_rows if row["store_same_form_factor_equivalence_candidate_count"] > 0),
+                  "rows_with_any_priced_equivalence_candidate": sum(1 for row in probe_candidate_rows if row["store_priced_equivalence_candidate_count"] > 0),
+              }
+          write_json(
+              OUT_DIR / "store_side_equivalence_candidate_coverage_summary.json",
+              store_side_equivalence_candidate_coverage_summary,
           )
 
           legacy_basket_line_rows_for_impact = []
@@ -5662,6 +5842,8 @@ jobs:
             out/product_match_derivation_audit.json
             out/basket_line_shadow_matches.csv
             out/basket_store_shadow_summary.csv
+            out/store_side_equivalence_candidate_coverage.csv
+            out/store_side_equivalence_candidate_coverage_summary.json
             out/basket_shadow_root_cause_summary.json
             out/comparison_source_coverage_audit.json
             out/comparison_source_contract.json
