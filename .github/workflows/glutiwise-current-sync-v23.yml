@@ -3493,7 +3493,7 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
-                  "probe_avoid_tokens": ["active", "spelt", "\u05d0\u05e7\u05d8\u05d9\u05d1", "\u05db\u05d5\u05e1\u05de\u05d9\u05df"],
+                  "probe_avoid_tokens": ["active", "spelt", "\u05d0\u05e7\u05d8\u05d9\u05d1", "\u05db\u05d5\u05e1\u05de\u05d9\u05df", "\u05de\u05d7\u05de\u05e6\u05ea", "\u05e9\u05d9\u05e4\u05d5\u05df", "\u05d7\u05de\u05e0\u05d9\u05d5\u05ea"],
                   "form_factor_patterns": [
                       {"key": "pita", "any_tokens": ["\u05e4\u05d9\u05ea\u05d4", "pita"]},
                       {"key": "challah", "any_tokens": ["\u05d7\u05dc\u05d4", "challah"]},
@@ -3860,6 +3860,21 @@ jobs:
                           return clean_text(pattern)
               return None
 
+          def first_matching_rule_pattern_in_text(patterns, text_tokens, raw_text):
+              matched_pattern = first_matching_rule_pattern(patterns, text_tokens)
+              if matched_pattern or not patterns:
+                  return matched_pattern
+              collapsed_text = collapse_for_match(raw_text).lower()
+              if not collapsed_text:
+                  return None
+              for pattern in patterns:
+                  collapsed_pattern = collapse_for_match(pattern).lower()
+                  if not collapsed_pattern:
+                      continue
+                  if collapsed_pattern in collapsed_text:
+                      return clean_text(pattern)
+              return None
+
           def derive_curated_form_factor_parts_shadow(family_rule: dict, text_tokens, pack_signature):
               if not family_rule:
                   return []
@@ -3987,7 +4002,18 @@ jobs:
                       "probe_specialty_penalty": 0,
                   }
               family_tokens = metadata.get("family_tokens") or normalized_lookup_tokens_shadow(metadata.get("name") or "")
-              matched_probe_avoid_pattern = first_matching_rule_pattern(family_rule.get("probe_avoid_tokens"), family_tokens)
+              probe_text = " ".join(filter(None, [
+                  metadata.get("name"),
+                  metadata.get("line_signature"),
+                  metadata.get("category"),
+                  metadata.get("brand"),
+                  metadata.get("substitute_group"),
+              ]))
+              matched_probe_avoid_pattern = first_matching_rule_pattern_in_text(
+                  family_rule.get("probe_avoid_tokens"),
+                  family_tokens,
+                  probe_text,
+              )
               return {
                   "matched_probe_avoid_pattern": matched_probe_avoid_pattern,
                   "probe_specialty_penalty": 1 if matched_probe_avoid_pattern else 0,
