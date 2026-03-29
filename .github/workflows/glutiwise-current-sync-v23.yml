@@ -3515,6 +3515,13 @@ jobs:
                   "unit_basis": "count",
                   "allow_unit_normalization": False,
                   "allow_canonical_equivalent": True,
+                  "form_factor_patterns": [
+                      {"key": "size_xl", "any_tokens": ["xl", "xxl"]},
+                      {"key": "size_l", "any_tokens": ["l", "large"]},
+                      {"key": "size_m", "any_tokens": ["m", "medium"]},
+                      {"key": "size_s", "any_tokens": ["s", "small"]},
+                  ],
+                  "form_factor_default": "shell_eggs",
                   "probe_max_items": 2,
               },
               {
@@ -3839,6 +3846,25 @@ jobs:
           def derive_curated_form_factor_parts_shadow(family_rule: dict, text_tokens, pack_signature):
               if not family_rule:
                   return []
+              family_key = family_rule.get("comparison_family_key")
+              if family_key == "eggs":
+                  derived_parts = []
+                  if pack_signature and pack_signature.get("dimension") == "count":
+                      try:
+                          count_value = int(round(float(pack_signature.get("total_base_qty") or 0)))
+                      except Exception:
+                          count_value = None
+                      if count_value:
+                          derived_parts.append(f"count_{count_value}")
+                  for pattern_rule in family_rule.get("form_factor_patterns") or []:
+                      matched_pattern = first_matching_rule_pattern(pattern_rule.get("any_tokens"), text_tokens)
+                      if not matched_pattern:
+                          continue
+                      key = clean_text(pattern_rule.get("key"))
+                      if key and key not in derived_parts:
+                          derived_parts.append(key)
+                  if derived_parts:
+                      return derived_parts[:3]
               derived_parts = []
               for pattern_rule in family_rule.get("form_factor_patterns") or []:
                   matched_pattern = first_matching_rule_pattern(pattern_rule.get("any_tokens"), text_tokens)
@@ -3906,6 +3932,8 @@ jobs:
           def derive_base_product_identity_key_shadow(family_rule: dict, family_tokens):
               if not family_rule:
                   return None
+              if family_rule.get("comparison_family_key") == "eggs":
+                  return "shell_eggs"
               strip_tokens = set(family_rule.get("identity_strip_tokens") or [])
               base_tokens = [token for token in family_tokens if token not in strip_tokens]
               if not base_tokens:
