@@ -3493,7 +3493,7 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
-                  "probe_avoid_tokens": ["active", "spelt", "׳׳§׳˜׳™׳‘", "׳›׳•׳¡׳׳™׳"],
+                  "probe_avoid_tokens": ["active", "spelt", "\u05d0\u05e7\u05d8\u05d9\u05d1", "\u05db\u05d5\u05e1\u05de\u05d9\u05df"],
                   "form_factor_patterns": [
                       {"key": "pita", "any_tokens": ["\u05e4\u05d9\u05ea\u05d4", "pita"]},
                       {"key": "challah", "any_tokens": ["\u05d7\u05dc\u05d4", "challah"]},
@@ -3516,7 +3516,7 @@ jobs:
                   "unit_basis": "count",
                   "allow_unit_normalization": False,
                   "allow_canonical_equivalent": True,
-                  "probe_avoid_tokens": ["omega", "׳׳•׳׳’׳”", "dha", "׳׳•׳¨׳’׳ ׳™"],
+                  "probe_avoid_tokens": ["omega", "\u05d0\u05d5\u05de\u05d2\u05d4", "dha", "\u05d0\u05d5\u05e8\u05d2\u05e0\u05d9"],
                   "form_factor_patterns": [
                       {"key": "size_xl", "any_tokens": ["xl", "xxl"]},
                       {"key": "size_l", "any_tokens": ["l", "large"]},
@@ -3537,7 +3537,7 @@ jobs:
                   "unit_basis": "volume",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
-                  "probe_avoid_tokens": ["lactose free", "׳“׳ ׳׳§׳˜׳•׳–", "׳׳׳ ׳׳§׳˜׳•׳–"],
+                  "probe_avoid_tokens": ["lactose free", "\u05d3\u05dc \u05dc\u05e7\u05d8\u05d5\u05d6", "\u05dc\u05dc\u05d0 \u05dc\u05e7\u05d8\u05d5\u05d6"],
                   "form_factor_patterns": [
                       {"key": "lactose_free", "any_tokens": ["\u05d3\u05dc \u05dc\u05e7\u05d8\u05d5\u05d6", "\u05dc\u05dc\u05d0 \u05dc\u05e7\u05d8\u05d5\u05d6", "lactose free"]},
                   ],
@@ -3569,7 +3569,7 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
-                  "probe_avoid_tokens": ["gluten free", "׳׳\"׳’", "׳׳׳ ׳’׳׳•׳˜׳", "׳›׳©׳\"׳₪"],
+                  "probe_avoid_tokens": ["gluten free", "\u05dc\u05dc\"\u05d2", "\u05dc\u05dc\u05d0 \u05d2\u05dc\u05d5\u05d8\u05df", "\u05db\u05e9\u05dc\"\u05e4"],
                   "form_factor_patterns": [
                       {"key": "cornflakes", "any_tokens": ["\u05e7\u05d5\u05e8\u05e0\u05e4\u05dc\u05e7\u05e1", "cornflakes"]},
                       {"key": "granola", "any_tokens": ["\u05d2\u05e8\u05e0\u05d5\u05dc\u05d4", "granola"]},
@@ -3589,7 +3589,7 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
-                  "probe_avoid_tokens": ["ptitim", "׳₪׳×׳™׳×׳™׳"],
+                  "probe_avoid_tokens": ["ptitim", "\u05e4\u05ea\u05d9\u05ea\u05d9\u05dd"],
                   "form_factor_patterns": [
                       {"key": "spaghetti", "any_tokens": ["\u05e1\u05e4\u05d2\u05d8\u05d9", "spaghetti"]},
                       {"key": "fusilli", "any_tokens": ["\u05de\u05e1\u05d5\u05dc\u05e1\u05dc\u05ea", "fusilli"]},
@@ -3772,7 +3772,7 @@ jobs:
                               "derivation_rule": "eggs_count_pack",
                           }
               if family_key == "eggs":
-                  match = re.search(r"\b(?P<count>\d{1,2})\s*(?:׳™׳—(?:׳™׳“׳”|׳™׳“׳•׳×)?|pcs?|pieces?)\b", text)
+                  match = re.search(r"\b(?P<count>\d{1,2})\s*(?:\u05d9\u05d7(?:\u05d9\u05d3\u05d4|\u05d9\u05d3\u05d5\u05ea)?|pcs?|pieces?)\b", text)
                   if match:
                       count = safe_positive_int(match.group("count"))
                       if count is not None and 4 <= count <= 30:
