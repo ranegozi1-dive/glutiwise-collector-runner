@@ -4350,6 +4350,127 @@ jobs:
                       )
                   )
 
+          store_comparison_family_coverage_rows = []
+          family_coverage_summary = {}
+          for family_rule in comparison_family_registry:
+              family_key = family_rule["comparison_family_key"]
+              store_rows_for_family = []
+              present_store_counts = []
+              missing_store_keys = []
+              for store in sorted(discovered_target_stores, key=lambda row: row["store_key"]):
+                  store_key = store["store_key"]
+                  family_rows = shadow_store_rows_by_family.get(store_key, {}).get(family_key, [])
+                  family_barcodes = sorted({row.get("barcode") for row in family_rows if row.get("barcode")})
+                  family_metadata = [
+                      product_probe_metadata_by_barcode.get(barcode, {})
+                      for barcode in family_barcodes
+                  ]
+                  distinct_form_factors = sorted({
+                      clean_text(meta.get("form_factor_key"))
+                      for meta in family_metadata
+                      if clean_text(meta.get("form_factor_key"))
+                  })
+                  distinct_equivalence_groups = sorted({
+                      clean_text(meta.get("equivalence_group_key"))
+                      for meta in family_metadata
+                      if clean_text(meta.get("equivalence_group_key"))
+                  })
+                  distinct_same_product_keys = sorted({
+                      clean_text(meta.get("same_product_identity_key"))
+                      for meta in family_metadata
+                      if clean_text(meta.get("same_product_identity_key"))
+                  })
+                  row = {
+                      "store_key": store_key,
+                      "retailer": store.get("retailer"),
+                      "city": store.get("city"),
+                      "comparison_family_key": family_key,
+                      "has_any_family_candidate": bool(family_barcodes),
+                      "priced_family_product_count": len(family_barcodes),
+                      "distinct_form_factor_count": len(distinct_form_factors),
+                      "distinct_equivalence_group_count": len(distinct_equivalence_groups),
+                      "distinct_same_product_identity_count": len(distinct_same_product_keys),
+                      "form_factor_examples": " | ".join(distinct_form_factors[:5]),
+                      "equivalence_group_examples": " | ".join(distinct_equivalence_groups[:5]),
+                  }
+                  store_comparison_family_coverage_rows.append(row)
+                  store_rows_for_family.append(row)
+                  if family_barcodes:
+                      present_store_counts.append(len(family_barcodes))
+                  else:
+                      missing_store_keys.append(store_key)
+              family_coverage_summary[family_key] = {
+                  "why": family_rule.get("why"),
+                  "target_store_count": len(discovered_target_stores),
+                  "stores_with_any_family_candidate": sum(1 for row in store_rows_for_family if row["has_any_family_candidate"]),
+                  "stores_missing_family_candidate": len(missing_store_keys),
+                  "missing_store_keys": missing_store_keys,
+                  "median_priced_family_product_count_when_present": median_number(present_store_counts),
+                  "stores_with_multiple_form_factors": sum(1 for row in store_rows_for_family if row["distinct_form_factor_count"] >= 2),
+                  "stores_with_multiple_equivalence_groups": sum(1 for row in store_rows_for_family if row["distinct_equivalence_group_count"] >= 2),
+              }
+          write_csv(
+              OUT_DIR / "store_comparison_family_coverage.csv",
+              store_comparison_family_coverage_rows,
+              [
+                  "store_key",
+                  "retailer",
+                  "city",
+                  "comparison_family_key",
+                  "has_any_family_candidate",
+                  "priced_family_product_count",
+                  "distinct_form_factor_count",
+                  "distinct_equivalence_group_count",
+                  "distinct_same_product_identity_count",
+                  "form_factor_examples",
+                  "equivalence_group_examples",
+              ],
+          )
+          per_store_family_rows = defaultdict(list)
+          for row in store_comparison_family_coverage_rows:
+              per_store_family_rows[row["store_key"]].append(row)
+          store_family_coverage_summary = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "target_store_count": len(discovered_target_stores),
+              "comparison_family_count": len(comparison_family_registry),
+              "stores_with_all_curated_families_present": sum(
+                  1 for rows in per_store_family_rows.values()
+                  if rows and all(row["has_any_family_candidate"] for row in rows)
+              ),
+              "median_curated_family_coverage_per_store": median_number(
+                  [
+                      sum(1 for row in rows if row["has_any_family_candidate"])
+                      for rows in per_store_family_rows.values()
+                  ]
+              ),
+              "top_stores_by_missing_family_count": [
+                  {
+                      "store_key": store_key,
+                      "retailer": rows[0]["retailer"] if rows else None,
+                      "city": rows[0]["city"] if rows else None,
+                      "missing_family_count": sum(1 for row in rows if not row["has_any_family_candidate"]),
+                      "missing_family_keys": [
+                          row["comparison_family_key"]
+                          for row in rows
+                          if not row["has_any_family_candidate"]
+                      ][:8],
+                  }
+                  for store_key, rows in sorted(
+                      per_store_family_rows.items(),
+                      key=lambda item: (
+                          -sum(1 for row in item[1] if not row["has_any_family_candidate"]),
+                          item[0],
+                      )
+                  )[:10]
+              ],
+              "family_coverage": family_coverage_summary,
+          }
+          write_json(
+              OUT_DIR / "store_comparison_family_coverage_summary.json",
+              store_family_coverage_summary,
+          )
+
           def normalized_anchor_line_price_from_metadata(metadata_by_barcode, anchor_probe: dict, candidate_unit_price):
               if candidate_unit_price is None:
                   return None
@@ -5423,12 +5544,14 @@ jobs:
               "budget_alternative_remains_separate_from_baseline": True,
               "basket_probes": {},
           }
+          store_side_probe_summaries = store_side_equivalence_candidate_coverage_summary["basket_probes"]
           for basket_probe in basket_probe_definitions:
               basket_probe_name = basket_probe["basket_probe_name"]
               selected_probe_size = basket_probe["selected_probe_size"]
               material_line_threshold = max(2, (selected_probe_size + 4) // 5)
               probe_store_rows = [row for row in basket_store_shadow_rows if row["basket_probe_name"] == basket_probe_name]
               probe_line_rows = [row for row in basket_line_shadow_rows if row["basket_probe_name"] == basket_probe_name]
+              store_side_probe_summary = store_side_probe_summaries.get(basket_probe_name, {})
               failure_reason_counts = Counter(
                   row["reason_or_failure_reason"]
                   for row in probe_line_rows
@@ -5476,7 +5599,9 @@ jobs:
                       1 for row in probe_store_rows
                       if row["store_key"] in weak_target_store_key_set and not row["full_baseline_coverage"] and row["complete_with_budget_alternatives"]
                   ),
-                  "main_blockers": dict(failure_bucket_counts.most_common(5)),
+                  "dominant_diagnostic_root_cause": store_side_probe_summary.get("dominant_diagnostic_root_cause", "mixed_or_unclear"),
+                  "main_blockers": store_side_probe_summary.get("diagnostic_root_cause_buckets", dict(failure_bucket_counts.most_common(5))),
+                  "generic_failure_buckets": dict(failure_bucket_counts.most_common(5)),
                   "top_failure_reasons": dict(failure_reason_counts.most_common(10)),
               }
           write_json(OUT_DIR / "basket_shadow_root_cause_summary.json", basket_shadow_root_cause_summary)
@@ -5531,6 +5656,7 @@ jobs:
               if row["basket_probe_name"] == "core_food_basket_20"
           ]
           basket_20_layer_counts = Counter(row["chosen_layer"] for row in basket_20_line_rows)
+          basket_20_store_side_summary = store_side_probe_summaries.get("core_food_basket_20", {})
           basket_20_failure_bucket_counts = Counter(
               basket_failure_bucket(row["reason_or_failure_reason"])
               for row in basket_20_line_rows
@@ -5545,7 +5671,17 @@ jobs:
               comparison_source_coverage_gaps.append("not every selected basket line has curated same-product identity plus pack-size normalization evidence")
           if source_items_requiring_gf_preservation and source_items_with_explicit_gf_evidence_when_required < source_items_requiring_gf_preservation:
               comparison_source_coverage_gaps.append("some gluten-sensitive basket lines lack explicit GF preservation evidence")
-          if basket_20_failure_bucket_counts:
+          if basket_20_store_side_summary.get("diagnostic_root_cause_buckets"):
+              comparison_source_coverage_gaps.append(
+                  "20-item shadow basket still fails mainly due to store-side candidate limits: "
+                  + ", ".join(
+                      f"{reason}:{count}"
+                      for reason, count in Counter(
+                          basket_20_store_side_summary.get("diagnostic_root_cause_buckets", {})
+                      ).most_common(3)
+                  )
+              )
+          elif basket_20_failure_bucket_counts:
               comparison_source_coverage_gaps.append(
                   "20-item shadow basket still fails mainly due to: "
                   + ", ".join(
@@ -5581,6 +5717,17 @@ jobs:
                   "budget_alternative_count": basket_20_layer_counts.get("budget_alternative", 0),
                   "not_proven_count": basket_20_layer_counts.get("not_proven", 0),
                   "unmatched_count": basket_20_layer_counts.get("unmatched", 0),
+              },
+              "store_side_candidate_diagnostics_for_core_food_basket_20": {
+                  "dominant_diagnostic_root_cause": basket_20_store_side_summary.get("dominant_diagnostic_root_cause"),
+                  "diagnostic_root_cause_buckets": basket_20_store_side_summary.get("diagnostic_root_cause_buckets", {}),
+                  "rows_with_any_store_family_candidate": basket_20_store_side_summary.get("rows_with_any_store_family_candidate"),
+                  "rows_with_any_family_same_category_candidate": basket_20_store_side_summary.get("rows_with_any_family_same_category_candidate"),
+                  "rows_with_any_family_same_form_factor_candidate": basket_20_store_side_summary.get("rows_with_any_family_same_form_factor_candidate"),
+                  "rows_with_any_family_priced_same_form_factor_candidate": basket_20_store_side_summary.get("rows_with_any_family_priced_same_form_factor_candidate"),
+                  "rows_with_any_store_equivalence_group_candidate": basket_20_store_side_summary.get("rows_with_any_store_equivalence_group_candidate"),
+                  "rows_with_any_same_form_factor_equivalence_candidate": basket_20_store_side_summary.get("rows_with_any_same_form_factor_equivalence_candidate"),
+                  "rows_with_any_priced_equivalence_candidate": basket_20_store_side_summary.get("rows_with_any_priced_equivalence_candidate"),
               },
               "gaps_preventing_stronger_trustworthy_comparison": comparison_source_coverage_gaps,
           })
@@ -5964,6 +6111,8 @@ jobs:
             out/basket_store_shadow_summary.csv
             out/store_side_equivalence_candidate_coverage.csv
             out/store_side_equivalence_candidate_coverage_summary.json
+            out/store_comparison_family_coverage.csv
+            out/store_comparison_family_coverage_summary.json
             out/basket_shadow_root_cause_summary.json
             out/comparison_source_coverage_audit.json
             out/comparison_source_contract.json
