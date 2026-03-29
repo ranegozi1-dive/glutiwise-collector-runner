@@ -3877,6 +3877,19 @@ jobs:
                   matched_required_pattern = first_matching_rule_pattern(family_rule.get("required_any_tokens"), text_tokens)
                   if not matched_required_pattern:
                       continue
+                  if family_rule.get("comparison_family_key") == "eggs":
+                      eggs_non_shell_pattern = first_matching_rule_pattern(
+                          ["מצה", "מצות", "matzo", "bread", "לחם", "פיתה", "חלה", "cake", "cookie", "biscuit"],
+                          text_tokens,
+                      )
+                      if eggs_non_shell_pattern:
+                          continue
+                      eggs_weight_pattern = first_matching_rule_pattern(
+                          ["גר", "גרם", "קג", "g", "kg"],
+                          text_tokens,
+                      )
+                      if eggs_weight_pattern:
+                          continue
                   if family_rule.get("comparison_family_key") == "tahini_basic":
                       tahini_dip_pattern = first_matching_rule_pattern(
                           ["\u05d7\u05d5\u05de\u05d5\u05e1", "hummus", "\u05de\u05de\u05e8\u05d7", "spread", "dip", "\u05e1\u05dc\u05d8"],
