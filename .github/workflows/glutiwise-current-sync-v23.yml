@@ -3877,6 +3877,13 @@ jobs:
                   matched_required_pattern = first_matching_rule_pattern(family_rule.get("required_any_tokens"), text_tokens)
                   if not matched_required_pattern:
                       continue
+                  if family_rule.get("comparison_family_key") == "tahini_basic":
+                      tahini_dip_pattern = first_matching_rule_pattern(
+                          ["\u05d7\u05d5\u05de\u05d5\u05e1", "hummus", "\u05de\u05de\u05e8\u05d7", "spread", "dip", "\u05e1\u05dc\u05d8"],
+                          text_tokens,
+                      )
+                      if tahini_dip_pattern:
+                          continue
                   return family_rule, {
                       "matched_required_pattern": matched_required_pattern,
                       "category_key": category_key,
