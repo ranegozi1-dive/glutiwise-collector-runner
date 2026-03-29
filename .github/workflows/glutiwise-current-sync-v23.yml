@@ -4799,17 +4799,31 @@ jobs:
                   candidate_meta = product_probe_metadata_by_barcode.get(candidate_row.get("barcode"), {})
                   if candidate_meta.get("category_key") == anchor_category_key:
                       same_category_candidates.append(candidate_row)
+              family_same_category_candidates = []
+              for candidate_row in family_candidates:
+                  candidate_meta = product_probe_metadata_by_barcode.get(candidate_row.get("barcode"), {})
+                  if candidate_meta.get("category_key") == anchor_category_key:
+                      family_same_category_candidates.append(candidate_row)
               same_form_factor_candidates = []
               for candidate_row in same_category_candidates:
                   candidate_meta = product_probe_metadata_by_barcode.get(candidate_row.get("barcode"), {})
                   if clean_text(candidate_meta.get("form_factor_key")) == anchor_form_factor_key:
                       same_form_factor_candidates.append(candidate_row)
+              family_same_form_factor_candidates = []
+              for candidate_row in family_same_category_candidates:
+                  candidate_meta = product_probe_metadata_by_barcode.get(candidate_row.get("barcode"), {})
+                  if clean_text(candidate_meta.get("form_factor_key")) == anchor_form_factor_key:
+                      family_same_form_factor_candidates.append(candidate_row)
               gf_preserved_candidates = []
               for candidate_row in same_form_factor_candidates:
                   candidate_meta = product_probe_metadata_by_barcode.get(candidate_row.get("barcode"), {})
                   gf_ok, _ = gluten_preservation_status(anchor_meta, candidate_meta)
                   if gf_ok:
                       gf_preserved_candidates.append(candidate_row)
+              family_priced_same_form_factor_candidates = [
+                  row for row in family_same_form_factor_candidates
+                  if comparison_price_value(row) is not None
+              ]
               priced_candidates = [
                   row for row in gf_preserved_candidates
                   if comparison_price_value(row) is not None
@@ -4823,7 +4837,12 @@ jobs:
                   elif not equivalence_group_key:
                       diagnostic_root_cause_bucket = "anchor_missing_equivalence_group_key"
                   elif not equivalence_group_candidates:
-                      diagnostic_root_cause_bucket = "no_store_candidate_in_equivalence_group"
+                      if family_same_form_factor_candidates:
+                          diagnostic_root_cause_bucket = "same_family_same_form_factor_candidate_outside_equivalence_group"
+                      elif family_same_category_candidates:
+                          diagnostic_root_cause_bucket = "same_family_same_category_candidate_outside_equivalence_group"
+                      else:
+                          diagnostic_root_cause_bucket = "no_store_candidate_in_equivalence_group"
                   elif not anchor_category_key:
                       diagnostic_root_cause_bucket = "anchor_missing_category_key"
                   elif not same_category_candidates:
@@ -4844,6 +4863,9 @@ jobs:
                   "same_product_identity_key": same_product_identity_key,
                   "exact_identity_available": exact_identity_available,
                   "store_family_candidate_count": len(family_candidates),
+                  "store_family_same_category_candidate_count": len(family_same_category_candidates),
+                  "store_family_same_form_factor_candidate_count": len(family_same_form_factor_candidates),
+                  "store_family_priced_same_form_factor_candidate_count": len(family_priced_same_form_factor_candidates),
                   "store_same_product_candidate_count": len(same_product_candidates),
                   "store_equivalence_group_candidate_count": len(equivalence_group_candidates),
                   "store_same_category_equivalence_candidate_count": len(same_category_candidates),
@@ -5211,6 +5233,9 @@ jobs:
                   "same_product_identity_key",
                   "exact_identity_available",
                   "store_family_candidate_count",
+                  "store_family_same_category_candidate_count",
+                  "store_family_same_form_factor_candidate_count",
+                  "store_family_priced_same_form_factor_candidate_count",
                   "store_same_product_candidate_count",
                   "store_equivalence_group_candidate_count",
                   "store_same_category_equivalence_candidate_count",
@@ -5237,11 +5262,15 @@ jobs:
               family_counts = Counter((row["comparison_family_key"] or "unknown") for row in probe_candidate_rows)
               if bucket_counts.get("no_store_candidate_in_comparison_family", 0) >= max(
                   bucket_counts.get("no_store_candidate_in_equivalence_group", 0),
+                  bucket_counts.get("same_family_same_category_candidate_outside_equivalence_group", 0),
+                  bucket_counts.get("same_family_same_form_factor_candidate_outside_equivalence_group", 0),
                   bucket_counts.get("equivalence_group_without_same_category_candidate", 0),
                   bucket_counts.get("same_category_without_same_form_factor_candidate", 0),
                   bucket_counts.get("same_form_factor_candidate_without_usable_price", 0),
               ):
                   dominant_diagnosis = "likely_genuinely_shallow_store_assortment"
+              elif bucket_counts.get("same_family_same_form_factor_candidate_outside_equivalence_group", 0) or bucket_counts.get("same_family_same_category_candidate_outside_equivalence_group", 0):
+                  dominant_diagnosis = "likely_equivalence_group_derivation_gap"
               elif bucket_counts.get("no_store_candidate_in_equivalence_group", 0):
                   dominant_diagnosis = "likely_store_side_family_assignment_or_equivalence_grouping_gap"
               elif bucket_counts.get("equivalence_group_without_same_category_candidate", 0) or bucket_counts.get("same_category_without_same_form_factor_candidate", 0):
@@ -5256,6 +5285,9 @@ jobs:
                   "diagnostic_root_cause_buckets": dict(bucket_counts.most_common(10)),
                   "top_unmatched_comparison_families": dict(family_counts.most_common(10)),
                   "rows_with_any_store_family_candidate": sum(1 for row in probe_candidate_rows if row["store_family_candidate_count"] > 0),
+                  "rows_with_any_family_same_category_candidate": sum(1 for row in probe_candidate_rows if row["store_family_same_category_candidate_count"] > 0),
+                  "rows_with_any_family_same_form_factor_candidate": sum(1 for row in probe_candidate_rows if row["store_family_same_form_factor_candidate_count"] > 0),
+                  "rows_with_any_family_priced_same_form_factor_candidate": sum(1 for row in probe_candidate_rows if row["store_family_priced_same_form_factor_candidate_count"] > 0),
                   "rows_with_any_store_same_product_candidate": sum(1 for row in probe_candidate_rows if row["store_same_product_candidate_count"] > 0),
                   "rows_with_any_store_equivalence_group_candidate": sum(1 for row in probe_candidate_rows if row["store_equivalence_group_candidate_count"] > 0),
                   "rows_with_any_same_category_equivalence_candidate": sum(1 for row in probe_candidate_rows if row["store_same_category_equivalence_candidate_count"] > 0),
