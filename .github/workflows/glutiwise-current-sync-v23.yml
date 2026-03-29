@@ -3924,11 +3924,11 @@ jobs:
               elif not explicit_equivalence_group and category_key_value and len(family_tokens_value) >= 2 and form_factor_key_value:
                   derived_equivalence_group = f"generic::{form_factor_key_value}"
               if explicit_equivalence_group and comparison_form_factor_key_value and comparison_family_key_value:
-                  equivalence_group_key_value = f"{comparison_family_key_value}|sg::{explicit_equivalence_group}|ff::{comparison_form_factor_key_value}"
-                  equivalence_group_source = "explicit_substitute_group_plus_curated_family"
+                  equivalence_group_key_value = f"{comparison_family_key_value}|sg::{explicit_equivalence_group}"
+                  equivalence_group_source = "explicit_substitute_group_plus_curated_family_form_factor_enforced_at_match_time"
               elif explicit_equivalence_group and form_factor_key_value:
-                  equivalence_group_key_value = f"generic|sg::{explicit_equivalence_group}|ff::{form_factor_key_value}"
-                  equivalence_group_source = "explicit_substitute_group_plus_generic_form_factor"
+                  equivalence_group_key_value = f"generic|sg::{explicit_equivalence_group}"
+                  equivalence_group_source = "explicit_substitute_group_plus_generic_family_form_factor_enforced_at_match_time"
               else:
                   equivalence_group_key_value = derived_equivalence_group
                   equivalence_group_source = "derived_curated_family_form_factor" if comparison_family_key_value and derived_equivalence_group else "derived_generic_form_factor" if derived_equivalence_group else None
@@ -4173,7 +4173,7 @@ jobs:
                   "line_signature": "name tokens with pack expressions, numeric noise, and brand/manufacturer tokens removed while preserving fat and size qualifiers when explicit",
                   "pack_signature": "legacy pack parsing plus compact Hebrew unit suffix parsing, count-first multipack parsing, eggs count parsing, and bottled-water liter multipack parsing when family rules allow it",
                   "base_product_identity_key": "curated family identity built from normalized family tokens after family-specific strip tokens are removed",
-                  "equivalence_group_key": "explicit substitute_group plus curated family/form-factor when available, otherwise derived curated family plus form-factor",
+                  "equivalence_group_key": "explicit substitute_group plus curated family when available, with form-factor enforced separately at match time; otherwise derived curated family plus form-factor",
                   "same_product_identity_key": "comparison family plus normalized brand identity plus curated base product identity",
               },
               "selected_probe_metadata_coverage": {
