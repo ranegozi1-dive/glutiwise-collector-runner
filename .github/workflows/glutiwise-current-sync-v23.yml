@@ -4223,6 +4223,9 @@ jobs:
                   "is_selected_candidate": assessment["is_selected_candidate"],
                   "reasons": assessment["reasons"],
                   "matched_probe_avoid_pattern": assessment.get("matched_probe_avoid_pattern"),
+                  "matched_probe_prefer_pattern": assessment.get("matched_probe_prefer_pattern"),
+                  "matched_probe_deprioritize_pattern": assessment.get("matched_probe_deprioritize_pattern"),
+                  "probe_baseline_anchor_score": assessment.get("probe_baseline_anchor_score", 0),
                   "probe_specialty_penalty": assessment.get("probe_specialty_penalty", 0),
                   "metadata": metadata,
               }
