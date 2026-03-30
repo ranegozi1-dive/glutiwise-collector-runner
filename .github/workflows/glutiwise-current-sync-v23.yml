@@ -3632,8 +3632,8 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
-                  "probe_prefer_tokens": ["\u05d0\u05d5\u05e8\u05d6", "rice", "\u05e7\u05d5\u05e1\u05e7\u05d5\u05e1", "couscous"],
-                  "probe_deprioritize_tokens": ["\u05d0\u05d8\u05e8\u05d9\u05d5\u05ea", "noodles", "\u05e7\u05d5\u05e1\u05e7\u05d5\u05e1 \u05de\u05d4\u05d9\u05e8", "instant couscous", "\u05e4\u05ea\u05d9\u05ea\u05d9\u05dd", "ptitim"],
+                  "probe_prefer_tokens": ["\u05d0\u05d5\u05e8\u05d6", "rice", "\u05e7\u05d5\u05e1\u05e7\u05d5\u05e1", "couscous", "\u05e7\u05dc\u05d0\u05e1\u05d9", "classic"],
+                  "probe_deprioritize_tokens": ["\u05d0\u05d8\u05e8\u05d9\u05d5\u05ea", "noodles", "\u05e7\u05d5\u05e1\u05e7\u05d5\u05e1 \u05de\u05d4\u05d9\u05e8", "instant couscous", "\u05e4\u05ea\u05d9\u05ea\u05d9\u05dd", "ptitim", "\u05e4\u05e8\u05d9\u05db\u05d9\u05d5\u05ea", "crackers", "\u05e9\u05d1\u05d1\u05d9", "\u05de\u05d9\u05e7\u05e1", "mix", "\u05d1\u05e1\u05de\u05d8\u05d9", "\u05d9\u05e1\u05de\u05d9\u05df", "\u05e8\u05d9\u05d6\u05d5\u05d8\u05d5"],
                   "form_factor_patterns": [
                       {"key": "rice", "any_tokens": ["\u05d0\u05d5\u05e8\u05d6", "rice"]},
                       {"key": "couscous", "any_tokens": ["\u05e7\u05d5\u05e1\u05e7\u05d5\u05e1", "couscous"]},
@@ -4078,7 +4078,13 @@ jobs:
               family_rule = comparison_family_registry_by_key.get(metadata.get("comparison_family_key")) if metadata.get("comparison_family_key") else None
               basket_group = metadata.get("comparison_family_key")
               probe_plainness = derive_probe_plainness_shadow(metadata)
-              if not category_key or category_key in suspicious_category_keys or re.fullmatch(r"\d+", category_key):
+              family_allows_misc_category = (
+                  bool(family_rule)
+                  and family_rule.get("comparison_family_key") in {"rice_couscous_basic"}
+                  and category_key in suspicious_category_keys
+                  and category_key in set(family_rule.get("allowed_category_tokens") or [])
+              )
+              if not category_key or ((category_key in suspicious_category_keys) and not family_allows_misc_category) or re.fullmatch(r"\d+", category_key):
                   reasons.append("suspicious_or_low_reliability_category")
               if any(token in text for token in explicit_non_food_tokens):
                   reasons.append("explicit_non_food_signal")
