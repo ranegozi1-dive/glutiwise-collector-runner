@@ -3632,8 +3632,8 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
-                  "probe_prefer_tokens": ["\u05d0\u05d5\u05e8\u05d6", "rice", "\u05e7\u05d5\u05e1\u05e7\u05d5\u05e1", "couscous"],
-                  "probe_deprioritize_tokens": ["\u05e4\u05ea\u05d9\u05ea\u05d9\u05dd", "ptitim"],
+                  "probe_prefer_tokens": ["\u05d0\u05d5\u05e8\u05d6", "rice"],
+                  "probe_deprioritize_tokens": ["\u05e7\u05d5\u05e1\u05e7\u05d5\u05e1", "couscous", "\u05e4\u05ea\u05d9\u05ea\u05d9\u05dd", "ptitim"],
                   "form_factor_patterns": [
                       {"key": "rice", "any_tokens": ["\u05d0\u05d5\u05e8\u05d6", "rice"]},
                       {"key": "couscous", "any_tokens": ["\u05e7\u05d5\u05e1\u05e7\u05d5\u05e1", "couscous"]},
@@ -3671,6 +3671,8 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "probe_prefer_tokens": ["\u05e2\u05d3\u05e9\u05d9\u05dd", "lentils", "\u05e9\u05e2\u05d5\u05e2\u05d9\u05ea", "beans", "\u05d7\u05d5\u05de\u05d5\u05e1 \u05d9\u05d1\u05e9"],
+                  "probe_deprioritize_tokens": ["\u05d1\u05e8\u05d5\u05d8\u05d1", "\u05e8\u05d5\u05d8\u05d1", "\u05e2\u05d2\u05d1\u05e0\u05d9\u05d5\u05ea", "tomato", "\u05d0\u05e4\u05d5\u05d9", "baked", "\u05de\u05d5\u05db\u05df", "\u05de\u05d5\u05db\u05e0\u05d4"],
                   "probe_max_items": 2,
               },
               {
