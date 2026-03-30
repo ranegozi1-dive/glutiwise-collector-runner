@@ -3523,6 +3523,9 @@ jobs:
                   "probe_deprioritize_count_values": [6, 18, 30],
                   "probe_deprioritize_tokens": ["\u05d7\u05d5\u05e4\u05e9", "\u05d0\u05d5\u05de\u05d2\u05d4", "\u05d0\u05d5\u05e8\u05d2\u05e0\u05d9"],
                   "form_factor_patterns": [
+                      {"key": "omega", "any_tokens": ["\u05d0\u05d5\u05de\u05d2\u05d4", "omega"]},
+                      {"key": "free_range", "any_tokens": ["\u05d7\u05d5\u05e4\u05e9", "free range"]},
+                      {"key": "organic", "any_tokens": ["\u05d0\u05d5\u05e8\u05d2\u05e0\u05d9", "organic"]},
                       {"key": "size_xl", "any_tokens": ["xl", "xxl"]},
                       {"key": "size_l", "any_tokens": ["l", "large"]},
                       {"key": "size_m", "any_tokens": ["m", "medium"]},
@@ -3905,6 +3908,8 @@ jobs:
                       if not matched_pattern:
                           continue
                       key = clean_text(pattern_rule.get("key"))
+                      if key.startswith("size_"):
+                          continue
                       if key and key not in derived_parts:
                           derived_parts.append(key)
                   if derived_parts:
@@ -4848,11 +4853,20 @@ jobs:
                   }
               failure_reason = next(
                   (
-                      reason for reason in (canonical_reason, unit_reason, budget_reason)
+                      reason for reason in (canonical_reason, budget_reason, unit_reason)
                       if clean_text(reason).lower().startswith("not_proven")
+                      and clean_text(reason).lower() != "not_proven_family_disallows_unit_normalization"
                   ),
                   None,
               )
+              if not failure_reason:
+                  failure_reason = next(
+                      (
+                          reason for reason in (canonical_reason, budget_reason, unit_reason)
+                          if clean_text(reason).lower().startswith("not_proven")
+                      ),
+                      None,
+                  )
               if not failure_reason:
                   failure_reason = next(
                       (
