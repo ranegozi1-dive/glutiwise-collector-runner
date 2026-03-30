@@ -4211,6 +4211,25 @@ jobs:
                   "same_product_identity_key": same_product_identity_key_value,
               }
 
+          shadow_store_coverage_by_family = defaultdict(set)
+          shadow_store_coverage_by_form_factor = defaultdict(set)
+          shadow_store_coverage_by_equivalence_group = defaultdict(set)
+          for row in prices_payload:
+              store_key = row.get("store_key")
+              barcode = row.get("barcode")
+              if store_key not in target_store_keys or not barcode:
+                  continue
+              metadata = shadow_product_probe_metadata_by_barcode.get(barcode, {})
+              family_key = clean_text(metadata.get("comparison_family_key"))
+              form_factor_key = clean_text(metadata.get("form_factor_key"))
+              equivalence_group_key = clean_text(metadata.get("equivalence_group_key"))
+              if family_key:
+                  shadow_store_coverage_by_family[family_key].add(store_key)
+              if form_factor_key:
+                  shadow_store_coverage_by_form_factor[form_factor_key].add(store_key)
+              if equivalence_group_key:
+                  shadow_store_coverage_by_equivalence_group[equivalence_group_key].add(store_key)
+
           shadow_probe_candidates = []
           probe_candidate_info_by_barcode = {}
           for barcode in sorted(comparison_universe_barcodes):
@@ -4222,6 +4241,9 @@ jobs:
                   "category_key": metadata.get("category_key"),
                   "brand": metadata.get("brand"),
                   "exact_store_coverage_count": len(barcode_store_key_map.get(barcode, set())),
+                  "family_store_coverage_count": len(shadow_store_coverage_by_family.get(clean_text(metadata.get("comparison_family_key")), set())),
+                  "form_factor_store_coverage_count": len(shadow_store_coverage_by_form_factor.get(clean_text(metadata.get("form_factor_key")), set())),
+                  "equivalence_group_store_coverage_count": len(shadow_store_coverage_by_equivalence_group.get(clean_text(metadata.get("equivalence_group_key")), set())),
                   "has_pack_signature": bool(metadata.get("pack_signature")),
                   "has_equivalence_group": bool(metadata.get("equivalence_group_key")),
                   "has_same_product_identity": bool(metadata.get("same_product_identity_key")),
@@ -4246,6 +4268,9 @@ jobs:
               key=lambda row: (
                   core_food_group_priority.get(row.get("basket_group") or "", 99),
                   row.get("probe_baseline_anchor_score", 0),
+                  -row.get("equivalence_group_store_coverage_count", 0),
+                  -row.get("form_factor_store_coverage_count", 0),
+                  -row.get("family_store_coverage_count", 0),
                   row.get("probe_specialty_penalty", 0),
                   -(1 if row.get("has_equivalence_group") else 0),
                   -(1 if row.get("has_same_product_identity") else 0),
@@ -4321,6 +4346,9 @@ jobs:
                   "line_signature": metadata.get("line_signature"),
                   "pack_signature": metadata.get("pack_signature"),
                   "exact_store_coverage_count": len(barcode_store_key_map.get(barcode, set())),
+                  "family_store_coverage_count": probe_candidate_info_by_barcode.get(barcode, {}).get("family_store_coverage_count", 0),
+                  "form_factor_store_coverage_count": probe_candidate_info_by_barcode.get(barcode, {}).get("form_factor_store_coverage_count", 0),
+                  "equivalence_group_store_coverage_count": probe_candidate_info_by_barcode.get(barcode, {}).get("equivalence_group_store_coverage_count", 0),
                   "reference_effective_price_median": median_number(reference_prices),
                   "reference_unit_price_median": median_number(reference_unit_prices),
                   "selection_reason": improved_selection_reason_by_barcode.get(barcode),
@@ -4346,6 +4374,9 @@ jobs:
                       "name": candidate.get("name"),
                       "category": candidate.get("category"),
                       "comparison_family_key": candidate.get("basket_group"),
+                      "family_store_coverage_count": candidate.get("family_store_coverage_count", 0),
+                      "form_factor_store_coverage_count": candidate.get("form_factor_store_coverage_count", 0),
+                      "equivalence_group_store_coverage_count": candidate.get("equivalence_group_store_coverage_count", 0),
                       "comparison_family_assignment_basis": candidate.get("metadata", {}).get("comparison_family_assignment_basis"),
                       "basket_group": candidate.get("basket_group"),
                       "probe_baseline_anchor_score": candidate.get("probe_baseline_anchor_score", 0),
