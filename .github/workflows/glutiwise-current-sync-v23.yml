@@ -3494,6 +3494,8 @@ jobs:
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
                   "probe_avoid_tokens": ["active", "spelt", "\u05d0\u05e7\u05d8\u05d9\u05d1", "\u05db\u05d5\u05e1\u05de\u05d9\u05df", "\u05de\u05d7\u05de\u05e6\u05ea", "\u05e9\u05d9\u05e4\u05d5\u05df", "\u05d7\u05de\u05e0\u05d9\u05d5\u05ea"],
+                  "probe_prefer_tokens": ["\u05e4\u05e8\u05d5\u05e1", "\u05d0\u05d7\u05d9\u05d3", "\u05e8\u05d2\u05d9\u05dc", "\u05dc\u05d7\u05dd"],
+                  "probe_deprioritize_tokens": ["\u05de\u05d7\u05de\u05e6\u05ea", "\u05e9\u05d9\u05e4\u05d5\u05df", "\u05db\u05d5\u05e1\u05de\u05d9\u05df", "\u05d7\u05de\u05e0\u05d9\u05d5\u05ea", "\u05de\u05dc\u05d0", "\u05d1\u05e8\u05d9\u05d5\u05e9", "\u05e2\u05e0\u05e0\u05d9\u05dd"],
                   "form_factor_patterns": [
                       {"key": "pita", "any_tokens": ["\u05e4\u05d9\u05ea\u05d4", "pita"]},
                       {"key": "challah", "any_tokens": ["\u05d7\u05dc\u05d4", "challah"]},
@@ -3517,6 +3519,9 @@ jobs:
                   "allow_unit_normalization": False,
                   "allow_canonical_equivalent": True,
                   "probe_avoid_tokens": ["omega", "\u05d0\u05d5\u05de\u05d2\u05d4", "dha", "\u05d0\u05d5\u05e8\u05d2\u05e0\u05d9"],
+                  "probe_prefer_count": 12,
+                  "probe_deprioritize_count_values": [6, 18, 30],
+                  "probe_deprioritize_tokens": ["\u05d7\u05d5\u05e4\u05e9", "\u05d0\u05d5\u05de\u05d2\u05d4", "\u05d0\u05d5\u05e8\u05d2\u05e0\u05d9"],
                   "form_factor_patterns": [
                       {"key": "size_xl", "any_tokens": ["xl", "xxl"]},
                       {"key": "size_l", "any_tokens": ["l", "large"]},
@@ -3570,6 +3575,8 @@ jobs:
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
                   "probe_avoid_tokens": ["gluten free", "\u05dc\u05dc\"\u05d2", "\u05dc\u05dc\u05d0 \u05d2\u05dc\u05d5\u05d8\u05df", "\u05db\u05e9\u05dc\"\u05e4"],
+                  "probe_prefer_tokens": ["\u05e7\u05d5\u05e8\u05e0\u05e4\u05dc\u05e7\u05e1", "cornflakes"],
+                  "probe_deprioritize_tokens": ["\u05d2\u05e8\u05e0\u05d5\u05dc\u05d4", "granola", "\u05dc\u05dc\"\u05d2", "\u05dc\u05dc\u05d0 \u05d2\u05dc\u05d5\u05d8\u05df", "\u05db\u05e9\u05dc\"\u05e4"],
                   "form_factor_patterns": [
                       {"key": "cornflakes", "any_tokens": ["\u05e7\u05d5\u05e8\u05e0\u05e4\u05dc\u05e7\u05e1", "cornflakes"]},
                       {"key": "granola", "any_tokens": ["\u05d2\u05e8\u05e0\u05d5\u05dc\u05d4", "granola"]},
@@ -3590,6 +3597,8 @@ jobs:
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
                   "probe_avoid_tokens": ["ptitim", "\u05e4\u05ea\u05d9\u05ea\u05d9\u05dd"],
+                  "probe_prefer_tokens": ["\u05d0\u05d5\u05e8\u05d6", "rice", "\u05e7\u05d5\u05e1\u05e7\u05d5\u05e1", "couscous"],
+                  "probe_deprioritize_tokens": ["ptitim", "\u05e4\u05ea\u05d9\u05ea\u05d9\u05dd"],
                   "form_factor_patterns": [
                       {"key": "spaghetti", "any_tokens": ["\u05e1\u05e4\u05d2\u05d8\u05d9", "spaghetti"]},
                       {"key": "fusilli", "any_tokens": ["\u05de\u05e1\u05d5\u05dc\u05e1\u05dc\u05ea", "fusilli"]},
@@ -3999,6 +4008,9 @@ jobs:
               if not family_rule:
                   return {
                       "matched_probe_avoid_pattern": None,
+                      "matched_probe_prefer_pattern": None,
+                      "matched_probe_deprioritize_pattern": None,
+                      "probe_baseline_anchor_score": 0,
                       "probe_specialty_penalty": 0,
                   }
               family_tokens = metadata.get("family_tokens") or normalized_lookup_tokens_shadow(metadata.get("name") or "")
@@ -4014,8 +4026,39 @@ jobs:
                   family_tokens,
                   probe_text,
               )
+              matched_probe_prefer_pattern = first_matching_rule_pattern_in_text(
+                  family_rule.get("probe_prefer_tokens"),
+                  family_tokens,
+                  probe_text,
+              )
+              matched_probe_deprioritize_pattern = first_matching_rule_pattern_in_text(
+                  family_rule.get("probe_deprioritize_tokens"),
+                  family_tokens,
+                  probe_text,
+              )
+              probe_baseline_anchor_score = 0
+              if matched_probe_avoid_pattern:
+                  probe_baseline_anchor_score += 2
+              if matched_probe_deprioritize_pattern:
+                  probe_baseline_anchor_score += 2
+              if family_rule.get("probe_prefer_tokens") and not matched_probe_prefer_pattern:
+                  probe_baseline_anchor_score += 1
+              pack_signature = metadata.get("pack_signature") or {}
+              if family_key == "eggs" and pack_signature.get("dimension") == "count":
+                  try:
+                      egg_count_value = int(round(float(pack_signature.get("total_base_qty") or 0)))
+                  except Exception:
+                      egg_count_value = None
+                  preferred_count = family_rule.get("probe_prefer_count")
+                  if preferred_count and egg_count_value != preferred_count:
+                      probe_baseline_anchor_score += 1
+                  if egg_count_value in set(family_rule.get("probe_deprioritize_count_values") or []):
+                      probe_baseline_anchor_score += 1
               return {
                   "matched_probe_avoid_pattern": matched_probe_avoid_pattern,
+                  "matched_probe_prefer_pattern": matched_probe_prefer_pattern,
+                  "matched_probe_deprioritize_pattern": matched_probe_deprioritize_pattern,
+                  "probe_baseline_anchor_score": probe_baseline_anchor_score,
                   "probe_specialty_penalty": 1 if matched_probe_avoid_pattern else 0,
               }
 
@@ -4039,6 +4082,9 @@ jobs:
                   "is_selected_candidate": not reasons,
                   "reasons": reasons,
                   "matched_probe_avoid_pattern": probe_plainness["matched_probe_avoid_pattern"],
+                  "matched_probe_prefer_pattern": probe_plainness["matched_probe_prefer_pattern"],
+                  "matched_probe_deprioritize_pattern": probe_plainness["matched_probe_deprioritize_pattern"],
+                  "probe_baseline_anchor_score": probe_plainness["probe_baseline_anchor_score"],
                   "probe_specialty_penalty": probe_plainness["probe_specialty_penalty"],
               }
 
@@ -4186,6 +4232,7 @@ jobs:
           shadow_probe_candidates.sort(
               key=lambda row: (
                   core_food_group_priority.get(row.get("basket_group") or "", 99),
+                  row.get("probe_baseline_anchor_score", 0),
                   row.get("probe_specialty_penalty", 0),
                   -(1 if row.get("has_equivalence_group") else 0),
                   -(1 if row.get("has_same_product_identity") else 0),
@@ -4264,8 +4311,11 @@ jobs:
                   "reference_effective_price_median": median_number(reference_prices),
                   "reference_unit_price_median": median_number(reference_unit_prices),
                   "selection_reason": improved_selection_reason_by_barcode.get(barcode),
+                  "probe_baseline_anchor_score": probe_candidate_info_by_barcode.get(barcode, {}).get("probe_baseline_anchor_score", 0),
                   "probe_specialty_penalty": probe_candidate_info_by_barcode.get(barcode, {}).get("probe_specialty_penalty", 0),
                   "matched_probe_avoid_pattern": probe_candidate_info_by_barcode.get(barcode, {}).get("matched_probe_avoid_pattern"),
+                  "matched_probe_prefer_pattern": probe_candidate_info_by_barcode.get(barcode, {}).get("matched_probe_prefer_pattern"),
+                  "matched_probe_deprioritize_pattern": probe_candidate_info_by_barcode.get(barcode, {}).get("matched_probe_deprioritize_pattern"),
                   "comparison_family_key": metadata.get("comparison_family_key"),
                   "comparison_family_source": metadata.get("comparison_family_source"),
                   "comparison_family_assignment_basis": metadata.get("comparison_family_assignment_basis"),
@@ -4285,8 +4335,11 @@ jobs:
                       "comparison_family_key": candidate.get("basket_group"),
                       "comparison_family_assignment_basis": candidate.get("metadata", {}).get("comparison_family_assignment_basis"),
                       "basket_group": candidate.get("basket_group"),
+                      "probe_baseline_anchor_score": candidate.get("probe_baseline_anchor_score", 0),
                       "probe_specialty_penalty": candidate.get("probe_specialty_penalty", 0),
                       "matched_probe_avoid_pattern": candidate.get("matched_probe_avoid_pattern"),
+                      "matched_probe_prefer_pattern": candidate.get("matched_probe_prefer_pattern"),
+                      "matched_probe_deprioritize_pattern": candidate.get("matched_probe_deprioritize_pattern"),
                       "reasons": candidate.get("reasons") if candidate["barcode"] not in improved_selected_probe_barcode_set else [improved_selection_reason_by_barcode.get(candidate["barcode"])],
                   }
                   for candidate in shadow_probe_candidates
