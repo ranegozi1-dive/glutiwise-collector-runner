@@ -3494,8 +3494,8 @@ jobs:
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
                   "probe_avoid_tokens": ["active", "spelt", "\u05d0\u05e7\u05d8\u05d9\u05d1", "\u05db\u05d5\u05e1\u05de\u05d9\u05df", "\u05de\u05d7\u05de\u05e6\u05ea", "\u05e9\u05d9\u05e4\u05d5\u05df", "\u05d7\u05de\u05e0\u05d9\u05d5\u05ea"],
-                  "probe_prefer_tokens": ["\u05e4\u05e8\u05d5\u05e1", "\u05d0\u05d7\u05d9\u05d3", "\u05e8\u05d2\u05d9\u05dc", "\u05dc\u05d7\u05dd"],
-                  "probe_deprioritize_tokens": ["\u05de\u05d7\u05de\u05e6\u05ea", "\u05e9\u05d9\u05e4\u05d5\u05df", "\u05db\u05d5\u05e1\u05de\u05d9\u05df", "\u05d7\u05de\u05e0\u05d9\u05d5\u05ea", "\u05de\u05dc\u05d0", "\u05d1\u05e8\u05d9\u05d5\u05e9", "\u05e2\u05e0\u05e0\u05d9\u05dd"],
+                  "probe_prefer_tokens": ["\u05e4\u05e8\u05d5\u05e1", "\u05d0\u05d7\u05d9\u05d3", "\u05e8\u05d2\u05d9\u05dc", "\u05e4\u05e9\u05d5\u05d8"],
+                  "probe_deprioritize_tokens": ["\u05de\u05d7\u05de\u05e6\u05ea", "\u05e9\u05d9\u05e4\u05d5\u05df", "\u05db\u05d5\u05e1\u05de\u05d9\u05df", "\u05d7\u05de\u05e0\u05d9\u05d5\u05ea", "\u05de\u05dc\u05d0", "\u05d1\u05e8\u05d9\u05d5\u05e9", "\u05e2\u05e0\u05e0\u05d9\u05dd", "\u05d1\u05e1\u05d2\u05e0\u05d5\u05df", "\u05d0\u05de\u05e8\u05d9\u05e7\u05d4", "\u05de\u05d5\u05d6\u05d4\u05d1\u05d9\u05dd", "\u05d3\u05d2\u05e0\u05d9\u05dd"],
                   "form_factor_patterns": [
                       {"key": "pita", "any_tokens": ["\u05e4\u05d9\u05ea\u05d4", "pita"]},
                       {"key": "challah", "any_tokens": ["\u05d7\u05dc\u05d4", "challah"]},
@@ -3543,6 +3543,7 @@ jobs:
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
                   "probe_avoid_tokens": ["lactose free", "\u05d3\u05dc \u05dc\u05e7\u05d8\u05d5\u05d6", "\u05dc\u05dc\u05d0 \u05dc\u05e7\u05d8\u05d5\u05d6"],
+                  "probe_deprioritize_tokens": ["\u05de\u05d5\u05e2\u05e9\u05e8", "\u05d7\u05dc\u05d1\u05d5\u05df", "protein", "\u05e2\u05d6\u05d9\u05dd", "goat", "\u05d1\u05d8\u05e2\u05dd", "\u05e7\u05e4\u05d4", "\u05d1\u05e0\u05e0\u05d4"],
                   "form_factor_patterns": [
                       {"key": "lactose_free", "any_tokens": ["\u05d3\u05dc \u05dc\u05e7\u05d8\u05d5\u05d6", "\u05dc\u05dc\u05d0 \u05dc\u05e7\u05d8\u05d5\u05d6", "lactose free"]},
                   ],
@@ -3576,7 +3577,7 @@ jobs:
                   "allow_canonical_equivalent": True,
                   "probe_avoid_tokens": ["gluten free", "\u05dc\u05dc\"\u05d2", "\u05dc\u05dc\u05d0 \u05d2\u05dc\u05d5\u05d8\u05df", "\u05db\u05e9\u05dc\"\u05e4"],
                   "probe_prefer_tokens": ["\u05e7\u05d5\u05e8\u05e0\u05e4\u05dc\u05e7\u05e1", "cornflakes"],
-                  "probe_deprioritize_tokens": ["\u05d2\u05e8\u05e0\u05d5\u05dc\u05d4", "granola", "\u05dc\u05dc\"\u05d2", "\u05dc\u05dc\u05d0 \u05d2\u05dc\u05d5\u05d8\u05df", "\u05db\u05e9\u05dc\"\u05e4"],
+                  "probe_deprioritize_tokens": ["\u05d2\u05e8\u05e0\u05d5\u05dc\u05d4", "granola", "\u05dc\u05dc\"\u05d2", "\u05dc\u05dc\u05d0 \u05d2\u05dc\u05d5\u05d8\u05df", "\u05db\u05e9\u05dc\"\u05e4", "\u05d3\u05d1\u05e9", "honey", "\u05e4\u05d9\u05d8\u05e0\u05e1", "fitness"],
                   "form_factor_patterns": [
                       {"key": "cornflakes", "any_tokens": ["\u05e7\u05d5\u05e8\u05e0\u05e4\u05dc\u05e7\u05e1", "cornflakes"]},
                       {"key": "granola", "any_tokens": ["\u05d2\u05e8\u05e0\u05d5\u05dc\u05d4", "granola"]},
@@ -3596,9 +3597,9 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
-                  "probe_avoid_tokens": ["ptitim", "\u05e4\u05ea\u05d9\u05ea\u05d9\u05dd"],
-                  "probe_prefer_tokens": ["\u05d0\u05d5\u05e8\u05d6", "rice", "\u05e7\u05d5\u05e1\u05e7\u05d5\u05e1", "couscous"],
-                  "probe_deprioritize_tokens": ["ptitim", "\u05e4\u05ea\u05d9\u05ea\u05d9\u05dd"],
+                  "probe_avoid_tokens": ["ptitim", "\u05e4\u05ea\u05d9\u05ea\u05d9\u05dd", "\u05dc\u05dc\"\u05d2", "\u05dc\u05dc\u05d0 \u05d2\u05dc\u05d5\u05d8\u05df", "\u05db\u05e9\u05dc\"\u05e4"],
+                  "probe_prefer_tokens": ["\u05e1\u05e4\u05d2\u05d8\u05d9", "spaghetti", "\u05e4\u05e0\u05d4", "penne", "\u05e4\u05e1\u05d8\u05d4", "pasta"],
+                  "probe_deprioritize_tokens": ["ptitim", "\u05e4\u05ea\u05d9\u05ea\u05d9\u05dd", "\u05d0\u05d5\u05e8\u05d6", "rice", "\u05dc\u05dc\"\u05d2", "\u05dc\u05dc\u05d0 \u05d2\u05dc\u05d5\u05d8\u05df", "\u05db\u05e9\u05dc\"\u05e4"],
                   "form_factor_patterns": [
                       {"key": "spaghetti", "any_tokens": ["\u05e1\u05e4\u05d2\u05d8\u05d9", "spaghetti"]},
                       {"key": "fusilli", "any_tokens": ["\u05de\u05e1\u05d5\u05dc\u05e1\u05dc\u05ea", "fusilli"]},
@@ -3620,6 +3621,8 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "probe_prefer_tokens": ["\u05d0\u05d5\u05e8\u05d6", "rice", "\u05e7\u05d5\u05e1\u05e7\u05d5\u05e1", "couscous"],
+                  "probe_deprioritize_tokens": ["\u05e4\u05ea\u05d9\u05ea\u05d9\u05dd", "ptitim"],
                   "form_factor_patterns": [
                       {"key": "rice", "any_tokens": ["\u05d0\u05d5\u05e8\u05d6", "rice"]},
                       {"key": "couscous", "any_tokens": ["\u05e7\u05d5\u05e1\u05e7\u05d5\u05e1", "couscous"]},
@@ -4037,12 +4040,14 @@ jobs:
                   probe_text,
               )
               probe_baseline_anchor_score = 0
+              if matched_probe_prefer_pattern:
+                  probe_baseline_anchor_score -= 2
               if matched_probe_avoid_pattern:
                   probe_baseline_anchor_score += 2
               if matched_probe_deprioritize_pattern:
                   probe_baseline_anchor_score += 2
               if family_rule.get("probe_prefer_tokens") and not matched_probe_prefer_pattern:
-                  probe_baseline_anchor_score += 1
+                  probe_baseline_anchor_score += 2
               pack_signature = metadata.get("pack_signature") or {}
               if family_key == "eggs" and pack_signature.get("dimension") == "count":
                   try:
