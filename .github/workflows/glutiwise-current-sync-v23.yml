@@ -163,17 +163,38 @@ jobs:
                   return "yohananof"
               return parent or "unknown"
 
+          def parse_identity(filename: str):
+              patterns = [
+                  (r"(?i)pricefull(\d+)-(\d+)-(\d+)", "price_full"),
+                  (r"(?i)promofull(\d+)-(\d+)-(\d+)", "promo_full"),
+                  (r"(?i)promo(\d+)-(\d+)-(\d+)", "promo"),
+                  (r"(?i)stores(\d+)-(\d+)-(\d+)", "store"),
+                  (r"(?i)stores(\d+)", "store"),
+              ]
+              for pattern, kind in patterns:
+                  m = re.search(pattern, filename)
+                  if m:
+                      chain_id = m.group(1)
+                      store_id = m.group(2) if m.lastindex and m.lastindex >= 2 else ""
+                      source_ts = m.group(3) if m.lastindex and m.lastindex >= 3 else ""
+                      return kind, chain_id, store_id, source_ts
+              return classify_kind(filename), "", "", ""
+
           inventory_rows = []
           summary = defaultdict(lambda: Counter())
+          observed_store_ids = defaultdict(lambda: defaultdict(set))
           for path in sorted(dumps_dir.rglob("*")):
               if not path.is_file():
                   continue
               retailer = retailer_from_path(path)
-              kind = classify_kind(path.name)
+              kind, chain_id, store_id, source_ts = parse_identity(path.name)
               size_bytes = path.stat().st_size
               inventory_rows.append({
                   "retailer": retailer,
                   "kind": kind,
+                  "chain_id": chain_id,
+                  "store_id": store_id,
+                  "source_ts": source_ts,
                   "relative_path": str(path.as_posix()),
                   "filename": path.name,
                   "size_bytes": size_bytes,
@@ -181,11 +202,13 @@ jobs:
               summary[retailer][f"{kind}_files"] += 1
               summary[retailer]["total_files"] += 1
               summary[retailer]["total_bytes"] += size_bytes
+              if store_id:
+                  observed_store_ids[retailer][kind].add(store_id)
 
           with (out_dir / "downloaded_dump_inventory.csv").open("w", encoding="utf-8", newline="") as f:
               writer = csv.DictWriter(
                   f,
-                  fieldnames=["retailer", "kind", "relative_path", "filename", "size_bytes"],
+                  fieldnames=["retailer", "kind", "chain_id", "store_id", "source_ts", "relative_path", "filename", "size_bytes"],
               )
               writer.writeheader()
               for row in inventory_rows:
@@ -197,6 +220,14 @@ jobs:
                   "downloaded_file_count": len(inventory_rows),
                   "downloaded_file_summary_by_retailer": {
                       retailer: dict(counts) for retailer, counts in sorted(summary.items())
+                  },
+                  "downloaded_store_ids_by_retailer_and_kind": {
+                      retailer: {
+                          kind: sorted(store_ids)
+                          for kind, store_ids in sorted(kind_map.items())
+                          if store_ids
+                      }
+                      for retailer, kind_map in sorted(observed_store_ids.items())
                   },
               },
               (out_dir / "download_stage_summary.json").open("w", encoding="utf-8"),
@@ -1446,6 +1477,7 @@ jobs:
                               "store_type": store_type,
                               "is_target": target_city in TARGET_CITIES,
                               "target_city": target_city or "",
+                              "discovery_source": "official_store_file",
                               "source_file": str(path),
                               "source_ts": file_ts,
                           }
@@ -1464,6 +1496,7 @@ jobs:
                                   "store_type": choose_better_text(previous.get("store_type", ""), store_type) or "chain",
                                   "is_target": previous.get("is_target", False) or (target_city in TARGET_CITIES),
                                   "target_city": previous.get("target_city") or target_city or "",
+                                  "discovery_source": previous.get("discovery_source") or "official_store_file",
                                   "source_ts": max(previous.get("source_ts", file_ts), file_ts),
                                   "source_file": previous.get("source_file") if previous.get("source_ts", "") >= file_ts else str(path),
                               }
@@ -1728,6 +1761,9 @@ jobs:
           legacy_store_key_aliases = {}
           unresolved_existing_target_rows = []
           auto_deactivated_existing_target_rows = []
+          registry_fallback_target_rows = []
+          initial_missing_target_retailers = []
+          initial_missing_target_cities = []
           
           for row in existing_target_chain_rows:
               raw_key = clean_text(row.get("store_key", ""))
@@ -1817,8 +1853,79 @@ jobs:
                   'removed_bytes': removed_bytes,
               })
 
+          def summarize_target_scope(rows):
+              by_retailer = Counter(row["retailer"] for row in rows)
+              discovered_target_city_set = {
+                  row["canonical_city"]
+                  for row in rows
+                  if row.get("canonical_city") in TARGET_CITIES
+              }
+              missing_retailers = [ret for ret in TARGET_RETAILERS if by_retailer.get(ret, 0) == 0]
+              missing_target_cities = sorted(set(TARGET_CITIES) - discovered_target_city_set)
+              return by_retailer, missing_retailers, missing_target_cities
+
+          def build_registry_fallback_row(existing_row: dict):
+              retailer = clean_text(existing_row.get("retailer", ""))
+              store_id_raw = existing_row.get("store_id", "")
+              store_key = canonical_store_key(retailer, store_id_raw)
+              detected_city, detected_reasons = detect_city(
+                  ("city", existing_row.get("city", "")),
+                  ("address", existing_row.get("address", "")),
+                  ("store_name", existing_row.get("store_name", "")),
+              )
+              canonical_city = clean_text(existing_row.get("city", ""))
+              if canonical_city not in TARGET_CITIES:
+                  canonical_city = detected_city or canonical_city
+              if retailer not in TARGET_RETAILERS or canonical_city not in TARGET_CITIES:
+                  return None
+              validation_reasons = ["fallback_registry:existing_target_chain"]
+              validation_reasons.extend(detected_reasons)
+              return {
+                  "retailer": retailer,
+                  "store_id": canonical_store_id(retailer, store_id_raw),
+                  "store_name": sanitize_optional_text(existing_row.get("store_name", "")) or store_key,
+                  "city": clean_text(existing_row.get("city", "")),
+                  "canonical_city": canonical_city,
+                  "store_key": store_key,
+                  "address": sanitize_optional_text(existing_row.get("address", "")) or "",
+                  "area": sanitize_optional_text(existing_row.get("area", "")) or "",
+                  "store_type": sanitize_optional_text(existing_row.get("store_type", "")) or "chain",
+                  "is_target": True,
+                  "target_city": canonical_city,
+                  "source_file": "",
+                  "source_ts": "",
+                  "discovery_source": "existing_target_chain_registry_fallback",
+                  "validation_detected_city": detected_city or canonical_city,
+                  "validation_reasons": " | ".join(reason for reason in validation_reasons if reason),
+              }
+
           discovered_target_stores = [row for row in discovered_stores_map.values() if row.get("is_target")]
+          initial_by_retailer, initial_missing_target_retailers, initial_missing_target_cities = summarize_target_scope(discovered_target_stores)
+          if initial_missing_target_retailers or initial_missing_target_cities:
+              for existing_row in sorted(
+                  existing_target_chain_rows,
+                  key=lambda row: (
+                      clean_text(row.get("city", "")),
+                      clean_text(row.get("retailer", "")),
+                      canonical_store_key(clean_text(row.get("retailer", "")), row.get("store_id", "")),
+                  ),
+              ):
+                  if not existing_row.get("mvp_active"):
+                      continue
+                  fallback_row = build_registry_fallback_row(existing_row)
+                  if not fallback_row:
+                      continue
+                  if (
+                      fallback_row["retailer"] not in initial_missing_target_retailers
+                      and fallback_row["canonical_city"] not in initial_missing_target_cities
+                  ):
+                      continue
+                  if fallback_row["store_key"] in discovered_stores_map:
+                      continue
+                  discovered_stores_map[fallback_row["store_key"]] = fallback_row
+                  registry_fallback_target_rows.append(fallback_row)
           discovered_non_target_stores = [row for row in discovered_stores_map.values() if not row.get("is_target")]
+          discovered_target_stores = [row for row in discovered_stores_map.values() if row.get("is_target")]
           target_store_keys = {row["store_key"] for row in discovered_target_stores}
           non_target_store_keys = {row["store_key"] for row in discovered_non_target_stores}
           legacy_store_keys_to_deactivate = set(legacy_store_key_aliases.keys())
@@ -1826,17 +1933,17 @@ jobs:
           write_csv(
               OUT_DIR / "stores_discovered.csv",
               sorted(discovered_stores_map.values(), key=lambda x: (x["retailer"], x["canonical_city"], x["store_key"])),
-              ["retailer", "store_id", "store_key", "store_name", "city", "canonical_city", "address", "area", "store_type", "is_target", "source_file", "source_ts"],
+              ["retailer", "store_id", "store_key", "store_name", "city", "canonical_city", "address", "area", "store_type", "is_target", "discovery_source", "source_file", "source_ts"],
           )
           write_csv(
               OUT_DIR / "target_stores.csv",
               sorted(discovered_target_stores, key=lambda x: (x["canonical_city"], x["retailer"], x["store_key"])),
-              ["retailer", "store_id", "store_key", "store_name", "canonical_city", "address", "source_file"],
+              ["retailer", "store_id", "store_key", "store_name", "canonical_city", "address", "discovery_source", "source_file"],
           )
           write_csv(
               OUT_DIR / "non_target_stores.csv",
               sorted(discovered_non_target_stores, key=lambda x: (x["retailer"], x["canonical_city"], x["store_key"])),
-              ["retailer", "store_id", "store_key", "store_name", "canonical_city", "address", "source_file"],
+              ["retailer", "store_id", "store_key", "store_name", "canonical_city", "address", "discovery_source", "source_file"],
           )
           write_csv(
               OUT_DIR / "ambiguous_city_matches.csv",
@@ -1860,20 +1967,41 @@ jobs:
               ["store_key", "retailer", "store_id", "store_name", "city", "address", "target_city_hint", "reason"],
           )
           write_csv(
+              OUT_DIR / "target_store_registry_fallback.csv",
+              sorted(registry_fallback_target_rows, key=lambda x: (x["canonical_city"], x["retailer"], x["store_key"])),
+              ["retailer", "store_id", "store_key", "store_name", "canonical_city", "address", "discovery_source", "validation_detected_city", "validation_reasons"],
+          )
+          write_csv(
               OUT_DIR / "target_validation_failures.csv",
               target_validation_failures,
               ["store_key", "retailer", "store_name", "city", "canonical_city", "address", "validation_detected_city", "validation_reasons", "reason"],
           )
+          by_retailer, missing_retailers, missing_target_cities = summarize_target_scope(discovered_target_stores)
           store_discovery_summary = {
               "stores_discovered": len(discovered_stores_map),
               "target_stores_discovered": len(discovered_target_stores),
               "non_target_stores_discovered": len(discovered_non_target_stores),
-              "target_store_counts_by_retailer": dict(Counter(row["retailer"] for row in discovered_target_stores)),
+              "target_store_counts_by_retailer": dict(by_retailer),
               "target_store_counts_by_city": dict(Counter(row["canonical_city"] for row in discovered_target_stores)),
               "target_validation_failures": len(target_validation_failures),
+              "fallback_target_stores_added": len(registry_fallback_target_rows),
+              "fallback_target_store_counts_by_retailer": dict(Counter(row["retailer"] for row in registry_fallback_target_rows)),
+              "fallback_target_store_counts_by_city": dict(Counter(row["canonical_city"] for row in registry_fallback_target_rows)),
+              "initial_missing_target_retailers": initial_missing_target_retailers,
+              "initial_missing_target_cities": initial_missing_target_cities,
               "download_stage_summary": download_stage_summary,
           }
           write_json(OUT_DIR / "store_discovery_summary.json", store_discovery_summary)
+          if initial_missing_target_retailers or initial_missing_target_cities or registry_fallback_target_rows:
+              write_json(OUT_DIR / "source_gap_summary.json", {
+                  **store_discovery_summary,
+                  "failure_stage": "store_discovery",
+                  "failure_reason": "missing_required_target_scope_from_store_files",
+                  "missing_target_retailers": missing_retailers,
+                  "missing_target_cities": missing_target_cities,
+                  "store_scope_restored_by_registry_fallback": not missing_retailers and not missing_target_cities,
+                  "fallback_store_keys": [row["store_key"] for row in registry_fallback_target_rows],
+              })
 
           if not discovered_target_stores:
               write_json(OUT_DIR / "source_gap_summary.json", {
@@ -1882,6 +2010,7 @@ jobs:
                   "failure_reason": "no_target_stores_discovered_after_source_only_validation",
                   "missing_target_retailers": list(TARGET_RETAILERS),
                   "missing_target_cities": list(TARGET_CITIES),
+                  "store_scope_restored_by_registry_fallback": False,
               })
               write_json(OUT_DIR / "run_summary.json", {
                   "status": "failed_before_payload",
@@ -1896,10 +2025,6 @@ jobs:
                   f"of {LOCKED_MVP_STORE_LIMIT}. Aborting to avoid unintended scope expansion."
               )
 
-          by_retailer = Counter(row["retailer"] for row in discovered_target_stores)
-          missing_retailers = [ret for ret in TARGET_RETAILERS if by_retailer.get(ret, 0) == 0]
-          discovered_target_city_set = {row["canonical_city"] for row in discovered_target_stores if row.get("canonical_city") in TARGET_CITIES}
-          missing_target_cities = sorted(set(TARGET_CITIES) - discovered_target_city_set)
           if missing_retailers or missing_target_cities:
               write_json(OUT_DIR / "source_gap_summary.json", {
                   **store_discovery_summary,
@@ -1907,6 +2032,8 @@ jobs:
                   "failure_reason": "missing_required_target_scope_from_store_files",
                   "missing_target_retailers": missing_retailers,
                   "missing_target_cities": missing_target_cities,
+                  "store_scope_restored_by_registry_fallback": False,
+                  "fallback_store_keys": [row["store_key"] for row in registry_fallback_target_rows],
               })
               write_json(OUT_DIR / "run_summary.json", {
                   "status": "failed_before_payload",
@@ -6453,6 +6580,7 @@ jobs:
             out/ambiguous_city_matches.csv
             out/legacy_store_key_aliases.csv
             out/unresolved_existing_target_rows.csv
+            out/target_store_registry_fallback.csv
             out/compare_ready_summary.json
             out/target_coverage_by_store.csv
             out/target_coverage_by_city_retailer.csv
