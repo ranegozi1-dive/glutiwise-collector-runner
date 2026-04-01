@@ -3516,7 +3516,7 @@ jobs:
                   "forbidden_tokens": ["שוקולד", "cake"],
                   "identity_strip_tokens": ["ביצ", "ביצי", "egg", "eggs", "משק", "טריות"],
                   "unit_basis": "count",
-                  "allow_unit_normalization": False,
+                  "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
                   "canonical_equivalence_scope": "same shell-egg family and same count; omega, free-range, and organic markers stay visible in names but do not block canonical equivalence",
                   "probe_avoid_tokens": ["omega", "\u05d0\u05d5\u05de\u05d2\u05d4", "dha", "\u05d0\u05d5\u05e8\u05d2\u05e0\u05d9"],
@@ -3527,10 +3527,10 @@ jobs:
                       {"key": "omega", "any_tokens": ["\u05d0\u05d5\u05de\u05d2\u05d4", "omega"]},
                       {"key": "free_range", "any_tokens": ["\u05d7\u05d5\u05e4\u05e9", "free range"]},
                       {"key": "organic", "any_tokens": ["\u05d0\u05d5\u05e8\u05d2\u05e0\u05d9", "organic"]},
-                      {"key": "size_xl", "any_tokens": ["xl", "xxl"]},
-                      {"key": "size_l", "any_tokens": ["l", "large"]},
-                      {"key": "size_m", "any_tokens": ["m", "medium"]},
-                      {"key": "size_s", "any_tokens": ["s", "small"]},
+                      {"key": "size_xl", "any_tokens": ["xl", "xxl", "ענק", "ענקיות"]},
+                      {"key": "size_l", "any_tokens": ["l", "large", "גדול", "גדולות"]},
+                      {"key": "size_m", "any_tokens": ["m", "medium", "בינוני", "בינוניות"]},
+                      {"key": "size_s", "any_tokens": ["s", "small", "קטן", "קטנות"]},
                   ],
                   "form_factor_default": "shell_eggs",
                   "probe_max_items": 2,
@@ -3981,6 +3981,12 @@ jobs:
               if not family_rule:
                   return None
               if family_rule.get("comparison_family_key") == "eggs":
+                  for pattern_rule in family_rule.get("form_factor_patterns") or []:
+                      size_key = clean_text(pattern_rule.get("key"))
+                      if not size_key.startswith("size_"):
+                          continue
+                      if first_matching_rule_pattern(pattern_rule.get("any_tokens"), family_tokens):
+                          return f"shell_eggs_{size_key}"
                   return "shell_eggs"
               strip_tokens = set(family_rule.get("identity_strip_tokens") or [])
               base_tokens = [token for token in family_tokens if token not in strip_tokens]
