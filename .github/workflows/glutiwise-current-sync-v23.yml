@@ -129,8 +129,81 @@ jobs:
               sleep $((attempt * 15))
               attempt=$((attempt + 1))
             done
-          }
-          retry 2 docker run "${ARGS[@]}" erlichsefi/israeli-supermarket-scarpers:latest
+            }
+            retry 2 docker run "${ARGS[@]}" erlichsefi/israeli-supermarket-scarpers:latest
+            python3 - <<'PY'
+            import csv
+            import json
+            from collections import Counter, defaultdict
+            from pathlib import Path
+
+            dumps_dir = Path("dumps")
+            out_dir = Path("out")
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            def classify_kind(name: str):
+                lower = name.lower()
+                if lower.startswith("stores") or lower.startswith("store"):
+                    return "store"
+                if "pricefull" in lower:
+                    return "price_full"
+                if "promofull" in lower:
+                    return "promo_full"
+                if lower.startswith("promo") or "promo" in lower:
+                    return "promo"
+                return "other"
+
+            def retailer_from_path(path: Path):
+                parent = path.parent.name.lower()
+                if "rami" in parent:
+                    return "ramilevy"
+                if "shuf" in parent:
+                    return "shufersal"
+                if "yoh" in parent:
+                    return "yohananof"
+                return parent or "unknown"
+
+            inventory_rows = []
+            summary = defaultdict(lambda: Counter())
+            for path in sorted(dumps_dir.rglob("*")):
+                if not path.is_file():
+                    continue
+                retailer = retailer_from_path(path)
+                kind = classify_kind(path.name)
+                size_bytes = path.stat().st_size
+                inventory_rows.append({
+                    "retailer": retailer,
+                    "kind": kind,
+                    "relative_path": str(path.as_posix()),
+                    "filename": path.name,
+                    "size_bytes": size_bytes,
+                })
+                summary[retailer][f"{kind}_files"] += 1
+                summary[retailer]["total_files"] += 1
+                summary[retailer]["total_bytes"] += size_bytes
+
+            with (out_dir / "downloaded_dump_inventory.csv").open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=["retailer", "kind", "relative_path", "filename", "size_bytes"],
+                )
+                writer.writeheader()
+                for row in inventory_rows:
+                    writer.writerow(row)
+
+            json.dump(
+                {
+                    "retailers": ["shufersal", "ramilevy", "yohananof"],
+                    "downloaded_file_count": len(inventory_rows),
+                    "downloaded_file_summary_by_retailer": {
+                        retailer: dict(counts) for retailer, counts in sorted(summary.items())
+                    },
+                },
+                (out_dir / "download_stage_summary.json").open("w", encoding="utf-8"),
+                ensure_ascii=False,
+                indent=2,
+            )
+            PY
 
       - name: Build payload, validate, and sync
         timeout-minutes: 85
@@ -224,11 +297,18 @@ jobs:
               )
           OUT_DIR = Path("out")
           DUMPS_DIR = Path("dumps")
-          OUT_DIR.mkdir(parents=True, exist_ok=True)
-          (OUT_DIR / "chunks").mkdir(parents=True, exist_ok=True)
-          
-          def log(msg: str) -> None:
-              print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+            OUT_DIR.mkdir(parents=True, exist_ok=True)
+            (OUT_DIR / "chunks").mkdir(parents=True, exist_ok=True)
+            download_stage_summary = {}
+            download_stage_summary_path = OUT_DIR / "download_stage_summary.json"
+            if download_stage_summary_path.exists():
+                try:
+                    download_stage_summary = json.loads(download_stage_summary_path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    download_stage_summary = {"load_error": str(exc)}
+
+            def log(msg: str) -> None:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
           
           def write_json(path: Path, data) -> None:
               path.parent.mkdir(parents=True, exist_ok=True)
@@ -1737,71 +1817,109 @@ jobs:
                   'removed_bytes': removed_bytes,
               })
 
-          discovered_target_stores = [row for row in discovered_stores_map.values() if row.get("is_target")]
-          discovered_non_target_stores = [row for row in discovered_stores_map.values() if not row.get("is_target")]
-          target_store_keys = {row["store_key"] for row in discovered_target_stores}
-          non_target_store_keys = {row["store_key"] for row in discovered_non_target_stores}
-          legacy_store_keys_to_deactivate = set(legacy_store_key_aliases.keys())
-          
-          if not discovered_target_stores:
-              raise SystemExit("No target stores were discovered from STORE files after source-only target validation. Aborting.")
-          if len(discovered_target_stores) > LOCKED_MVP_STORE_LIMIT:
-              raise SystemExit(
-                  f"Discovered {len(discovered_target_stores)} target stores, which exceeds the locked MVP limit "
-                  f"of {LOCKED_MVP_STORE_LIMIT}. Aborting to avoid unintended scope expansion."
-              )
-          
-          by_retailer = Counter(row["retailer"] for row in discovered_target_stores)
-          missing_retailers = [ret for ret in TARGET_RETAILERS if by_retailer.get(ret, 0) == 0]
-          if missing_retailers:
-              raise SystemExit(f"No target stores discovered for retailers: {', '.join(missing_retailers)}")
-          
-          discovered_target_city_set = {row["canonical_city"] for row in discovered_target_stores if row.get("canonical_city") in TARGET_CITIES}
-          missing_target_cities = sorted(set(TARGET_CITIES) - discovered_target_city_set)
-          if missing_target_cities:
-              raise SystemExit(f"No target stores discovered for target cities: {', '.join(missing_target_cities)}")
-          
-          write_csv(
-              OUT_DIR / "stores_discovered.csv",
-              sorted(discovered_stores_map.values(), key=lambda x: (x["retailer"], x["canonical_city"], x["store_key"])),
-              ["retailer", "store_id", "store_key", "store_name", "city", "canonical_city", "address", "area", "store_type", "is_target", "source_file", "source_ts"],
-          )
-          write_csv(
-              OUT_DIR / "target_stores.csv",
-              sorted(discovered_target_stores, key=lambda x: (x["canonical_city"], x["retailer"], x["store_key"])),
-              ["retailer", "store_id", "store_key", "store_name", "canonical_city", "address", "source_file"],
-          )
-          write_csv(
-              OUT_DIR / "non_target_stores.csv",
-              sorted(discovered_non_target_stores, key=lambda x: (x["retailer"], x["canonical_city"], x["store_key"])),
-              ["retailer", "store_id", "store_key", "store_name", "canonical_city", "address", "source_file"],
-          )
-          write_csv(
-              OUT_DIR / "ambiguous_city_matches.csv",
-              ambiguous_rows,
-              ["retailer", "store_key", "store_name", "city", "address", "reason"],
-          )
-          write_csv(
-              OUT_DIR / "legacy_store_key_aliases.csv",
-              [
-                  {
-                      "legacy_store_key": old_key,
-                      "canonical_store_key": new_key,
-                  }
-                  for old_key, new_key in sorted(legacy_store_key_aliases.items())
-              ],
-              ["legacy_store_key", "canonical_store_key"],
-          )
-          write_csv(
-              OUT_DIR / "unresolved_existing_target_rows.csv",
-              unresolved_existing_target_rows,
-              ["store_key", "retailer", "store_id", "store_name", "city", "address", "target_city_hint", "reason"],
-          )
-          write_csv(
-              OUT_DIR / "target_validation_failures.csv",
-              target_validation_failures,
-              ["store_key", "retailer", "store_name", "city", "canonical_city", "address", "validation_detected_city", "validation_reasons", "reason"],
-          )
+            discovered_target_stores = [row for row in discovered_stores_map.values() if row.get("is_target")]
+            discovered_non_target_stores = [row for row in discovered_stores_map.values() if not row.get("is_target")]
+            target_store_keys = {row["store_key"] for row in discovered_target_stores}
+            non_target_store_keys = {row["store_key"] for row in discovered_non_target_stores}
+            legacy_store_keys_to_deactivate = set(legacy_store_key_aliases.keys())
+
+            write_csv(
+                OUT_DIR / "stores_discovered.csv",
+                sorted(discovered_stores_map.values(), key=lambda x: (x["retailer"], x["canonical_city"], x["store_key"])),
+                ["retailer", "store_id", "store_key", "store_name", "city", "canonical_city", "address", "area", "store_type", "is_target", "source_file", "source_ts"],
+            )
+            write_csv(
+                OUT_DIR / "target_stores.csv",
+                sorted(discovered_target_stores, key=lambda x: (x["canonical_city"], x["retailer"], x["store_key"])),
+                ["retailer", "store_id", "store_key", "store_name", "canonical_city", "address", "source_file"],
+            )
+            write_csv(
+                OUT_DIR / "non_target_stores.csv",
+                sorted(discovered_non_target_stores, key=lambda x: (x["retailer"], x["canonical_city"], x["store_key"])),
+                ["retailer", "store_id", "store_key", "store_name", "canonical_city", "address", "source_file"],
+            )
+            write_csv(
+                OUT_DIR / "ambiguous_city_matches.csv",
+                ambiguous_rows,
+                ["retailer", "store_key", "store_name", "city", "address", "reason"],
+            )
+            write_csv(
+                OUT_DIR / "legacy_store_key_aliases.csv",
+                [
+                    {
+                        "legacy_store_key": old_key,
+                        "canonical_store_key": new_key,
+                    }
+                    for old_key, new_key in sorted(legacy_store_key_aliases.items())
+                ],
+                ["legacy_store_key", "canonical_store_key"],
+            )
+            write_csv(
+                OUT_DIR / "unresolved_existing_target_rows.csv",
+                unresolved_existing_target_rows,
+                ["store_key", "retailer", "store_id", "store_name", "city", "address", "target_city_hint", "reason"],
+            )
+            write_csv(
+                OUT_DIR / "target_validation_failures.csv",
+                target_validation_failures,
+                ["store_key", "retailer", "store_name", "city", "canonical_city", "address", "validation_detected_city", "validation_reasons", "reason"],
+            )
+            store_discovery_summary = {
+                "stores_discovered": len(discovered_stores_map),
+                "target_stores_discovered": len(discovered_target_stores),
+                "non_target_stores_discovered": len(discovered_non_target_stores),
+                "target_store_counts_by_retailer": dict(Counter(row["retailer"] for row in discovered_target_stores)),
+                "target_store_counts_by_city": dict(Counter(row["canonical_city"] for row in discovered_target_stores)),
+                "target_validation_failures": len(target_validation_failures),
+                "download_stage_summary": download_stage_summary,
+            }
+            write_json(OUT_DIR / "store_discovery_summary.json", store_discovery_summary)
+
+            if not discovered_target_stores:
+                write_json(OUT_DIR / "source_gap_summary.json", {
+                    **store_discovery_summary,
+                    "failure_stage": "store_discovery",
+                    "failure_reason": "no_target_stores_discovered_after_source_only_validation",
+                    "missing_target_retailers": list(TARGET_RETAILERS),
+                    "missing_target_cities": list(TARGET_CITIES),
+                })
+                write_json(OUT_DIR / "run_summary.json", {
+                    "status": "failed_before_payload",
+                    "failure_stage": "store_discovery",
+                    "failure_reason": "no_target_stores_discovered_after_source_only_validation",
+                    "target_store_count": 0,
+                })
+                raise SystemExit("No target stores were discovered from STORE files after source-only target validation. Aborting.")
+            if len(discovered_target_stores) > LOCKED_MVP_STORE_LIMIT:
+                raise SystemExit(
+                    f"Discovered {len(discovered_target_stores)} target stores, which exceeds the locked MVP limit "
+                    f"of {LOCKED_MVP_STORE_LIMIT}. Aborting to avoid unintended scope expansion."
+                )
+
+            by_retailer = Counter(row["retailer"] for row in discovered_target_stores)
+            missing_retailers = [ret for ret in TARGET_RETAILERS if by_retailer.get(ret, 0) == 0]
+            discovered_target_city_set = {row["canonical_city"] for row in discovered_target_stores if row.get("canonical_city") in TARGET_CITIES}
+            missing_target_cities = sorted(set(TARGET_CITIES) - discovered_target_city_set)
+            if missing_retailers or missing_target_cities:
+                write_json(OUT_DIR / "source_gap_summary.json", {
+                    **store_discovery_summary,
+                    "failure_stage": "store_discovery",
+                    "failure_reason": "missing_required_target_scope_from_store_files",
+                    "missing_target_retailers": missing_retailers,
+                    "missing_target_cities": missing_target_cities,
+                })
+                write_json(OUT_DIR / "run_summary.json", {
+                    "status": "failed_before_payload",
+                    "failure_stage": "store_discovery",
+                    "failure_reason": "missing_required_target_scope_from_store_files",
+                    "target_store_count": len(discovered_target_stores),
+                    "missing_target_retailers": missing_retailers,
+                    "missing_target_cities": missing_target_cities,
+                })
+            if missing_retailers:
+                raise SystemExit(f"No target stores discovered for retailers: {', '.join(missing_retailers)}")
+            if missing_target_cities:
+                raise SystemExit(f"No target stores discovered for target cities: {', '.join(missing_target_cities)}")
           
           price_file_map, price_file_diagnostics = select_latest_files("price_full", target_store_keys=target_store_keys)
           missing_price_store_keys = sorted(target_store_keys - set(price_file_map.keys()))
@@ -6323,11 +6441,21 @@ jobs:
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
           if-no-files-found: warn
           path: |
-            out/run_summary.json
-            out/mvp_scope_summary.json
-            out/compare_ready_summary.json
-            out/target_coverage_by_store.csv
-            out/target_coverage_by_city_retailer.csv
+              out/run_summary.json
+              out/mvp_scope_summary.json
+              out/downloaded_dump_inventory.csv
+              out/download_stage_summary.json
+              out/source_gap_summary.json
+              out/store_discovery_summary.json
+              out/stores_discovered.csv
+              out/target_stores.csv
+              out/non_target_stores.csv
+              out/ambiguous_city_matches.csv
+              out/legacy_store_key_aliases.csv
+              out/unresolved_existing_target_rows.csv
+              out/compare_ready_summary.json
+              out/target_coverage_by_store.csv
+              out/target_coverage_by_city_retailer.csv
             out/store_readiness.csv
             out/store_readiness_summary.json
             out/store_readiness_consistency.json
