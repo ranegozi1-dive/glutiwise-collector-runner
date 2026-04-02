@@ -4838,11 +4838,13 @@ jobs:
           shadow_store_rows_by_family = defaultdict(lambda: defaultdict(list))
           shadow_store_rows_by_equivalence_group = defaultdict(lambda: defaultdict(list))
           shadow_store_rows_by_same_product_key = defaultdict(lambda: defaultdict(list))
+          shadow_store_price_rows_by_store = defaultdict(list)
           for row in prices_payload:
               store_key = row.get("store_key")
               barcode = row.get("barcode")
               if store_key not in target_store_keys or not barcode:
                   continue
+              shadow_store_price_rows_by_store[store_key].append(row)
               metadata = product_probe_metadata_by_barcode.get(barcode, {})
               if metadata.get("comparison_family_key"):
                   shadow_store_rows_by_family[store_key][metadata["comparison_family_key"]].append(row)
@@ -4859,6 +4861,49 @@ jobs:
                           row.get("barcode", ""),
                       )
                   )
+          for store_rows in shadow_store_price_rows_by_store.values():
+              store_rows.sort(
+                  key=lambda row: (
+                      clean_text(product_probe_metadata_by_barcode.get(row.get("barcode"), {}).get("name")),
+                      row.get("barcode", ""),
+                  )
+              )
+
+          def diagnose_family_gap_candidate(metadata: dict, family_rule: dict):
+              category_key = clean_text(metadata.get("category_key"))
+              if not category_matches_family_rule(category_key, family_rule):
+                  return "category_not_allowed", None
+              family_tokens = metadata.get("family_tokens") or normalized_lookup_tokens_shadow(metadata.get("name") or "")
+              matched_forbidden_pattern = first_matching_rule_pattern(family_rule.get("forbidden_tokens"), family_tokens)
+              if matched_forbidden_pattern:
+                  return "forbidden_token", matched_forbidden_pattern
+              matched_required_pattern = first_matching_rule_pattern(family_rule.get("required_any_tokens"), family_tokens)
+              if not matched_required_pattern:
+                  return "missing_required_token", None
+              if family_rule.get("comparison_family_key") == "eggs":
+                  eggs_non_shell_pattern = first_matching_rule_pattern(
+                      ["׳׳¦׳”", "׳׳¦׳•׳×", "matzo", "bread", "׳׳—׳", "׳₪׳™׳×׳”", "׳—׳׳”", "cake", "cookie", "biscuit"],
+                      family_tokens,
+                  )
+                  if eggs_non_shell_pattern:
+                      return "eggs_non_shell_product", eggs_non_shell_pattern
+                  eggs_weight_pattern = first_matching_rule_pattern(
+                      ["׳’׳¨", "׳’׳¨׳", "׳§׳’", "g", "kg"],
+                      family_tokens,
+                  )
+                  if eggs_weight_pattern:
+                      return "eggs_weight_not_shell_count", eggs_weight_pattern
+              if family_rule.get("comparison_family_key") == "tahini_basic":
+                  tahini_dip_pattern = first_matching_rule_pattern(
+                      ["\u05d7\u05d5\u05de\u05d5\u05e1", "hummus", "\u05de\u05de\u05e8\u05d7", "spread", "dip", "\u05e1\u05dc\u05d8"],
+                      family_tokens,
+                  )
+                  if tahini_dip_pattern:
+                      return "tahini_dip_or_spread", tahini_dip_pattern
+              assigned_family = clean_text(metadata.get("comparison_family_key"))
+              if assigned_family and assigned_family != family_rule.get("comparison_family_key"):
+                  return f"assigned_to_other_family:{assigned_family}", assigned_family
+              return "would_match_target_family", matched_required_pattern
 
           store_comparison_family_coverage_rows = []
           family_coverage_summary = {}
@@ -4979,6 +5024,80 @@ jobs:
           write_json(
               OUT_DIR / "store_comparison_family_coverage_summary.json",
               store_family_coverage_summary,
+          )
+
+          store_family_gap_diagnostic_rows = []
+          store_family_gap_diagnostic_summary = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "families": {},
+          }
+          for family_rule in comparison_family_registry:
+              family_key = family_rule["comparison_family_key"]
+              family_gap_reason_counts = Counter()
+              family_gap_store_rows = []
+              for store in sorted(discovered_target_stores, key=lambda row: row["store_key"]):
+                  store_key = store["store_key"]
+                  if shadow_store_rows_by_family.get(store_key, {}).get(family_key):
+                      continue
+                  reason_counts = Counter()
+                  category_match_candidate_count = 0
+                  example_names_by_reason = defaultdict(list)
+                  for candidate_row in shadow_store_price_rows_by_store.get(store_key, []):
+                      candidate_meta = product_probe_metadata_by_barcode.get(candidate_row.get("barcode"), {})
+                      reason_key, reason_detail = diagnose_family_gap_candidate(candidate_meta, family_rule)
+                      if reason_key == "category_not_allowed":
+                          continue
+                      category_match_candidate_count += 1
+                      reason_counts[reason_key] += 1
+                      candidate_name = clean_text(candidate_meta.get("name"))
+                      if candidate_name and len(example_names_by_reason[reason_key]) < 3:
+                          example_names_by_reason[reason_key].append(
+                              candidate_name if not reason_detail else f"{candidate_name} [{reason_detail}]"
+                          )
+                  if category_match_candidate_count == 0:
+                      reason_counts["no_allowed_category_rows_in_store"] = 1
+                  dominant_gap_reason = reason_counts.most_common(1)[0][0] if reason_counts else "no_allowed_category_rows_in_store"
+                  family_gap_reason_counts[dominant_gap_reason] += 1
+                  row = {
+                      "store_key": store_key,
+                      "retailer": store.get("retailer"),
+                      "city": store.get("city"),
+                      "comparison_family_key": family_key,
+                      "category_match_candidate_count": category_match_candidate_count,
+                      "dominant_gap_reason": dominant_gap_reason,
+                      "gap_reason_counts": " | ".join(f"{reason}:{count}" for reason, count in reason_counts.most_common(5)),
+                      "example_candidates": " | ".join(
+                          example
+                          for examples in example_names_by_reason.values()
+                          for example in examples[:2]
+                      ),
+                  }
+                  store_family_gap_diagnostic_rows.append(row)
+                  family_gap_store_rows.append(row)
+              if family_gap_store_rows:
+                  store_family_gap_diagnostic_summary["families"][family_key] = {
+                      "stores_missing_family_candidate": len(family_gap_store_rows),
+                      "dominant_gap_reasons": dict(family_gap_reason_counts.most_common(8)),
+                      "top_store_examples": family_gap_store_rows[:10],
+                  }
+          write_csv(
+              OUT_DIR / "store_family_gap_diagnostic.csv",
+              store_family_gap_diagnostic_rows,
+              [
+                  "store_key",
+                  "retailer",
+                  "city",
+                  "comparison_family_key",
+                  "category_match_candidate_count",
+                  "dominant_gap_reason",
+                  "gap_reason_counts",
+                  "example_candidates",
+              ],
+          )
+          write_json(
+              OUT_DIR / "store_family_gap_diagnostic_summary.json",
+              store_family_gap_diagnostic_summary,
           )
 
           def normalized_anchor_line_price_from_metadata(metadata_by_barcode, anchor_probe: dict, candidate_unit_price):
@@ -6644,6 +6763,8 @@ jobs:
             out/store_side_equivalence_candidate_coverage_summary.json
             out/store_comparison_family_coverage.csv
             out/store_comparison_family_coverage_summary.json
+            out/store_family_gap_diagnostic.csv
+            out/store_family_gap_diagnostic_summary.json
             out/basket_shadow_root_cause_summary.json
             out/comparison_source_coverage_audit.json
             out/comparison_source_contract.json
