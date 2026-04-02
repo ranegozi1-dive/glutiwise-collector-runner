@@ -1927,6 +1927,11 @@ jobs:
                   registry_fallback_target_rows.append(fallback_row)
           discovered_non_target_stores = [row for row in discovered_stores_map.values() if not row.get("is_target")]
           discovered_target_stores = [row for row in discovered_stores_map.values() if row.get("is_target")]
+          discovered_target_city_set = {
+              row["canonical_city"]
+              for row in discovered_target_stores
+              if row.get("canonical_city") in TARGET_CITIES
+          }
           target_store_keys = {row["store_key"] for row in discovered_target_stores}
           non_target_store_keys = {row["store_key"] for row in discovered_non_target_stores}
           legacy_store_keys_to_deactivate = set(legacy_store_key_aliases.keys())
