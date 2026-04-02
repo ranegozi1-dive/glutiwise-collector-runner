@@ -2237,7 +2237,44 @@ jobs:
           price_success_by_retailer = Counter(discovered_stores_map[key]["retailer"] for key in successful_price_store_keys)
           missing_price_retailers = [ret for ret in TARGET_RETAILERS if price_success_by_retailer.get(ret, 0) == 0]
           if missing_price_retailers:
-              raise SystemExit("No valid price payloads were produced for retailers: " + ", ".join(missing_price_retailers))
+              price_source_gap_summary = {
+                  "failure_stage": "price_payload",
+                  "failure_reason": "missing_target_price_payloads_by_retailer",
+                  "missing_price_retailers": missing_price_retailers,
+                  "missing_price_store_keys": [
+                      key
+                      for key in missing_price_store_keys
+                      if discovered_stores_map[key]["retailer"] in missing_price_retailers
+                  ],
+                  "successful_price_store_counts_by_retailer": dict(price_success_by_retailer),
+                  "failed_price_store_counts_by_retailer": dict(
+                      Counter(row["retailer"] for row in failed_price_store_rows)
+                  ),
+              }
+              write_json(OUT_DIR / "price_source_gap_summary.json", price_source_gap_summary)
+              prior_source_gap_summary = {}
+              source_gap_summary_path = OUT_DIR / "source_gap_summary.json"
+              if source_gap_summary_path.exists():
+                  try:
+                      prior_source_gap_summary = json.loads(source_gap_summary_path.read_text(encoding="utf-8"))
+                  except Exception:
+                      prior_source_gap_summary = {}
+              write_json(
+                  source_gap_summary_path,
+                  {
+                      **prior_source_gap_summary,
+                      **price_source_gap_summary,
+                      "store_scope_restored_by_registry_fallback": bool(registry_fallback_target_rows) and not missing_retailers and not missing_target_cities,
+                      "fallback_store_keys": [row["store_key"] for row in registry_fallback_target_rows],
+                  },
+              )
+              if WRITE_TO_SUPABASE:
+                  raise SystemExit("No valid price payloads were produced for retailers: " + ", ".join(missing_price_retailers))
+              log(
+                  "WRITE_TO_SUPABASE=false -> continuing with partial retailer price coverage for diagnostics only. "
+                  + "Missing valid price payload retailers: "
+                  + ", ".join(missing_price_retailers)
+              )
           
           all_barcodes = sorted(products_candidates.keys())
           existing_products, existing_product_fields = fetch_existing_products(all_barcodes)
@@ -6574,6 +6611,7 @@ jobs:
             out/downloaded_dump_inventory.csv
             out/download_stage_summary.json
             out/source_gap_summary.json
+            out/price_source_gap_summary.json
             out/store_discovery_summary.json
             out/stores_discovered.csv
             out/target_stores.csv
