@@ -4882,13 +4882,13 @@ jobs:
                   return "missing_required_token", None
               if family_rule.get("comparison_family_key") == "eggs":
                   eggs_non_shell_pattern = first_matching_rule_pattern(
-                      ["׳׳¦׳”", "׳׳¦׳•׳×", "matzo", "bread", "׳׳—׳", "׳₪׳™׳×׳”", "׳—׳׳”", "cake", "cookie", "biscuit"],
+                      ["\u05de\u05e6\u05d4", "\u05de\u05e6\u05d5\u05ea", "matzo", "bread", "\u05dc\u05d7\u05dd", "\u05e4\u05d9\u05ea\u05d4", "\u05d7\u05dc\u05d4", "cake", "cookie", "biscuit"],
                       family_tokens,
                   )
                   if eggs_non_shell_pattern:
                       return "eggs_non_shell_product", eggs_non_shell_pattern
                   eggs_weight_pattern = first_matching_rule_pattern(
-                      ["׳’׳¨", "׳’׳¨׳", "׳§׳’", "g", "kg"],
+                      ["\u05d2\u05e8", "\u05d2\u05e8\u05dd", "\u05e7\u05d2", "g", "kg"],
                       family_tokens,
                   )
                   if eggs_weight_pattern:
