@@ -819,7 +819,7 @@ jobs:
               return aliases.get(unit)
 
           def pack_unit_pattern():
-              return r"(?:kg|g|gr|ml|l|lt|liter|litre|ק(?:[\"׳״])?ג|גרם|גר|ג|ליטר|ל|מ(?:[\"׳״])?ל|מל)"
+              return r"(?:kg|g|gr|ml|l|lt|liter|litre|ק(?:[\"׳״]+)?ג|גרם|גר|ג|ליטר|ל|מ(?:[\"׳״]+)?ל|מל)"
 
           def parse_pack_signature(name: str):
               text = clean_lookup_text(name).lower().replace(",", ".")
@@ -3581,7 +3581,7 @@ jobs:
               },
               "normalization_source": {
                   "source_name": "pack_signature_unit_normalization",
-                  "allowed_basis": "weight_or_volume normalization only when pack signature is provable and dimension-compatible",
+                  "allowed_basis": "weight_or_volume normalization only when pack signature is provable and dimension-compatible, including mixed Hebrew quote-mark unit variants",
                   "refused_inference": "no normalization without provable pack evidence",
               },
           }
@@ -4602,8 +4602,8 @@ jobs:
                   row.get("probe_specialty_penalty", 0),
                   -(1 if row.get("has_equivalence_group") else 0),
                   -(1 if row.get("has_same_product_identity") else 0),
-                  -row.get("exact_store_coverage_count", 0),
                   -(1 if row.get("has_pack_signature") else 0),
+                  -row.get("exact_store_coverage_count", 0),
                   row.get("name") or "",
                   row["barcode"],
               )
