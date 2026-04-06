@@ -5583,6 +5583,54 @@ jobs:
                   return "no_proven_match_in_store"
               return "other"
 
+          def shadow_candidate_example_payload(candidate_row: dict):
+              candidate_barcode = clean_text(candidate_row.get("barcode"))
+              candidate_meta = product_probe_metadata_by_barcode.get(candidate_barcode, {})
+              candidate_name = clean_text(candidate_meta.get("name") or candidate_row.get("name") or candidate_row.get("item_name"))
+              return {
+                  "barcode": candidate_barcode,
+                  "name": candidate_name,
+                  "brand": clean_text(candidate_meta.get("brand")),
+                  "category_key": candidate_meta.get("category_key"),
+                  "form_factor_key": clean_text(candidate_meta.get("form_factor_key")),
+                  "equivalence_group_key": clean_text(candidate_meta.get("equivalence_group_key")),
+                  "comparison_price": comparison_price_value(candidate_row),
+              }
+
+          def shadow_candidate_example_list(candidate_rows, limit=3):
+              ordered_rows = sorted(
+                  candidate_rows,
+                  key=lambda row: (
+                      comparison_price_value(row) is None,
+                      comparison_price_value(row) if comparison_price_value(row) is not None else float("inf"),
+                      clean_text(product_probe_metadata_by_barcode.get(clean_text(row.get("barcode")), {}).get("name") or row.get("name") or row.get("item_name")),
+                  ),
+              )
+              examples = []
+              seen = set()
+              for candidate_row in ordered_rows:
+                  payload = shadow_candidate_example_payload(candidate_row)
+                  payload_key = (
+                      payload["barcode"],
+                      payload["name"],
+                      payload["equivalence_group_key"],
+                      payload["form_factor_key"],
+                  )
+                  if payload_key in seen:
+                      continue
+                  seen.add(payload_key)
+                  examples.append(payload)
+                  if len(examples) >= limit:
+                      break
+              return examples
+
+          def shadow_candidate_example_names(examples):
+              return " | ".join(
+                  clean_text(example.get("name"))
+                  for example in examples
+                  if clean_text(example.get("name"))
+              )
+
           def shadow_store_candidate_snapshot(anchor_probe: dict, store_key: str):
               anchor_barcode = anchor_probe["barcode"]
               anchor_meta = product_probe_metadata_by_barcode.get(anchor_barcode, {})
@@ -5664,10 +5712,14 @@ jobs:
                       diagnostic_root_cause_bucket = "same_category_without_same_form_factor_candidate"
                   elif anchor_requires_gf and not gf_preserved_candidates:
                       diagnostic_root_cause_bucket = "same_form_factor_but_gf_not_preserved"
-                  elif not priced_candidates:
-                      diagnostic_root_cause_bucket = "same_form_factor_candidate_without_usable_price"
-                  else:
-                      diagnostic_root_cause_bucket = "priced_equivalent_candidate_exists"
+              elif not priced_candidates:
+                  diagnostic_root_cause_bucket = "same_form_factor_candidate_without_usable_price"
+              else:
+                  diagnostic_root_cause_bucket = "priced_equivalent_candidate_exists"
+              family_same_category_examples = shadow_candidate_example_list(family_same_category_candidates)
+              family_same_form_factor_examples = shadow_candidate_example_list(family_same_form_factor_candidates)
+              equivalence_group_examples = shadow_candidate_example_list(equivalence_group_candidates)
+              priced_equivalence_examples = shadow_candidate_example_list(priced_candidates)
               return {
                   "comparison_family_key": comparison_family_key,
                   "equivalence_group_key": equivalence_group_key,
@@ -5684,6 +5736,14 @@ jobs:
                   "store_gf_preserved_equivalence_candidate_count": len(gf_preserved_candidates),
                   "store_priced_equivalence_candidate_count": len(priced_candidates),
                   "diagnostic_root_cause_bucket": diagnostic_root_cause_bucket,
+                  "family_same_category_examples": family_same_category_examples,
+                  "family_same_form_factor_examples": family_same_form_factor_examples,
+                  "equivalence_group_examples": equivalence_group_examples,
+                  "priced_equivalence_examples": priced_equivalence_examples,
+                  "family_same_category_example_names": shadow_candidate_example_names(family_same_category_examples),
+                  "family_same_form_factor_example_names": shadow_candidate_example_names(family_same_form_factor_examples),
+                  "equivalence_group_example_names": shadow_candidate_example_names(equivalence_group_examples),
+                  "priced_equivalence_example_names": shadow_candidate_example_names(priced_equivalence_examples),
               }
 
           def resolve_basket_line_shadow_match(anchor_probe: dict, store_key: str):
@@ -5895,28 +5955,40 @@ jobs:
                           "store_gf_preserved_equivalence_candidate_count": candidate_snapshot["store_gf_preserved_equivalence_candidate_count"],
                           "store_priced_equivalence_candidate_count": candidate_snapshot["store_priced_equivalence_candidate_count"],
                           "diagnostic_root_cause_bucket": candidate_snapshot["diagnostic_root_cause_bucket"],
+                          "family_same_category_example_names": candidate_snapshot["family_same_category_example_names"],
+                          "family_same_form_factor_example_names": candidate_snapshot["family_same_form_factor_example_names"],
+                          "equivalence_group_example_names": candidate_snapshot["equivalence_group_example_names"],
+                          "priced_equivalence_example_names": candidate_snapshot["priced_equivalence_example_names"],
                       })
                   layer_counts = Counter(decision["chosen_layer"] for decision in store_line_decisions)
-                  baseline_line_count = (
+                  exact_or_normalized_line_count = (
                       layer_counts.get("exact_identity", 0)
                       + layer_counts.get("same_product_unit_normalized", 0)
+                  )
+                  baseline_line_count = (
+                      exact_or_normalized_line_count
                       + layer_counts.get("canonical_equivalent", 0)
                   )
+                  resolved_line_count = baseline_line_count + layer_counts.get("budget_alternative", 0)
                   full_baseline_coverage = (
                       baseline_line_count == selected_probe_size
                       and layer_counts.get("not_proven", 0) == 0
                       and layer_counts.get("unmatched", 0) == 0
                   )
                   high_confidence_baseline_coverage = (
-                      layer_counts.get("exact_identity", 0) + layer_counts.get("same_product_unit_normalized", 0) == selected_probe_size
+                      exact_or_normalized_line_count == selected_probe_size
                       and layer_counts.get("canonical_equivalent", 0) == 0
                       and layer_counts.get("not_proven", 0) == 0
                       and layer_counts.get("unmatched", 0) == 0
                   )
                   complete_with_budget_alternatives = (
-                      baseline_line_count + layer_counts.get("budget_alternative", 0) == selected_probe_size
+                      resolved_line_count == selected_probe_size
                       and layer_counts.get("not_proven", 0) == 0
                       and layer_counts.get("unmatched", 0) == 0
+                  )
+                  near_full_after_user_approved_alternatives = (
+                      resolved_line_count >= max(0, selected_probe_size - 1)
+                      and layer_counts.get("not_proven", 0) == 0
                   )
                   baseline_basket_total = None
                   baseline_line_prices = [
@@ -5971,12 +6043,17 @@ jobs:
                       "budget_alternative_line_count": layer_counts.get("budget_alternative", 0),
                       "unmatched_line_count": layer_counts.get("unmatched", 0),
                       "not_proven_line_count": layer_counts.get("not_proven", 0),
+                      "exact_or_normalized_completion_ratio": round(exact_or_normalized_line_count / selected_probe_size, 4) if selected_probe_size else None,
+                      "baseline_completion_ratio": round(baseline_line_count / selected_probe_size, 4) if selected_probe_size else None,
+                      "resolved_completion_ratio": round(resolved_line_count / selected_probe_size, 4) if selected_probe_size else None,
+                      "resolved_missing_line_count": max(0, selected_probe_size - resolved_line_count),
                       "baseline_basket_total": baseline_basket_total,
                       "optional_lower_cost_total_with_budget_alternatives": optional_lower_cost_total_with_budget_alternatives,
                       "overall_basket_confidence_score": overall_basket_confidence_score,
                       "high_confidence_baseline_coverage": high_confidence_baseline_coverage,
                       "full_baseline_coverage": full_baseline_coverage,
                       "complete_with_budget_alternatives": complete_with_budget_alternatives,
+                      "near_full_after_user_approved_alternatives": near_full_after_user_approved_alternatives,
                       "reason_passed_or_failed": basket_summary_reason,
                   })
 
@@ -6021,12 +6098,17 @@ jobs:
                   "budget_alternative_line_count",
                   "unmatched_line_count",
                   "not_proven_line_count",
+                  "exact_or_normalized_completion_ratio",
+                  "baseline_completion_ratio",
+                  "resolved_completion_ratio",
+                  "resolved_missing_line_count",
                   "baseline_basket_total",
                   "optional_lower_cost_total_with_budget_alternatives",
                   "overall_basket_confidence_score",
                   "high_confidence_baseline_coverage",
                   "full_baseline_coverage",
                   "complete_with_budget_alternatives",
+                  "near_full_after_user_approved_alternatives",
                   "reason_passed_or_failed",
               ],
           )
@@ -6057,6 +6139,10 @@ jobs:
                   "store_gf_preserved_equivalence_candidate_count",
                   "store_priced_equivalence_candidate_count",
                   "diagnostic_root_cause_bucket",
+                  "family_same_category_example_names",
+                  "family_same_form_factor_example_names",
+                  "equivalence_group_example_names",
+                  "priced_equivalence_example_names",
               ],
           )
 
@@ -6111,6 +6197,115 @@ jobs:
           write_json(
               OUT_DIR / "store_side_equivalence_candidate_coverage_summary.json",
               store_side_equivalence_candidate_coverage_summary,
+          )
+
+          basket_completion_readiness_summary = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "budget_alternatives_require_user_approval": True,
+              "near_full_missing_line_threshold": 1,
+              "basket_probes": {},
+          }
+          for basket_probe in basket_probe_definitions:
+              basket_probe_name = basket_probe["basket_probe_name"]
+              selected_probe_size = basket_probe["selected_probe_size"]
+              probe_store_rows = [
+                  row for row in basket_store_shadow_rows
+                  if row["basket_probe_name"] == basket_probe_name
+              ]
+              city_breakdown = {}
+              for city_name in sorted({clean_text(row.get("city")) or "unknown" for row in probe_store_rows}):
+                  city_rows = [row for row in probe_store_rows if (clean_text(row.get("city")) or "unknown") == city_name]
+                  city_breakdown[city_name] = {
+                      "store_count": len(city_rows),
+                      "stores_supporting_high_confidence_baseline_coverage": sum(1 for row in city_rows if row["high_confidence_baseline_coverage"]),
+                      "stores_supporting_full_basket_including_canonical": sum(1 for row in city_rows if row["full_baseline_coverage"]),
+                      "stores_supporting_full_basket_after_user_approved_alternatives": sum(1 for row in city_rows if row["complete_with_budget_alternatives"]),
+                      "stores_supporting_near_full_basket_after_user_approved_alternatives": sum(1 for row in city_rows if row["near_full_after_user_approved_alternatives"]),
+                  }
+              top_store_rows = sorted(
+                  probe_store_rows,
+                  key=lambda row: (
+                      not row["near_full_after_user_approved_alternatives"],
+                      not row["complete_with_budget_alternatives"],
+                      not row["full_baseline_coverage"],
+                      -(row["resolved_completion_ratio"] or 0),
+                      -(row["baseline_completion_ratio"] or 0),
+                      row["resolved_missing_line_count"],
+                      row["optional_lower_cost_total_with_budget_alternatives"] if row["optional_lower_cost_total_with_budget_alternatives"] is not None else float("inf"),
+                      row["baseline_basket_total"] if row["baseline_basket_total"] is not None else float("inf"),
+                  ),
+              )[:10]
+              basket_completion_readiness_summary["basket_probes"][basket_probe_name] = {
+                  "requested_probe_size": basket_probe["requested_probe_size"],
+                  "selected_probe_size": selected_probe_size,
+                  "stores_supporting_high_confidence_baseline_coverage": sum(1 for row in probe_store_rows if row["high_confidence_baseline_coverage"]),
+                  "stores_supporting_full_basket_including_canonical": sum(1 for row in probe_store_rows if row["full_baseline_coverage"]),
+                  "stores_supporting_full_basket_after_user_approved_alternatives": sum(1 for row in probe_store_rows if row["complete_with_budget_alternatives"]),
+                  "stores_supporting_near_full_basket_after_user_approved_alternatives": sum(1 for row in probe_store_rows if row["near_full_after_user_approved_alternatives"]),
+                  "city_breakdown": city_breakdown,
+                  "top_stores_by_completion_after_user_approval": [
+                      {
+                          "store_key": row["store_key"],
+                          "retailer": row.get("retailer"),
+                          "city": row.get("city"),
+                          "exact_line_count": row["exact_line_count"],
+                          "normalized_line_count": row["normalized_line_count"],
+                          "canonical_line_count": row["canonical_line_count"],
+                          "budget_alternative_line_count": row["budget_alternative_line_count"],
+                          "resolved_missing_line_count": row["resolved_missing_line_count"],
+                          "baseline_completion_ratio": row["baseline_completion_ratio"],
+                          "resolved_completion_ratio": row["resolved_completion_ratio"],
+                          "baseline_basket_total": row["baseline_basket_total"],
+                          "optional_lower_cost_total_with_budget_alternatives": row["optional_lower_cost_total_with_budget_alternatives"],
+                      }
+                      for row in top_store_rows
+                  ],
+              }
+          write_json(
+              OUT_DIR / "basket_completion_readiness_summary.json",
+              basket_completion_readiness_summary,
+          )
+
+          equivalence_gap_examples = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "basket_probes": {},
+          }
+          for basket_probe in basket_probe_definitions:
+              basket_probe_name = basket_probe["basket_probe_name"]
+              probe_candidate_rows = [
+                  row for row in store_side_equivalence_candidate_rows
+                  if row["basket_probe_name"] == basket_probe_name
+                  and row["chosen_layer"] in ("not_proven", "unmatched")
+              ]
+              grouped_examples = {}
+              for row in probe_candidate_rows:
+                  bucket_name = clean_text(row.get("diagnostic_root_cause_bucket")) or "unknown"
+                  family_name = clean_text(row.get("comparison_family_key")) or "unknown"
+                  grouped_examples.setdefault(bucket_name, {}).setdefault(family_name, [])
+                  family_examples = grouped_examples[bucket_name][family_name]
+                  if len(family_examples) >= 5:
+                      continue
+                  family_examples.append({
+                      "source_item_name": row.get("source_item_name"),
+                      "store_key": row.get("store_key"),
+                      "retailer": row.get("retailer"),
+                      "city": row.get("city"),
+                      "equivalence_group_key": row.get("equivalence_group_key"),
+                      "store_family_candidate_count": row.get("store_family_candidate_count"),
+                      "store_family_same_category_candidate_count": row.get("store_family_same_category_candidate_count"),
+                      "store_family_same_form_factor_candidate_count": row.get("store_family_same_form_factor_candidate_count"),
+                      "store_equivalence_group_candidate_count": row.get("store_equivalence_group_candidate_count"),
+                      "family_same_category_example_names": row.get("family_same_category_example_names"),
+                      "family_same_form_factor_example_names": row.get("family_same_form_factor_example_names"),
+                      "equivalence_group_example_names": row.get("equivalence_group_example_names"),
+                      "priced_equivalence_example_names": row.get("priced_equivalence_example_names"),
+                  })
+              equivalence_gap_examples["basket_probes"][basket_probe_name] = grouped_examples
+          write_json(
+              OUT_DIR / "equivalence_gap_examples.json",
+              equivalence_gap_examples,
           )
 
           legacy_basket_line_rows_for_impact = []
@@ -6265,6 +6460,12 @@ jobs:
                   "stores_only_complete_with_budget_alternatives": sum(
                       1 for row in probe_store_rows
                       if not row["full_baseline_coverage"] and row["complete_with_budget_alternatives"]
+                  ),
+                  "stores_supporting_full_basket_after_user_approved_alternatives": sum(
+                      1 for row in probe_store_rows if row["complete_with_budget_alternatives"]
+                  ),
+                  "stores_supporting_near_full_basket_after_user_approved_alternatives": sum(
+                      1 for row in probe_store_rows if row["near_full_after_user_approved_alternatives"]
                   ),
                   "stores_remaining_incomplete_even_with_budget_alternatives": sum(
                       1 for row in probe_store_rows
@@ -6806,6 +7007,8 @@ jobs:
             out/basket_store_shadow_summary.csv
             out/store_side_equivalence_candidate_coverage.csv
             out/store_side_equivalence_candidate_coverage_summary.json
+            out/basket_completion_readiness_summary.json
+            out/equivalence_gap_examples.json
             out/store_comparison_family_coverage.csv
             out/store_comparison_family_coverage_summary.json
             out/store_family_gap_diagnostic.csv
