@@ -4915,14 +4915,16 @@ jobs:
 
           def diagnose_family_gap_candidate(metadata: dict, family_rule: dict):
               category_key = clean_text(metadata.get("category_key"))
-              if not category_matches_family_rule(category_key, family_rule):
-                  return "category_not_allowed", None
               family_tokens = metadata.get("family_tokens") or normalized_lookup_tokens_shadow(metadata.get("name") or "")
               matched_forbidden_pattern = first_matching_rule_pattern(family_rule.get("forbidden_tokens"), family_tokens)
               if matched_forbidden_pattern:
                   return "forbidden_token", matched_forbidden_pattern
               matched_required_pattern = first_matching_rule_pattern(family_rule.get("required_any_tokens"), family_tokens)
               matched_required_prefix = first_matching_rule_prefix(family_rule.get("required_any_prefixes"), family_tokens)
+              if not category_matches_family_rule(category_key, family_rule):
+                  if matched_required_pattern or matched_required_prefix:
+                      return "strong_name_candidate_in_disallowed_category", category_key
+                  return "category_not_allowed", None
               if not matched_required_pattern and not matched_required_prefix:
                   return "missing_required_token", None
               if family_rule.get("comparison_family_key") == "eggs":
