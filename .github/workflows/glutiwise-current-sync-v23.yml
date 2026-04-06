@@ -3788,6 +3788,7 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "prefer_derived_equivalence_group": True,
                   "probe_avoid_tokens": ["active", "spelt", "\u05d0\u05e7\u05d8\u05d9\u05d1", "\u05db\u05d5\u05e1\u05de\u05d9\u05df", "\u05de\u05d7\u05de\u05e6\u05ea", "\u05e9\u05d9\u05e4\u05d5\u05df", "\u05d7\u05de\u05e0\u05d9\u05d5\u05ea"],
                   "probe_prefer_tokens": ["\u05e4\u05e8\u05d5\u05e1", "\u05d0\u05d7\u05d9\u05d3", "\u05e8\u05d2\u05d9\u05dc", "\u05e4\u05e9\u05d5\u05d8"],
                   "probe_deprioritize_tokens": ["\u05d7\u05dc\u05d4", "\u05de\u05d7\u05de\u05e6\u05ea", "\u05e9\u05d9\u05e4\u05d5\u05df", "\u05db\u05d5\u05e1\u05de\u05d9\u05df", "\u05d7\u05de\u05e0\u05d9\u05d5\u05ea", "\u05de\u05dc\u05d0", "\u05d1\u05e8\u05d9\u05d5\u05e9", "\u05e2\u05e0\u05e0\u05d9\u05dd", "\u05d1\u05e1\u05d2\u05e0\u05d5\u05df", "\u05d0\u05de\u05e8\u05d9\u05e7\u05d4", "\u05de\u05d5\u05d6\u05d4\u05d1\u05d9\u05dd", "\u05d3\u05d2\u05e0\u05d9\u05dd"],
@@ -3862,6 +3863,7 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "prefer_derived_equivalence_group": True,
                   "canonical_equivalence_scope": "same soft-cheese use-case only; cottage stays separate from labneh/white-cheese style, and explicit fat percentage remains part of form-factor proof",
                   "form_factor_patterns": [
                       {"key": "cottage", "any_tokens": ["\u05e7\u05d5\u05d8\u05d2", "cottage"]},
@@ -3883,6 +3885,7 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "prefer_derived_equivalence_group": True,
                   "probe_avoid_tokens": ["gluten free", "\u05dc\u05dc\"\u05d2", "\u05dc\u05dc\u05d0 \u05d2\u05dc\u05d5\u05d8\u05df", "\u05db\u05e9\u05dc\"\u05e4"],
                   "probe_prefer_tokens": ["\u05e7\u05d5\u05e8\u05e0\u05e4\u05dc\u05e7\u05e1", "cornflakes"],
                   "probe_deprioritize_tokens": ["\u05d2\u05e8\u05e0\u05d5\u05dc\u05d4", "granola", "\u05dc\u05dc\"\u05d2", "\u05dc\u05dc\u05d0 \u05d2\u05dc\u05d5\u05d8\u05df", "\u05db\u05e9\u05dc\"\u05e4", "\u05d3\u05d1\u05e9", "honey", "\u05e4\u05d9\u05d8\u05e0\u05e1", "fitness", "\u05d1\u05d3\u05e5", "\u05de\u05d0\u05e8\u05d6", "\u05d0\u05dc\u05d5\u05e4\u05d9\u05dd"],
@@ -3929,6 +3932,7 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "prefer_derived_equivalence_group": True,
                   "probe_prefer_tokens": ["\u05d0\u05d5\u05e8\u05d6", "rice", "\u05e7\u05d5\u05e1\u05e7\u05d5\u05e1", "couscous", "\u05e7\u05dc\u05d0\u05e1\u05d9", "classic"],
                   "probe_deprioritize_tokens": ["\u05d0\u05d8\u05e8\u05d9\u05d5\u05ea", "noodles", "\u05e7\u05d5\u05e1\u05e7\u05d5\u05e1 \u05de\u05d4\u05d9\u05e8", "instant couscous", "\u05e4\u05ea\u05d9\u05ea\u05d9\u05dd", "ptitim", "\u05e4\u05e8\u05d9\u05db\u05d9\u05d5\u05ea", "crackers", "\u05e9\u05d1\u05d1\u05d9", "\u05de\u05d9\u05e7\u05e1", "mix", "\u05d1\u05e1\u05de\u05d8\u05d9", "\u05d9\u05e1\u05de\u05d9\u05df", "\u05e8\u05d9\u05d6\u05d5\u05d8\u05d5"],
                   "form_factor_patterns": [
@@ -3950,6 +3954,7 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "prefer_derived_equivalence_group": True,
                   "form_factor_patterns": [
                       {"key": "oil", "any_tokens": ["\u05d1\u05e9\u05de\u05df", "oil"]},
                       {"key": "water", "any_tokens": ["\u05d1\u05de\u05d9\u05dd", "water"]},
@@ -3983,6 +3988,7 @@ jobs:
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "prefer_derived_equivalence_group": True,
                   "form_factor_patterns": [
                       {"key": "whole", "any_tokens": ["\u05d2\u05d5\u05dc\u05de\u05d9\u05ea", "raw"]},
                   ],
@@ -4000,6 +4006,7 @@ jobs:
                   "unit_basis": "volume",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
+                  "prefer_derived_equivalence_group": True,
                   "form_factor_default": "plain_water",
                   "probe_max_items": 2,
               },
@@ -4216,7 +4223,7 @@ jobs:
                           return prefix
               return None
 
-          def derive_curated_form_factor_parts_shadow(family_rule: dict, text_tokens, pack_signature):
+          def derive_curated_form_factor_parts_shadow(family_rule: dict, text_tokens, pack_signature, support_tokens=None):
               if not family_rule:
                   return []
               family_key = family_rule.get("comparison_family_key")
@@ -4232,6 +4239,8 @@ jobs:
               derived_parts = []
               for pattern_rule in family_rule.get("form_factor_patterns") or []:
                   matched_pattern = first_matching_rule_pattern(pattern_rule.get("any_tokens"), text_tokens)
+                  if not matched_pattern and support_tokens:
+                      matched_pattern = first_matching_rule_pattern(pattern_rule.get("any_tokens"), support_tokens)
                   if not matched_pattern:
                       continue
                   key = clean_text(pattern_rule.get("key"))
@@ -4311,13 +4320,13 @@ jobs:
                   return "generic"
               return " ".join(base_tokens[:4])
 
-          def build_comparison_form_factor_key_shadow(family_rule: dict, base_product_identity_key: str, family_tokens=None, pack_signature=None):
+          def build_comparison_form_factor_key_shadow(family_rule: dict, base_product_identity_key: str, family_tokens=None, pack_signature=None, support_tokens=None):
               if not family_rule:
                   return None
               family_key = family_rule.get("comparison_family_key")
               if not family_key:
                   return None
-              curated_parts = derive_curated_form_factor_parts_shadow(family_rule, family_tokens or [], pack_signature)
+              curated_parts = derive_curated_form_factor_parts_shadow(family_rule, family_tokens or [], pack_signature, support_tokens)
               if curated_parts:
                   return f"{family_key}|{'|'.join(curated_parts[:3])}"
               form_factor_default = clean_text(family_rule.get("form_factor_default"))
@@ -4484,20 +4493,26 @@ jobs:
               comparison_family_key_value = comparison_family_rule_value.get("comparison_family_key") if comparison_family_rule_value else None
               base_product_identity_key_value = derive_base_product_identity_key_shadow(comparison_family_rule_value, family_tokens_value)
               pack_signature_value = build_pack_signature_shadow(name_value or "", comparison_family_rule_value)
+              explicit_equivalence_group_tokens_value = normalized_lookup_tokens_shadow(substitute_group_value or "")
               comparison_form_factor_key_value = build_comparison_form_factor_key_shadow(
                   comparison_family_rule_value,
                   base_product_identity_key_value,
                   family_tokens_value,
                   pack_signature_value,
+                  explicit_equivalence_group_tokens_value,
               )
               form_factor_key_value = comparison_form_factor_key_value or build_form_factor_key_shadow(category_key_value, family_tokens_value)
               explicit_equivalence_group = clean_text(substitute_group_value).lower() if substitute_group_value else None
               derived_equivalence_group = None
+              prefer_derived_equivalence_group = bool(comparison_family_rule_value.get("prefer_derived_equivalence_group")) if comparison_family_rule_value else False
               if comparison_family_key_value and comparison_form_factor_key_value:
                   derived_equivalence_group = f"derived::{comparison_form_factor_key_value}"
               elif not explicit_equivalence_group and category_key_value and len(family_tokens_value) >= 2 and form_factor_key_value:
                   derived_equivalence_group = f"generic::{form_factor_key_value}"
-              if explicit_equivalence_group and comparison_form_factor_key_value and comparison_family_key_value:
+              if prefer_derived_equivalence_group and derived_equivalence_group:
+                  equivalence_group_key_value = derived_equivalence_group
+                  equivalence_group_source = "derived_curated_family_form_factor_preferred_over_explicit_substitute_group" if explicit_equivalence_group else "derived_curated_family_form_factor"
+              elif explicit_equivalence_group and comparison_form_factor_key_value and comparison_family_key_value:
                   equivalence_group_key_value = f"{comparison_family_key_value}|sg::{explicit_equivalence_group}"
                   equivalence_group_source = "explicit_substitute_group_plus_curated_family_form_factor_enforced_at_match_time"
               elif explicit_equivalence_group and form_factor_key_value:
@@ -4796,7 +4811,7 @@ jobs:
                   "line_signature": "name tokens with pack expressions, numeric noise, and brand/manufacturer tokens removed while preserving fat and size qualifiers when explicit",
                   "pack_signature": "legacy pack parsing plus compact Hebrew unit suffix parsing, Hebrew quote-mark unit variants, eggs count parsing including construct-form egg labels, and bottled-water liter multipack parsing when family rules allow it",
                   "base_product_identity_key": "curated family identity built from normalized family tokens after family-specific strip tokens are removed",
-                  "equivalence_group_key": "explicit substitute_group plus curated family when available, with form-factor enforced separately at match time; otherwise derived curated family plus form-factor",
+                  "equivalence_group_key": "curated family plus form-factor derived group for selected staple families when that signal is stronger and more consistent than explicit substitute_group; otherwise explicit substitute_group plus curated family with form-factor enforced separately at match time, or derived curated family plus form-factor when no explicit group exists",
                   "comparison_form_factor_key": "curated family-specific use-case/form-factor rules first, such as egg count-only shell equivalence, milk fat+lactose-free, soft-cheese cottage-vs-labneh plus explicit fat percentage, tuna water-vs-oil, pasta shape, cereal subtype, bread type, and water plainness; only then reduced base product identity fallback",
                   "same_product_identity_key": "comparison family plus normalized brand identity plus curated base product identity",
               },
