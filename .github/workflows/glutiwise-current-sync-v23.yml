@@ -258,6 +258,7 @@ jobs:
           import zipfile
           from collections import Counter, defaultdict
           from datetime import datetime, timedelta, timezone
+          from itertools import combinations
           from pathlib import Path
           
           TARGET_RETAILERS = ("shufersal", "ramilevy", "yohananof")
