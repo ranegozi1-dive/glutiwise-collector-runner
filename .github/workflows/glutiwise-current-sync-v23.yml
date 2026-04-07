@@ -6510,6 +6510,97 @@ jobs:
               cart_summary_offer_coverage,
           )
 
+          incomplete_store_basket_gap_summary = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "basket_probes": {},
+          }
+          for basket_probe in basket_probe_definitions:
+              basket_probe_name = basket_probe["basket_probe_name"]
+              probe_store_rows = [
+                  row for row in basket_store_shadow_rows
+                  if row["basket_probe_name"] == basket_probe_name
+                  and not row["complete_with_budget_alternatives"]
+              ]
+              top_family_counts = Counter()
+              top_bucket_counts = Counter()
+              incomplete_store_summaries = []
+              for store_row in sorted(
+                  probe_store_rows,
+                  key=lambda row: (
+                      row["resolved_missing_line_count"],
+                      row["store_key"],
+                  ),
+              ):
+                  store_key = store_row["store_key"]
+                  unresolved_line_rows = [
+                      row for row in basket_line_shadow_rows
+                      if row["basket_probe_name"] == basket_probe_name
+                      and row["store_key"] == store_key
+                      and row["chosen_layer"] in ("unmatched", "not_proven")
+                  ]
+                  diagnostic_rows = [
+                      row for row in store_side_equivalence_candidate_rows
+                      if row["basket_probe_name"] == basket_probe_name
+                      and row["store_key"] == store_key
+                      and row["chosen_layer"] in ("unmatched", "not_proven")
+                  ]
+                  unresolved_family_counts = Counter(
+                      (product_probe_metadata_by_barcode.get(row["source_item_id"], {}) or {}).get("comparison_family_key") or "unknown"
+                      for row in unresolved_line_rows
+                  )
+                  diagnostic_bucket_counts = Counter(
+                      clean_text(row.get("diagnostic_root_cause_bucket")) or "unknown"
+                      for row in diagnostic_rows
+                  )
+                  top_family_counts.update(unresolved_family_counts)
+                  top_bucket_counts.update(diagnostic_bucket_counts)
+                  if diagnostic_bucket_counts.get("no_store_candidate_in_comparison_family", 0) >= max(
+                      diagnostic_bucket_counts.get("no_store_candidate_in_equivalence_group", 0),
+                      diagnostic_bucket_counts.get("same_family_same_category_candidate_outside_equivalence_group", 0),
+                      diagnostic_bucket_counts.get("same_family_same_form_factor_candidate_outside_equivalence_group", 0),
+                  ):
+                      likely_gap_class = "likely_genuinely_shallow_store_assortment"
+                  elif diagnostic_bucket_counts.get("same_family_same_category_candidate_outside_equivalence_group", 0) or diagnostic_bucket_counts.get("same_family_same_form_factor_candidate_outside_equivalence_group", 0):
+                      likely_gap_class = "likely_equivalence_group_derivation_gap"
+                  elif diagnostic_bucket_counts.get("no_store_candidate_in_equivalence_group", 0):
+                      likely_gap_class = "likely_store_side_family_assignment_or_equivalence_grouping_gap"
+                  else:
+                      likely_gap_class = "mixed_or_unclear"
+                  incomplete_store_summaries.append({
+                      "store_key": store_key,
+                      "retailer": store_row.get("retailer"),
+                      "city": store_row.get("city"),
+                      "resolved_missing_line_count": store_row["resolved_missing_line_count"],
+                      "exact_line_count": store_row["exact_line_count"],
+                      "normalized_line_count": store_row["normalized_line_count"],
+                      "canonical_line_count": store_row["canonical_line_count"],
+                      "budget_alternative_line_count": store_row["budget_alternative_line_count"],
+                      "unresolved_line_count": len(unresolved_line_rows),
+                      "likely_gap_class": likely_gap_class,
+                      "top_unresolved_families": dict(unresolved_family_counts.most_common(5)),
+                      "top_diagnostic_buckets": dict(diagnostic_bucket_counts.most_common(5)),
+                      "unresolved_lines": [
+                          {
+                              "source_item_name": row.get("source_item_name"),
+                              "comparison_family_key": (product_probe_metadata_by_barcode.get(row["source_item_id"], {}) or {}).get("comparison_family_key"),
+                              "chosen_layer": row.get("chosen_layer"),
+                              "reason_or_failure_reason": row.get("reason_or_failure_reason"),
+                          }
+                          for row in unresolved_line_rows[:8]
+                      ],
+                  })
+              incomplete_store_basket_gap_summary["basket_probes"][basket_probe_name] = {
+                  "incomplete_store_count": len(incomplete_store_summaries),
+                  "top_blocking_families": dict(top_family_counts.most_common(10)),
+                  "top_blocking_diagnostic_buckets": dict(top_bucket_counts.most_common(10)),
+                  "incomplete_stores": incomplete_store_summaries,
+              }
+          write_json(
+              OUT_DIR / "incomplete_store_basket_gap_summary.json",
+              incomplete_store_basket_gap_summary,
+          )
+
           equivalence_gap_examples = {
               "shadow_only": True,
               "publish_gate_impact": "none",
@@ -7254,6 +7345,7 @@ jobs:
             out/comparison_screen_readiness_summary.json
             out/city_selection_readiness_summary.json
             out/cart_summary_offer_coverage.json
+            out/incomplete_store_basket_gap_summary.json
             out/equivalence_gap_examples.json
             out/store_comparison_family_coverage.csv
             out/store_comparison_family_coverage_summary.json
