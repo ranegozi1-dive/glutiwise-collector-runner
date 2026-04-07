@@ -136,6 +136,7 @@ jobs:
           import json
           import re
           from collections import Counter, defaultdict
+          from itertools import combinations
           from pathlib import Path
 
           dumps_dir = Path("dumps")
@@ -6404,6 +6405,67 @@ jobs:
               comparison_screen_readiness_summary,
           )
 
+          city_selection_readiness_summary = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "selected_city_scope_controls_visible_prices": True,
+              "basket_probes": {},
+          }
+          for basket_probe in basket_probe_definitions:
+              basket_probe_name = basket_probe["basket_probe_name"]
+              probe_store_rows = [
+                  row for row in basket_store_shadow_rows
+                  if row["basket_probe_name"] == basket_probe_name
+              ]
+              ordered_city_names = sorted({clean_text(row.get("city")) or "unknown" for row in probe_store_rows})
+              city_scope_breakdown = {}
+              for scope_size in range(1, len(ordered_city_names) + 1):
+                  for city_scope in combinations(ordered_city_names, scope_size):
+                      scope_rows = [
+                          row for row in probe_store_rows
+                          if (clean_text(row.get("city")) or "unknown") in city_scope
+                      ]
+                      full_rows = [row for row in scope_rows if row["complete_with_budget_alternatives"]]
+                      near_full_rows = [row for row in scope_rows if row["near_full_after_user_approved_alternatives"]]
+                      city_scope_breakdown[" + ".join(city_scope)] = {
+                          "selected_city_count": len(city_scope),
+                          "store_count": len(scope_rows),
+                          "eligible_full_store_count": len(full_rows),
+                          "eligible_near_full_store_count": len(near_full_rows),
+                          "best_full_store_keys_sorted_by_total": [
+                              row["store_key"]
+                              for row in sorted(
+                                  full_rows,
+                                  key=lambda row: (
+                                      row["optional_lower_cost_total_with_budget_alternatives"] if row["optional_lower_cost_total_with_budget_alternatives"] is not None else float("inf"),
+                                      row["baseline_basket_total"] if row["baseline_basket_total"] is not None else float("inf"),
+                                  ),
+                              )[:5]
+                          ],
+                          "best_near_full_store_keys_sorted_by_total": [
+                              row["store_key"]
+                              for row in sorted(
+                                  near_full_rows,
+                                  key=lambda row: (
+                                      not row["complete_with_budget_alternatives"],
+                                      row["resolved_missing_line_count"],
+                                      row["optional_lower_cost_total_with_budget_alternatives"] if row["optional_lower_cost_total_with_budget_alternatives"] is not None else float("inf"),
+                                      row["baseline_basket_total"] if row["baseline_basket_total"] is not None else float("inf"),
+                                  ),
+                              )[:5]
+                          ],
+                          "incomplete_store_keys": [
+                              row["store_key"]
+                              for row in scope_rows
+                              if not row["complete_with_budget_alternatives"]
+                          ],
+                      }
+              city_selection_readiness_summary["basket_probes"][basket_probe_name] = city_scope_breakdown
+          write_json(
+              OUT_DIR / "city_selection_readiness_summary.json",
+              city_selection_readiness_summary,
+          )
+
           cart_summary_offer_coverage = {
               "shadow_only": True,
               "publish_gate_impact": "none",
@@ -7189,6 +7251,7 @@ jobs:
             out/store_side_equivalence_candidate_coverage_summary.json
             out/basket_completion_readiness_summary.json
             out/comparison_screen_readiness_summary.json
+            out/city_selection_readiness_summary.json
             out/cart_summary_offer_coverage.json
             out/equivalence_gap_examples.json
             out/store_comparison_family_coverage.csv
