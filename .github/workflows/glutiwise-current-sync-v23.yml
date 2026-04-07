@@ -6510,6 +6510,79 @@ jobs:
               cart_summary_offer_coverage,
           )
 
+          cart_offer_completion_gain_summary = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "cart_summary_offers_require_user_approval": True,
+              "offer_layers_considered": [
+                  "canonical_equivalent",
+                  "budget_alternative",
+              ],
+              "basket_probes": {},
+          }
+          for basket_probe in basket_probe_definitions:
+              basket_probe_name = basket_probe["basket_probe_name"]
+              probe_store_rows_by_store_key = {
+                  row["store_key"]: row
+                  for row in basket_store_shadow_rows
+                  if row["basket_probe_name"] == basket_probe_name
+              }
+              line_summaries = []
+              for anchor_probe in basket_probe["items"]:
+                  anchor_barcode = anchor_probe["barcode"]
+                  anchor_rows = [
+                      row for row in basket_line_shadow_rows
+                      if row["basket_probe_name"] == basket_probe_name
+                      and row["source_item_id"] == anchor_barcode
+                  ]
+                  full_completion_gain_store_keys = []
+                  near_full_completion_gain_store_keys = []
+                  cost_optimization_only_store_keys = []
+                  unresolved_after_offer_store_keys = []
+                  for row in anchor_rows:
+                      store_row = probe_store_rows_by_store_key.get(row["store_key"])
+                      if not store_row:
+                          continue
+                      chosen_layer = row["chosen_layer"]
+                      if chosen_layer not in ("canonical_equivalent", "budget_alternative"):
+                          if chosen_layer in ("unmatched", "not_proven"):
+                              unresolved_after_offer_store_keys.append(row["store_key"])
+                          continue
+                      if store_row["complete_with_budget_alternatives"] and not store_row["full_baseline_coverage"]:
+                          full_completion_gain_store_keys.append(row["store_key"])
+                      elif store_row["near_full_after_user_approved_alternatives"] and not store_row["complete_with_budget_alternatives"]:
+                          near_full_completion_gain_store_keys.append(row["store_key"])
+                      elif chosen_layer == "budget_alternative" and store_row["full_baseline_coverage"]:
+                          cost_optimization_only_store_keys.append(row["store_key"])
+                  recommended_offer_role = None
+                  if full_completion_gain_store_keys:
+                      recommended_offer_role = "helps_complete_full_basket"
+                  elif near_full_completion_gain_store_keys:
+                      recommended_offer_role = "helps_reach_near_full_basket"
+                  elif cost_optimization_only_store_keys:
+                      recommended_offer_role = "optional_cost_optimization_only"
+                  line_summaries.append({
+                      "source_item_id": anchor_barcode,
+                      "source_item_name": anchor_probe["name"],
+                      "comparison_family_key": product_probe_metadata_by_barcode.get(anchor_barcode, {}).get("comparison_family_key"),
+                      "full_completion_gain_store_count": len(full_completion_gain_store_keys),
+                      "near_full_completion_gain_store_count": len(near_full_completion_gain_store_keys),
+                      "cost_optimization_only_store_count": len(cost_optimization_only_store_keys),
+                      "unresolved_after_offer_store_count": len(sorted(set(unresolved_after_offer_store_keys))),
+                      "recommended_offer_role": recommended_offer_role,
+                      "example_full_completion_gain_store_keys": sorted(set(full_completion_gain_store_keys))[:5],
+                      "example_near_full_completion_gain_store_keys": sorted(set(near_full_completion_gain_store_keys))[:5],
+                      "example_cost_optimization_only_store_keys": sorted(set(cost_optimization_only_store_keys))[:5],
+                  })
+              cart_offer_completion_gain_summary["basket_probes"][basket_probe_name] = {
+                  "selected_probe_size": basket_probe["selected_probe_size"],
+                  "line_summaries": line_summaries,
+              }
+          write_json(
+              OUT_DIR / "cart_offer_completion_gain_summary.json",
+              cart_offer_completion_gain_summary,
+          )
+
           incomplete_store_basket_gap_summary = {
               "shadow_only": True,
               "publish_gate_impact": "none",
@@ -7345,6 +7418,7 @@ jobs:
             out/comparison_screen_readiness_summary.json
             out/city_selection_readiness_summary.json
             out/cart_summary_offer_coverage.json
+            out/cart_offer_completion_gain_summary.json
             out/incomplete_store_basket_gap_summary.json
             out/equivalence_gap_examples.json
             out/store_comparison_family_coverage.csv
