@@ -4269,10 +4269,17 @@ jobs:
           def category_bypass_diagnostic_for_family_rule(name: str, family_rule: dict, text_tokens, preliminary_pack_signature=None):
               if (family_rule or {}).get("comparison_family_key") != "bottled_water":
                   return None, None
+              normalized_name_text = clean_lookup_text(name).lower()
               matched_cosmetic_pattern = first_matching_rule_pattern(
                   family_rule.get("category_bypass_forbidden_tokens"),
                   text_tokens,
               )
+              if not matched_cosmetic_pattern:
+                  for blocked_pattern in family_rule.get("category_bypass_forbidden_tokens") or []:
+                      blocked_lookup = clean_lookup_text(blocked_pattern).lower()
+                      if blocked_lookup and blocked_lookup in normalized_name_text:
+                          matched_cosmetic_pattern = blocked_pattern
+                          break
               if matched_cosmetic_pattern:
                   return None, ("bottled_water_cosmetic_or_topical_water_token", matched_cosmetic_pattern)
               if not preliminary_pack_signature:
