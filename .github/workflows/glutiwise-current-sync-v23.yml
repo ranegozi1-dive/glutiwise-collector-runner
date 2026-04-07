@@ -3997,8 +3997,11 @@ jobs:
               },
               {
                   "comparison_family_key": "bottled_water",
-                  "why": "plain bottled water only; excludes flavored and carbonated drinks",
+                  "why": "plain bottled water only; excludes flavored, carbonated, and cosmetic-water lookalikes",
                   "probe_priority": 11,
+                  "category_bypass_forbidden_tokens": ["\u05de\u05d9\u05e1\u05dc\u05e8", "micellar", "\u05d4\u05d9\u05d3\u05e8\u05d4", "hydra", "\u05d2'\u05dc", "gel", "\u05e4\u05e0\u05d9\u05dd", "face", "\u05e1\u05e8\u05d5\u05dd", "serum", "\u05e7\u05e8\u05dd", "cream", "boost", "\u05d1\u05d5\u05e1\u05d8"],
+                  "category_bypass_required_dimension": "volume",
+                  "category_bypass_min_total_base_qty": 500.0,
                   "allowed_category_tokens": ["משקאות"],
                   "required_any_tokens": ["מים", "water"],
                   "forbidden_tokens": ["סודה", "cola", "קולה", "מוגז", "טעמים", "flavor", "ויטמינ"],
@@ -4263,13 +4266,34 @@ jobs:
                   return True
               return bool(first_matching_rule_pattern(allowed_category_tokens, normalized_lookup_tokens_shadow(category_key)))
 
-          def match_comparison_family_rule(name: str, category_key: str, family_tokens):
+          def category_bypass_diagnostic_for_family_rule(name: str, family_rule: dict, text_tokens, preliminary_pack_signature=None):
+              if (family_rule or {}).get("comparison_family_key") != "bottled_water":
+                  return None, None
+              matched_cosmetic_pattern = first_matching_rule_pattern(
+                  family_rule.get("category_bypass_forbidden_tokens"),
+                  text_tokens,
+              )
+              if matched_cosmetic_pattern:
+                  return None, ("bottled_water_cosmetic_or_topical_water_token", matched_cosmetic_pattern)
+              if not preliminary_pack_signature:
+                  return None, ("bottled_water_missing_pack_signature_for_category_bypass", None)
+              required_dimension = clean_text(family_rule.get("category_bypass_required_dimension"))
+              if required_dimension and clean_text(preliminary_pack_signature.get("dimension")) != required_dimension:
+                  return None, ("bottled_water_non_volume_pack_signature_for_category_bypass", preliminary_pack_signature.get("dimension"))
+              total_base_qty = safe_decimal(preliminary_pack_signature.get("total_base_qty"))
+              min_total_base_qty = safe_decimal(family_rule.get("category_bypass_min_total_base_qty"))
+              if min_total_base_qty is not None and (total_base_qty is None or total_base_qty < min_total_base_qty):
+                  return None, ("bottled_water_pack_signature_below_volume_threshold", total_base_qty)
+              return {
+                  "category_match_mode": "strong_name_with_pack_signature_category_bypass",
+                  "pack_signature_derivation_rule": preliminary_pack_signature.get("derivation_rule") if preliminary_pack_signature else None,
+              }, None
+
+          def match_comparison_family_rule(name: str, category_key: str, family_tokens, preliminary_pack_signature=None):
               text_tokens = normalized_lookup_tokens_shadow(name)
               if not text_tokens or not category_key:
                   return None, None
               for family_rule in comparison_family_registry:
-                  if not category_matches_family_rule(category_key, family_rule):
-                      continue
                   matched_forbidden_pattern = first_matching_rule_pattern(family_rule.get("forbidden_tokens"), text_tokens)
                   if matched_forbidden_pattern:
                       continue
@@ -4277,6 +4301,16 @@ jobs:
                   matched_required_prefix = first_matching_rule_prefix(family_rule.get("required_any_prefixes"), text_tokens)
                   if not matched_required_pattern and not matched_required_prefix:
                       continue
+                  category_match_basis = None
+                  if not category_matches_family_rule(category_key, family_rule):
+                      category_match_basis, _ = category_bypass_diagnostic_for_family_rule(
+                          name,
+                          family_rule,
+                          text_tokens,
+                          preliminary_pack_signature,
+                      )
+                      if not category_match_basis:
+                          continue
                   if family_rule.get("comparison_family_key") == "eggs":
                       eggs_non_shell_pattern = first_matching_rule_pattern(
                           ["מצה", "מצות", "matzo", "bread", "לחם", "פיתה", "חלה", "cake", "cookie", "biscuit"],
@@ -4297,10 +4331,13 @@ jobs:
                       )
                       if tahini_dip_pattern:
                           continue
-                  return family_rule, {
+                  assignment_basis = {
                       "matched_required_pattern": matched_required_pattern or matched_required_prefix,
                       "category_key": category_key,
                   }
+                  if category_match_basis:
+                      assignment_basis.update(category_match_basis)
+                  return family_rule, assignment_basis
               return None, None
 
           def derive_base_product_identity_key_shadow(family_rule: dict, family_tokens):
@@ -4489,10 +4526,16 @@ jobs:
               family_tokens_value = build_family_tokens_shadow(name_value or "", brand_value or "", manufacturer_value or "")
               family_signature_key_value = build_family_signature_key_shadow(family_tokens_value)
               line_signature_value = " ".join(family_tokens_value)
-              comparison_family_rule_value, comparison_family_assignment_basis_value = match_comparison_family_rule(name_value or "", category_key_value, family_tokens_value)
+              preliminary_pack_signature_value = build_pack_signature_shadow(name_value or "", None)
+              comparison_family_rule_value, comparison_family_assignment_basis_value = match_comparison_family_rule(
+                  name_value or "",
+                  category_key_value,
+                  family_tokens_value,
+                  preliminary_pack_signature_value,
+              )
               comparison_family_key_value = comparison_family_rule_value.get("comparison_family_key") if comparison_family_rule_value else None
               base_product_identity_key_value = derive_base_product_identity_key_shadow(comparison_family_rule_value, family_tokens_value)
-              pack_signature_value = build_pack_signature_shadow(name_value or "", comparison_family_rule_value)
+              pack_signature_value = build_pack_signature_shadow(name_value or "", comparison_family_rule_value) or preliminary_pack_signature_value
               explicit_equivalence_group_tokens_value = normalized_lookup_tokens_shadow(substitute_group_value or "")
               comparison_form_factor_key_value = build_comparison_form_factor_key_shadow(
                   comparison_family_rule_value,
@@ -4806,10 +4849,10 @@ jobs:
               "shadow_only": True,
               "publish_gate_impact": "none",
               "deterministic_derivations_added": {
-                  "comparison_family_key": "assigned from a small curated comparison_family_registry using token-aware required and forbidden pattern matching plus tightly scoped required-prefix matching for selected Hebrew family stems instead of loose substring hits",
+                  "comparison_family_key": "assigned from a small curated comparison_family_registry using token-aware required and forbidden pattern matching plus tightly scoped required-prefix matching for selected Hebrew family stems instead of loose substring hits; bottled_water may bypass category only when strong water tokens, a volume pack signature, and cosmetic-water exclusions all agree",
                   "brand_identity_key": "normalized brand plus manufacturer tokens with corporate suffix removal",
                   "line_signature": "name tokens with pack expressions, numeric noise, and brand/manufacturer tokens removed while preserving fat and size qualifiers when explicit",
-                  "pack_signature": "legacy pack parsing plus compact Hebrew unit suffix parsing, Hebrew quote-mark unit variants, eggs count parsing including construct-form egg labels, and bottled-water liter multipack parsing when family rules allow it",
+                  "pack_signature": "legacy pack parsing plus compact Hebrew unit suffix parsing, Hebrew quote-mark unit variants, eggs count parsing including construct-form egg labels, bottled-water liter multipack parsing when family rules allow it, and preliminary pack parsing used only for bottled-water category-bypass diagnostics",
                   "base_product_identity_key": "curated family identity built from normalized family tokens after family-specific strip tokens are removed",
                   "equivalence_group_key": "curated family plus form-factor derived group for selected staple families when that signal is stronger and more consistent than explicit substitute_group; otherwise explicit substitute_group plus curated family with form-factor enforced separately at match time, or derived curated family plus form-factor when no explicit group exists",
                   "comparison_form_factor_key": "curated family-specific use-case/form-factor rules first, such as egg count-only shell equivalence, milk fat+lactose-free, soft-cheese cottage-vs-labneh plus explicit fat percentage, tuna water-vs-oil, pasta shape, cereal subtype, bread type, and water plainness; only then reduced base product identity fallback",
@@ -4923,6 +4966,16 @@ jobs:
               matched_required_prefix = first_matching_rule_prefix(family_rule.get("required_any_prefixes"), family_tokens)
               if not category_matches_family_rule(category_key, family_rule):
                   if matched_required_pattern or matched_required_prefix:
+                      category_bypass_basis, category_bypass_failure = category_bypass_diagnostic_for_family_rule(
+                          metadata.get("name") or "",
+                          family_rule,
+                          family_tokens,
+                          build_pack_signature_shadow(metadata.get("name") or "", None),
+                      )
+                      if category_bypass_basis:
+                          return "would_match_target_family_via_category_bypass", category_bypass_basis.get("pack_signature_derivation_rule")
+                      if category_bypass_failure:
+                          return category_bypass_failure[0], category_bypass_failure[1]
                       return "strong_name_candidate_in_disallowed_category", category_key
                   return "category_not_allowed", None
               if not matched_required_pattern and not matched_required_prefix:
