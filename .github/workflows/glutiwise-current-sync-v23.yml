@@ -4883,7 +4883,7 @@ jobs:
               },
               "allowed_upgrade_rules": {
                   "same_product_unit_normalized": "same comparison_family_key plus same_product_identity_key plus compatible pack dimension plus explicit unit-price normalization plus GF preservation when relevant",
-                  "canonical_equivalent": "same curated comparison_family_key plus same equivalence_group_key plus same form_factor_key plus GF preservation when relevant",
+                  "canonical_equivalent": "same curated comparison_family_key plus same equivalence_group_key plus same form_factor_key plus GF preservation when relevant; bottled_water may tolerate category mismatch only when both rows already passed the bottled-water family rule and both carry a volume pack_signature",
               },
               "forbidden_shortcuts": [
                   "same brand alone",
@@ -5520,7 +5520,7 @@ jobs:
                       continue
                   any_family_candidate = True
                   candidate_meta = product_probe_metadata_by_barcode.get(candidate_barcode, {})
-                  if candidate_meta.get("category_key") != anchor_category_key:
+                  if not equivalence_category_match(anchor_meta, candidate_meta, family_rule):
                       continue
                   any_category_candidate = True
                   if clean_text(candidate_meta.get("form_factor_key")) != anchor_form_factor_key:
@@ -5574,7 +5574,7 @@ jobs:
                       continue
                   any_family_candidate = True
                   candidate_meta = product_probe_metadata_by_barcode.get(candidate_barcode, {})
-                  if candidate_meta.get("category_key") != anchor_category_key:
+                  if not equivalence_category_match(anchor_meta, candidate_meta, family_rule):
                       continue
                   if clean_text(candidate_meta.get("form_factor_key")) != anchor_form_factor_key:
                       continue
@@ -5697,9 +5697,29 @@ jobs:
                   if clean_text(example.get("name"))
               )
 
+          def equivalence_category_match(anchor_meta: dict, candidate_meta: dict, family_rule: dict | None):
+              if candidate_meta.get("category_key") == anchor_meta.get("category_key"):
+                  return True
+              if not family_rule or family_rule.get("comparison_family_key") != "bottled_water":
+                  return False
+              if clean_text(candidate_meta.get("comparison_family_key")) != clean_text(anchor_meta.get("comparison_family_key")):
+                  return False
+              if clean_text(candidate_meta.get("equivalence_group_key")) != clean_text(anchor_meta.get("equivalence_group_key")):
+                  return False
+              if clean_text(candidate_meta.get("form_factor_key")) != clean_text(anchor_meta.get("form_factor_key")):
+                  return False
+              anchor_pack = anchor_meta.get("pack_signature") or {}
+              candidate_pack = candidate_meta.get("pack_signature") or {}
+              if anchor_pack.get("dimension") != "volume" or candidate_pack.get("dimension") != "volume":
+                  return False
+              if not anchor_pack.get("total_base_qty") or not candidate_pack.get("total_base_qty"):
+                  return False
+              return True
+
           def shadow_store_candidate_snapshot(anchor_probe: dict, store_key: str):
               anchor_barcode = anchor_probe["barcode"]
               anchor_meta = product_probe_metadata_by_barcode.get(anchor_barcode, {})
+              family_rule = comparison_family_registry_by_key.get(anchor_meta.get("comparison_family_key"))
               comparison_family_key = clean_text(anchor_meta.get("comparison_family_key"))
               equivalence_group_key = clean_text(anchor_meta.get("equivalence_group_key"))
               same_product_identity_key = clean_text(anchor_meta.get("same_product_identity_key"))
@@ -5722,12 +5742,12 @@ jobs:
               same_category_candidates = []
               for candidate_row in equivalence_group_candidates:
                   candidate_meta = product_probe_metadata_by_barcode.get(candidate_row.get("barcode"), {})
-                  if candidate_meta.get("category_key") == anchor_category_key:
+                  if equivalence_category_match(anchor_meta, candidate_meta, family_rule):
                       same_category_candidates.append(candidate_row)
               family_same_category_candidates = []
               for candidate_row in family_candidates:
                   candidate_meta = product_probe_metadata_by_barcode.get(candidate_row.get("barcode"), {})
-                  if candidate_meta.get("category_key") == anchor_category_key:
+                  if equivalence_category_match(anchor_meta, candidate_meta, family_rule):
                       family_same_category_candidates.append(candidate_row)
               same_form_factor_candidates = []
               for candidate_row in same_category_candidates:
