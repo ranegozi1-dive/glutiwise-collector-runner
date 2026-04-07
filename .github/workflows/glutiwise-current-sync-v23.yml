@@ -4016,6 +4016,10 @@ jobs:
               {
                   "comparison_family_key": "frozen_vegetables",
                   "why": "plain frozen vegetable mixes only; excludes desserts, fries, and non-food misclassifications",
+                  "form_factor_patterns": [
+                      {"key": "broccoli", "any_tokens": ["\u05d1\u05e8\u05d5\u05e7\u05d5\u05dc\u05d9", "broccoli"]},
+                      {"key": "cauliflower", "any_tokens": ["\u05db\u05e8\u05d5\u05d1\u05d9\u05ea", "cauliflower"]},
+                  ],
                   "probe_priority": 12,
                   "allowed_category_tokens": ["קפוא", "ירקות"],
                   "required_any_tokens": ["לקט", "אפונה", "ברוקולי", "כרובית", "ירקות", "frozen"],
@@ -4862,7 +4866,7 @@ jobs:
                   "pack_signature": "legacy pack parsing plus compact Hebrew unit suffix parsing, Hebrew quote-mark unit variants, eggs count parsing including construct-form egg labels, bottled-water liter multipack parsing when family rules allow it, and preliminary pack parsing used only for bottled-water category-bypass diagnostics",
                   "base_product_identity_key": "curated family identity built from normalized family tokens after family-specific strip tokens are removed",
                   "equivalence_group_key": "curated family plus form-factor derived group for selected staple families when that signal is stronger and more consistent than explicit substitute_group; otherwise explicit substitute_group plus curated family with form-factor enforced separately at match time, or derived curated family plus form-factor when no explicit group exists",
-                  "comparison_form_factor_key": "curated family-specific use-case/form-factor rules first, such as egg count-only shell equivalence, milk fat+lactose-free, soft-cheese cottage-vs-labneh plus explicit fat percentage, tuna water-vs-oil, pasta shape, cereal subtype, bread type, and water plainness; only then reduced base product identity fallback",
+                  "comparison_form_factor_key": "curated family-specific use-case/form-factor rules first, such as egg count-only shell equivalence, milk fat+lactose-free, soft-cheese cottage-vs-labneh plus explicit fat percentage, tuna water-vs-oil, pasta shape, cereal subtype, bread type, frozen-vegetable broccoli-vs-cauliflower subtype, and water plainness; only then reduced base product identity fallback",
                   "same_product_identity_key": "comparison family plus normalized brand identity plus curated base product identity",
               },
               "selected_probe_metadata_coverage": {
