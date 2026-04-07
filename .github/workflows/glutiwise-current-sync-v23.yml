@@ -6404,6 +6404,49 @@ jobs:
               comparison_screen_readiness_summary,
           )
 
+          cart_summary_offer_coverage = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "cart_summary_offers_require_user_approval": True,
+              "basket_probes": {},
+          }
+          for basket_probe in basket_probe_definitions:
+              basket_probe_name = basket_probe["basket_probe_name"]
+              line_rows = [
+                  row for row in basket_line_shadow_rows
+                  if row["basket_probe_name"] == basket_probe_name
+              ]
+              line_summaries = []
+              for anchor_probe in basket_probe["items"]:
+                  anchor_barcode = anchor_probe["barcode"]
+                  anchor_rows = [row for row in line_rows if row["source_item_id"] == anchor_barcode]
+                  layer_counts = Counter(row["chosen_layer"] for row in anchor_rows)
+                  line_summaries.append({
+                      "source_item_id": anchor_barcode,
+                      "source_item_name": anchor_probe["name"],
+                      "comparison_family_key": product_probe_metadata_by_barcode.get(anchor_barcode, {}).get("comparison_family_key"),
+                      "exact_store_count": layer_counts.get("exact_identity", 0),
+                      "normalized_store_count": layer_counts.get("same_product_unit_normalized", 0),
+                      "canonical_store_count": layer_counts.get("canonical_equivalent", 0),
+                      "budget_alternative_store_count": layer_counts.get("budget_alternative", 0),
+                      "unresolved_store_count": layer_counts.get("unmatched", 0) + layer_counts.get("not_proven", 0),
+                      "recommended_offer_layer": (
+                          "canonical_equivalent"
+                          if layer_counts.get("canonical_equivalent", 0) > 0
+                          else "budget_alternative"
+                          if layer_counts.get("budget_alternative", 0) > 0
+                          else None
+                      ),
+                  })
+              cart_summary_offer_coverage["basket_probes"][basket_probe_name] = {
+                  "selected_probe_size": basket_probe["selected_probe_size"],
+                  "line_summaries": line_summaries,
+              }
+          write_json(
+              OUT_DIR / "cart_summary_offer_coverage.json",
+              cart_summary_offer_coverage,
+          )
+
           equivalence_gap_examples = {
               "shadow_only": True,
               "publish_gate_impact": "none",
@@ -7146,6 +7189,7 @@ jobs:
             out/store_side_equivalence_candidate_coverage_summary.json
             out/basket_completion_readiness_summary.json
             out/comparison_screen_readiness_summary.json
+            out/cart_summary_offer_coverage.json
             out/equivalence_gap_examples.json
             out/store_comparison_family_coverage.csv
             out/store_comparison_family_coverage_summary.json
