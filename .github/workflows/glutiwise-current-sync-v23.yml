@@ -6065,6 +6065,16 @@ jobs:
                       + layer_counts.get("canonical_equivalent", 0)
                   )
                   resolved_line_count = baseline_line_count + layer_counts.get("budget_alternative", 0)
+                  exact_baseline_coverage = (
+                      exact_or_normalized_line_count == selected_probe_size
+                      and layer_counts.get("not_proven", 0) == 0
+                      and layer_counts.get("unmatched", 0) == 0
+                  )
+                  complete_with_user_approved_equivalents = (
+                      baseline_line_count == selected_probe_size
+                      and layer_counts.get("not_proven", 0) == 0
+                      and layer_counts.get("unmatched", 0) == 0
+                  )
                   full_baseline_coverage = (
                       baseline_line_count == selected_probe_size
                       and layer_counts.get("not_proven", 0) == 0
@@ -6115,8 +6125,10 @@ jobs:
                   )
                   if high_confidence_baseline_coverage:
                       basket_summary_reason = "full_high_confidence_baseline_coverage"
-                  elif full_baseline_coverage:
-                      basket_summary_reason = "full_baseline_coverage_with_canonical_equivalent_lines"
+                  elif exact_baseline_coverage:
+                      basket_summary_reason = "full_exact_baseline_coverage_without_user_approved_equivalents"
+                  elif complete_with_user_approved_equivalents:
+                      basket_summary_reason = "complete_with_user_approved_equivalent_lines"
                   elif complete_with_budget_alternatives:
                       basket_summary_reason = "complete_only_with_budget_alternatives"
                   else:
@@ -6139,6 +6151,7 @@ jobs:
                       "unmatched_line_count": layer_counts.get("unmatched", 0),
                       "not_proven_line_count": layer_counts.get("not_proven", 0),
                       "exact_or_normalized_completion_ratio": round(exact_or_normalized_line_count / selected_probe_size, 4) if selected_probe_size else None,
+                      "exact_baseline_completion_ratio": round(exact_or_normalized_line_count / selected_probe_size, 4) if selected_probe_size else None,
                       "baseline_completion_ratio": round(baseline_line_count / selected_probe_size, 4) if selected_probe_size else None,
                       "resolved_completion_ratio": round(resolved_line_count / selected_probe_size, 4) if selected_probe_size else None,
                       "resolved_missing_line_count": max(0, selected_probe_size - resolved_line_count),
@@ -6146,6 +6159,8 @@ jobs:
                       "optional_lower_cost_total_with_budget_alternatives": optional_lower_cost_total_with_budget_alternatives,
                       "overall_basket_confidence_score": overall_basket_confidence_score,
                       "high_confidence_baseline_coverage": high_confidence_baseline_coverage,
+                      "exact_baseline_coverage": exact_baseline_coverage,
+                      "complete_with_user_approved_equivalents": complete_with_user_approved_equivalents,
                       "full_baseline_coverage": full_baseline_coverage,
                       "complete_with_budget_alternatives": complete_with_budget_alternatives,
                       "near_full_after_user_approved_alternatives": near_full_after_user_approved_alternatives,
@@ -6194,6 +6209,7 @@ jobs:
                   "unmatched_line_count",
                   "not_proven_line_count",
                   "exact_or_normalized_completion_ratio",
+                  "exact_baseline_completion_ratio",
                   "baseline_completion_ratio",
                   "resolved_completion_ratio",
                   "resolved_missing_line_count",
@@ -6201,6 +6217,8 @@ jobs:
                   "optional_lower_cost_total_with_budget_alternatives",
                   "overall_basket_confidence_score",
                   "high_confidence_baseline_coverage",
+                  "exact_baseline_coverage",
+                  "complete_with_user_approved_equivalents",
                   "full_baseline_coverage",
                   "complete_with_budget_alternatives",
                   "near_full_after_user_approved_alternatives",
@@ -6313,7 +6331,9 @@ jobs:
                   city_rows = [row for row in probe_store_rows if (clean_text(row.get("city")) or "unknown") == city_name]
                   city_breakdown[city_name] = {
                       "store_count": len(city_rows),
+                      "stores_supporting_full_exact_basket_without_user_approved_equivalents": sum(1 for row in city_rows if row["exact_baseline_coverage"]),
                       "stores_supporting_high_confidence_baseline_coverage": sum(1 for row in city_rows if row["high_confidence_baseline_coverage"]),
+                      "stores_supporting_full_basket_after_user_approved_equivalents": sum(1 for row in city_rows if row["complete_with_user_approved_equivalents"]),
                       "stores_supporting_full_basket_including_canonical": sum(1 for row in city_rows if row["full_baseline_coverage"]),
                       "stores_supporting_full_basket_after_user_approved_alternatives": sum(1 for row in city_rows if row["complete_with_budget_alternatives"]),
                       "stores_supporting_near_full_basket_after_user_approved_alternatives": sum(1 for row in city_rows if row["near_full_after_user_approved_alternatives"]),
@@ -6334,7 +6354,9 @@ jobs:
               basket_completion_readiness_summary["basket_probes"][basket_probe_name] = {
                   "requested_probe_size": basket_probe["requested_probe_size"],
                   "selected_probe_size": selected_probe_size,
+                  "stores_supporting_full_exact_basket_without_user_approved_equivalents": sum(1 for row in probe_store_rows if row["exact_baseline_coverage"]),
                   "stores_supporting_high_confidence_baseline_coverage": sum(1 for row in probe_store_rows if row["high_confidence_baseline_coverage"]),
+                  "stores_supporting_full_basket_after_user_approved_equivalents": sum(1 for row in probe_store_rows if row["complete_with_user_approved_equivalents"]),
                   "stores_supporting_full_basket_including_canonical": sum(1 for row in probe_store_rows if row["full_baseline_coverage"]),
                   "stores_supporting_full_basket_after_user_approved_alternatives": sum(1 for row in probe_store_rows if row["complete_with_budget_alternatives"]),
                   "stores_supporting_near_full_basket_after_user_approved_alternatives": sum(1 for row in probe_store_rows if row["near_full_after_user_approved_alternatives"]),
@@ -6349,6 +6371,8 @@ jobs:
                           "canonical_line_count": row["canonical_line_count"],
                           "budget_alternative_line_count": row["budget_alternative_line_count"],
                           "resolved_missing_line_count": row["resolved_missing_line_count"],
+                          "exact_baseline_coverage": row["exact_baseline_coverage"],
+                          "complete_with_user_approved_equivalents": row["complete_with_user_approved_equivalents"],
                           "baseline_completion_ratio": row["baseline_completion_ratio"],
                           "resolved_completion_ratio": row["resolved_completion_ratio"],
                           "baseline_basket_total": row["baseline_basket_total"],
@@ -6382,6 +6406,8 @@ jobs:
                   incomplete_rows = [row for row in city_rows if not row["complete_with_budget_alternatives"]]
                   city_breakdown[city_name] = {
                       "store_count": len(city_rows),
+                      "eligible_exact_only_store_count": sum(1 for row in city_rows if row["exact_baseline_coverage"]),
+                      "eligible_full_store_count_after_user_approved_equivalents": sum(1 for row in city_rows if row["complete_with_user_approved_equivalents"]),
                       "eligible_full_store_count": len(full_rows),
                       "eligible_near_full_store_count": len(near_full_rows),
                       "eligible_full_store_keys_sorted_by_total": [
@@ -6397,6 +6423,8 @@ jobs:
                       "incomplete_store_keys": [row["store_key"] for row in incomplete_rows],
                   }
               comparison_screen_readiness_summary["basket_probes"][basket_probe_name] = {
+                  "eligible_exact_only_store_count": sum(1 for row in probe_store_rows if row["exact_baseline_coverage"]),
+                  "eligible_full_store_count_after_user_approved_equivalents": sum(1 for row in probe_store_rows if row["complete_with_user_approved_equivalents"]),
                   "eligible_full_store_count": sum(1 for row in probe_store_rows if row["complete_with_budget_alternatives"]),
                   "eligible_near_full_store_count": sum(1 for row in probe_store_rows if row["near_full_after_user_approved_alternatives"]),
                   "city_breakdown": city_breakdown,
@@ -6431,6 +6459,8 @@ jobs:
                       city_scope_breakdown[" + ".join(city_scope)] = {
                           "selected_city_count": len(city_scope),
                           "store_count": len(scope_rows),
+                          "eligible_exact_only_store_count": sum(1 for row in scope_rows if row["exact_baseline_coverage"]),
+                          "eligible_full_store_count_after_user_approved_equivalents": sum(1 for row in scope_rows if row["complete_with_user_approved_equivalents"]),
                           "eligible_full_store_count": len(full_rows),
                           "eligible_near_full_store_count": len(near_full_rows),
                           "best_full_store_keys_sorted_by_total": [
@@ -6548,11 +6578,15 @@ jobs:
                           if chosen_layer in ("unmatched", "not_proven"):
                               unresolved_after_offer_store_keys.append(row["store_key"])
                           continue
-                      if store_row["complete_with_budget_alternatives"] and not store_row["full_baseline_coverage"]:
+                      if chosen_layer == "canonical_equivalent" and store_row["complete_with_user_approved_equivalents"] and not store_row["exact_baseline_coverage"]:
                           full_completion_gain_store_keys.append(row["store_key"])
-                      elif store_row["near_full_after_user_approved_alternatives"] and not store_row["complete_with_budget_alternatives"]:
+                      elif chosen_layer == "canonical_equivalent" and store_row["near_full_after_user_approved_alternatives"] and not store_row["complete_with_user_approved_equivalents"]:
                           near_full_completion_gain_store_keys.append(row["store_key"])
-                      elif chosen_layer == "budget_alternative" and store_row["full_baseline_coverage"]:
+                      elif chosen_layer == "budget_alternative" and store_row["complete_with_budget_alternatives"] and not store_row["complete_with_user_approved_equivalents"]:
+                          full_completion_gain_store_keys.append(row["store_key"])
+                      elif chosen_layer == "budget_alternative" and store_row["near_full_after_user_approved_alternatives"] and not store_row["complete_with_budget_alternatives"]:
+                          near_full_completion_gain_store_keys.append(row["store_key"])
+                      elif chosen_layer == "budget_alternative" and store_row["complete_with_user_approved_equivalents"]:
                           cost_optimization_only_store_keys.append(row["store_key"])
                   recommended_offer_role = None
                   if full_completion_gain_store_keys:
