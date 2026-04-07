@@ -4342,6 +4342,13 @@ jobs:
                       )
                       if tahini_dip_pattern:
                           continue
+                  if family_rule.get("comparison_family_key") == "frozen_vegetables":
+                      frozen_non_veg_pattern = first_matching_rule_pattern(
+                          ["\u05d7\u05dc\u05d1\u05d5\u05df", "protein", "\u05d0\u05d1\u05e7\u05d4", "powder", "\u05e9\u05d9\u05d9\u05e7", "shake"],
+                          text_tokens,
+                      )
+                      if frozen_non_veg_pattern:
+                          continue
                   assignment_basis = {
                       "matched_required_pattern": matched_required_pattern or matched_required_prefix,
                       "category_key": category_key,
