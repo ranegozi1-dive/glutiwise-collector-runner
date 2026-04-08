@@ -6671,6 +6671,68 @@ jobs:
               cart_summary_offer_coverage,
           )
 
+          cart_summary_offer_coverage_by_city_scope = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "cart_summary_offers_require_user_approval": True,
+              "selected_city_scope_limits_cart_offers": True,
+              "basket_probes": {},
+          }
+          for basket_probe in basket_probe_definitions:
+              basket_probe_name = basket_probe["basket_probe_name"]
+              probe_store_rows = [
+                  row for row in basket_store_shadow_rows
+                  if row["basket_probe_name"] == basket_probe_name
+              ]
+              ordered_city_names = sorted({clean_text(row.get("city")) or "unknown" for row in probe_store_rows})
+              city_scope_breakdown = {}
+              for scope_size in range(1, len(ordered_city_names) + 1):
+                  for city_scope in combinations(ordered_city_names, scope_size):
+                      scope_rows = [
+                          row for row in probe_store_rows
+                          if (clean_text(row.get("city")) or "unknown") in city_scope
+                      ]
+                      scope_rows_by_store_key = {
+                          row["store_key"]: row
+                          for row in scope_rows
+                      }
+                      line_summaries = []
+                      for anchor_probe in basket_probe["items"]:
+                          anchor_barcode = anchor_probe["barcode"]
+                          offer_effect_summary = summarize_cart_offer_effects(
+                              basket_probe_name,
+                              anchor_barcode,
+                              scope_rows_by_store_key,
+                          )
+                          line_summaries.append({
+                              "source_item_id": anchor_barcode,
+                              "source_item_name": anchor_probe["name"],
+                              "comparison_family_key": product_probe_metadata_by_barcode.get(anchor_barcode, {}).get("comparison_family_key"),
+                              "full_completion_gain_store_count": (
+                                  len(offer_effect_summary["canonical_full_completion_gain_store_keys"])
+                                  + len(offer_effect_summary["budget_full_completion_gain_store_keys"])
+                              ),
+                              "near_full_completion_gain_store_count": (
+                                  len(offer_effect_summary["canonical_near_full_completion_gain_store_keys"])
+                                  + len(offer_effect_summary["budget_near_full_completion_gain_store_keys"])
+                              ),
+                              "cost_optimization_only_store_count": len(offer_effect_summary["budget_cost_optimization_only_store_keys"]),
+                              "unresolved_after_offer_store_count": len(offer_effect_summary["unresolved_after_offer_store_keys"]),
+                              "recommended_offer_layer": offer_effect_summary["recommended_offer_layer"],
+                              "recommended_offer_role": offer_effect_summary["recommended_offer_role"],
+                              "should_offer_in_cart_summary": offer_effect_summary["should_offer_in_cart_summary"],
+                          })
+                      city_scope_breakdown[" + ".join(city_scope)] = {
+                          "selected_city_count": len(city_scope),
+                          "store_count": len(scope_rows),
+                          "line_summaries": line_summaries,
+                      }
+              cart_summary_offer_coverage_by_city_scope["basket_probes"][basket_probe_name] = city_scope_breakdown
+          write_json(
+              OUT_DIR / "cart_summary_offer_coverage_by_city_scope.json",
+              cart_summary_offer_coverage_by_city_scope,
+          )
+
           cart_offer_completion_gain_summary = {
               "shadow_only": True,
               "publish_gate_impact": "none",
@@ -7568,6 +7630,7 @@ jobs:
             out/comparison_screen_store_mode_mix_summary.json
             out/city_selection_readiness_summary.json
             out/cart_summary_offer_coverage.json
+            out/cart_summary_offer_coverage_by_city_scope.json
             out/cart_offer_completion_gain_summary.json
             out/incomplete_store_basket_gap_summary.json
             out/equivalence_gap_examples.json
