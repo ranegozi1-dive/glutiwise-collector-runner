@@ -6573,6 +6573,120 @@ jobs:
               comparison_screen_store_mode_mix_by_city_scope,
           )
 
+          comparison_screen_store_cards_by_city_scope = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "comparison_screen_uses_user_approved_basket": True,
+              "selected_city_scope_limits_visible_comparison_results": True,
+              "store_cards_match_user_approved_cart_flow": True,
+              "basket_probes": {},
+          }
+          for basket_probe in basket_probe_definitions:
+              basket_probe_name = basket_probe["basket_probe_name"]
+              selected_probe_size = basket_probe["selected_probe_size"]
+              probe_store_rows = [
+                  row for row in basket_store_shadow_rows
+                  if row["basket_probe_name"] == basket_probe_name
+              ]
+              ordered_city_names = sorted({clean_text(row.get("city")) or "unknown" for row in probe_store_rows})
+              city_scope_breakdown = {}
+
+              def build_comparison_screen_store_card(row):
+                  if row["exact_baseline_coverage"]:
+                      fulfillment_mode = "exact_only"
+                  elif row["complete_with_user_approved_equivalents"]:
+                      fulfillment_mode = "approved_equivalent_assisted"
+                  else:
+                      fulfillment_mode = "budget_alternative_assisted"
+                  covered_line_count = max(0, selected_probe_size - row["resolved_missing_line_count"])
+                  comparison_screen_total = (
+                      row["baseline_basket_total"]
+                      if row["complete_with_user_approved_equivalents"]
+                      else row["optional_lower_cost_total_with_budget_alternatives"]
+                  )
+                  has_optional_budget_savings = (
+                      row["complete_with_user_approved_equivalents"]
+                      and row["baseline_basket_total"] is not None
+                      and row["optional_lower_cost_total_with_budget_alternatives"] is not None
+                      and row["optional_lower_cost_total_with_budget_alternatives"] < row["baseline_basket_total"]
+                  )
+                  return {
+                      "store_key": row["store_key"],
+                      "retailer": row.get("retailer"),
+                      "city": row.get("city"),
+                      "fulfillment_mode": fulfillment_mode,
+                      "comparison_card_state": (
+                          "full_basket"
+                          if row["complete_with_budget_alternatives"]
+                          else "near_full_basket"
+                      ),
+                      "covered_line_count": covered_line_count,
+                      "missing_line_count": row["resolved_missing_line_count"],
+                      "coverage_display": f"{covered_line_count}/{selected_probe_size}",
+                      "exact_line_count": row["exact_line_count"],
+                      "normalized_line_count": row["normalized_line_count"],
+                      "canonical_line_count": row["canonical_line_count"],
+                      "budget_alternative_line_count": row["budget_alternative_line_count"],
+                      "comparison_screen_total": comparison_screen_total,
+                      "baseline_basket_total": row["baseline_basket_total"],
+                      "optional_lower_cost_total_if_budget_approved": row["optional_lower_cost_total_with_budget_alternatives"],
+                      "has_optional_budget_savings": has_optional_budget_savings,
+                      "reason_passed_or_failed": row["reason_passed_or_failed"],
+                  }
+
+              for scope_size in range(1, len(ordered_city_names) + 1):
+                  for city_scope in combinations(ordered_city_names, scope_size):
+                      scope_rows = [
+                          row for row in probe_store_rows
+                          if (clean_text(row.get("city")) or "unknown") in city_scope
+                      ]
+                      full_rows = [
+                          row for row in scope_rows
+                          if row["complete_with_budget_alternatives"]
+                      ]
+                      near_full_rows = [
+                          row for row in scope_rows
+                          if row["near_full_after_user_approved_alternatives"]
+                          and not row["complete_with_budget_alternatives"]
+                      ]
+                      city_scope_breakdown[" + ".join(city_scope)] = {
+                          "selected_city_count": len(city_scope),
+                          "store_count": len(scope_rows),
+                          "full_store_cards_sorted_by_total": [
+                              build_comparison_screen_store_card(row)
+                              for row in sorted(
+                                  full_rows,
+                                  key=lambda row: (
+                                      row["optional_lower_cost_total_with_budget_alternatives"] if row["optional_lower_cost_total_with_budget_alternatives"] is not None else float("inf"),
+                                      row["baseline_basket_total"] if row["baseline_basket_total"] is not None else float("inf"),
+                                      row["store_key"],
+                                  ),
+                              )
+                          ],
+                          "near_full_store_cards_sorted_by_total": [
+                              build_comparison_screen_store_card(row)
+                              for row in sorted(
+                                  near_full_rows,
+                                  key=lambda row: (
+                                      row["resolved_missing_line_count"],
+                                      row["optional_lower_cost_total_with_budget_alternatives"] if row["optional_lower_cost_total_with_budget_alternatives"] is not None else float("inf"),
+                                      row["baseline_basket_total"] if row["baseline_basket_total"] is not None else float("inf"),
+                                      row["store_key"],
+                                  ),
+                              )
+                          ],
+                          "excluded_incomplete_store_keys": [
+                              row["store_key"]
+                              for row in scope_rows
+                              if not row["near_full_after_user_approved_alternatives"]
+                          ],
+                      }
+              comparison_screen_store_cards_by_city_scope["basket_probes"][basket_probe_name] = city_scope_breakdown
+          write_json(
+              OUT_DIR / "comparison_screen_store_cards_by_city_scope.json",
+              comparison_screen_store_cards_by_city_scope,
+          )
+
           city_selection_readiness_summary = {
               "shadow_only": True,
               "publish_gate_impact": "none",
@@ -7707,6 +7821,7 @@ jobs:
             out/comparison_screen_readiness_summary.json
             out/comparison_screen_store_mode_mix_summary.json
             out/comparison_screen_store_mode_mix_by_city_scope.json
+            out/comparison_screen_store_cards_by_city_scope.json
             out/city_selection_readiness_summary.json
             out/cart_summary_offer_coverage.json
             out/cart_summary_offer_coverage_by_city_scope.json
