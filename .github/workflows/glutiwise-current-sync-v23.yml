@@ -124,7 +124,7 @@ jobs:
               --rm
               -v "${{ github.workspace }}/dumps:/usr/src/app/dumps"
               -e "ENABLED_SCRAPERS=${SCRAPER}"
-              -e ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE,PROMO_FILE,PROMO_FULL_FILE"
+              -e ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE,PROMO_FULL_FILE"
               -e NUMBER_OF_PROCESSES="2"
               -e OUTPUT_MODE="disk"
               -e STORAGE_PATH="/usr/src/app/dumps"
@@ -189,7 +189,7 @@ jobs:
               --rm
               -v "${{ github.workspace }}/dumps:/usr/src/app/dumps"
               -e "ENABLED_SCRAPERS=${SCRAPER}"
-              -e ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE,PROMO_FILE,PROMO_FULL_FILE"
+              -e ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE,PROMO_FULL_FILE"
               -e NUMBER_OF_PROCESSES="2"
               -e OUTPUT_MODE="disk"
               -e STORAGE_PATH="/usr/src/app/dumps"
@@ -254,7 +254,7 @@ jobs:
               --rm
               -v "${{ github.workspace }}/dumps:/usr/src/app/dumps"
               -e "ENABLED_SCRAPERS=${SCRAPER}"
-              -e ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE,PROMO_FILE,PROMO_FULL_FILE"
+              -e ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE,PROMO_FULL_FILE"
               -e NUMBER_OF_PROCESSES="2"
               -e OUTPUT_MODE="disk"
               -e STORAGE_PATH="/usr/src/app/dumps"
