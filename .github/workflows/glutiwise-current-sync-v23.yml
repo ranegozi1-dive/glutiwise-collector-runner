@@ -71,6 +71,8 @@ jobs:
       WRITE_HEAVY_DEBUG_ARTIFACTS: "false"
       SOURCE_MAX_AGE_HOURS: "48"
       ARTIFACT_RETENTION_DAYS: "1"
+      DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER: "12"
+      DOWNLOAD_RETRY_ATTEMPTS: "2"
       LOCKED_MVP_STORE_LIMIT: "29"
       MAX_TARGET_STORES_SAFE: "29"
       SECONDARY_SOURCE_MODE: "cheapersal_qa_ready_no_fetch"
@@ -106,31 +108,73 @@ jobs:
         timeout-minutes: 55
         run: |
           set -euo pipefail
-          ARGS=(
-            --rm
-            -v "${{ github.workspace }}/dumps:/usr/src/app/dumps"
-            -e ENABLED_SCRAPERS="RAMI_LEVY,SHUFERSAL,YOHANANOF"
-            -e ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE,PROMO_FILE,PROMO_FULL_FILE"
-            -e NUMBER_OF_PROCESSES="2"
-            -e OUTPUT_MODE="disk"
-            -e STORAGE_PATH="/usr/src/app/dumps"
-          )
-          if [ -n "${SCRAPER_TODAY}" ]; then
-            ARGS+=( -e "TODAY=${SCRAPER_TODAY}" )
-          fi
-          retry() {
-            local max_attempts="$1"
-            shift
-            local attempt=1
-            until "$@"; do
-              if [ "$attempt" -ge "$max_attempts" ]; then
-                return 1
+          SCRAPERS=(RAMI_LEVY SHUFERSAL YOHANANOF)
+          DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER="${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER:-12}"
+          DOWNLOAD_RETRY_ATTEMPTS="${DOWNLOAD_RETRY_ATTEMPTS:-2}"
+          printf "retailer,status,attempts,last_exit_code,timeout_minutes,duration_seconds,notes\n" > out/download_retailer_status.csv
+          LAST_EXIT_CODE=0
+          LAST_DURATION_SECONDS=0
+          run_scraper_once() {
+            local scraper="$1"
+            local start_ts end_ts exit_code
+            local args=(
+              --rm
+              -v "${{ github.workspace }}/dumps:/usr/src/app/dumps"
+              -e "ENABLED_SCRAPERS=${scraper}"
+              -e ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE,PROMO_FILE,PROMO_FULL_FILE"
+              -e NUMBER_OF_PROCESSES="2"
+              -e OUTPUT_MODE="disk"
+              -e STORAGE_PATH="/usr/src/app/dumps"
+            )
+            if [ -n "${SCRAPER_TODAY}" ]; then
+              args+=( -e "TODAY=${SCRAPER_TODAY}" )
+            fi
+            start_ts=$(date +%s)
+            set +e
+            timeout --signal=TERM "${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER}m" \
+              docker run "${args[@]}" erlichsefi/israeli-supermarket-scarpers:latest
+            exit_code=$?
+            set -e
+            end_ts=$(date +%s)
+            LAST_EXIT_CODE="$exit_code"
+            LAST_DURATION_SECONDS=$((end_ts - start_ts))
+            return "$exit_code"
+          }
+          failed_scrapers=()
+          for scraper in "${SCRAPERS[@]}"; do
+            echo "Starting download for ${scraper}"
+            attempt=1
+            status="failed"
+            note="docker_run_failed"
+            while [ "$attempt" -le "$DOWNLOAD_RETRY_ATTEMPTS" ]; do
+              if run_scraper_once "$scraper"; then
+                status="success"
+                note="download_completed"
+                break
+              fi
+              if [ "$LAST_EXIT_CODE" -eq 124 ] || [ "$LAST_EXIT_CODE" -eq 137 ]; then
+                status="timeout"
+                note="download_timeout_per_retailer"
+                break
+              fi
+              if [ "$attempt" -ge "$DOWNLOAD_RETRY_ATTEMPTS" ]; then
+                status="failed"
+                note="docker_run_failed_after_retries"
+                break
               fi
               sleep $((attempt * 15))
               attempt=$((attempt + 1))
             done
-          }
-          retry 2 docker run "${ARGS[@]}" erlichsefi/israeli-supermarket-scarpers:latest
+            printf "%s,%s,%s,%s,%s,%s,%s\n" \
+              "$scraper" "$status" "$attempt" "$LAST_EXIT_CODE" "$DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER" "$LAST_DURATION_SECONDS" "$note" \
+              >> out/download_retailer_status.csv
+            if [ "$status" != "success" ]; then
+              failed_scrapers+=("${scraper}:${status}")
+            fi
+          done
+          if [ "${#failed_scrapers[@]}" -gt 0 ]; then
+            echo "Retailer download failures: ${failed_scrapers[*]}"
+          fi
           python3 - <<'PY'
           import csv
           import json
@@ -185,6 +229,11 @@ jobs:
           inventory_rows = []
           summary = defaultdict(lambda: Counter())
           observed_store_ids = defaultdict(lambda: defaultdict(set))
+          download_retailer_status_rows = []
+          status_csv_path = out_dir / "download_retailer_status.csv"
+          if status_csv_path.exists():
+              with status_csv_path.open(encoding="utf-8", newline="") as handle:
+                  download_retailer_status_rows = list(csv.DictReader(handle))
           for path in sorted(dumps_dir.rglob("*")):
               if not path.is_file():
                   continue
@@ -231,6 +280,17 @@ jobs:
                       }
                       for retailer, kind_map in sorted(observed_store_ids.items())
                   },
+                  "per_retailer_download_status": download_retailer_status_rows,
+                  "failed_retailer_downloads": [
+                      row["retailer"]
+                      for row in download_retailer_status_rows
+                      if row.get("status") not in ("", "success")
+                  ],
+                  "timed_out_retailer_downloads": [
+                      row["retailer"]
+                      for row in download_retailer_status_rows
+                      if row.get("status") == "timeout"
+                  ],
               },
               (out_dir / "download_stage_summary.json").open("w", encoding="utf-8"),
               ensure_ascii=False,
@@ -7787,6 +7847,7 @@ jobs:
             out/mvp_scope_summary.json
             out/downloaded_dump_inventory.csv
             out/download_stage_summary.json
+            out/download_retailer_status.csv
             out/source_gap_summary.json
             out/price_source_gap_summary.json
             out/store_discovery_summary.json
