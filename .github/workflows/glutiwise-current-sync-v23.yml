@@ -3981,7 +3981,7 @@ jobs:
               },
               {
                   "comparison_family_key": "tahini_basic",
-                  "why": "plain tahini products only",
+                  "why": "plain tahini products only; raw or whole wording does not create a stricter form-factor split",
                   "probe_priority": 10,
                   "allowed_category_tokens": ["שימורים", "ממרחים", "אחר"],
                   "required_any_tokens": ["טחינה", "tahini"],
@@ -3991,9 +3991,6 @@ jobs:
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
                   "prefer_derived_equivalence_group": True,
-                  "form_factor_patterns": [
-                      {"key": "whole", "any_tokens": ["\u05d2\u05d5\u05dc\u05de\u05d9\u05ea", "raw"]},
-                  ],
                   "form_factor_default": "plain_tahini",
                   "probe_max_items": 2,
               },
