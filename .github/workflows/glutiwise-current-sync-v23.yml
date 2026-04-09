@@ -110,6 +110,7 @@ jobs:
 
       - name: Download RAMI_LEVY files
         timeout-minutes: 16
+        continue-on-error: true
         run: |
           set -euo pipefail
           SCRAPER="RAMI_LEVY"
@@ -133,7 +134,7 @@ jobs:
             fi
             start_ts=$(date +%s)
             set +e
-            timeout --signal=TERM "${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER}m" \
+            timeout --signal=TERM --kill-after=45s "${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER}m" \
               docker run "${args[@]}" erlichsefi/israeli-supermarket-scarpers:latest
             exit_code=$?
             set -e
@@ -174,6 +175,7 @@ jobs:
 
       - name: Download SHUFERSAL files
         timeout-minutes: 16
+        continue-on-error: true
         run: |
           set -euo pipefail
           SCRAPER="SHUFERSAL"
@@ -197,7 +199,7 @@ jobs:
             fi
             start_ts=$(date +%s)
             set +e
-            timeout --signal=TERM "${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER}m" \
+            timeout --signal=TERM --kill-after=45s "${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER}m" \
               docker run "${args[@]}" erlichsefi/israeli-supermarket-scarpers:latest
             exit_code=$?
             set -e
@@ -238,6 +240,7 @@ jobs:
 
       - name: Download YOHANANOF files
         timeout-minutes: 16
+        continue-on-error: true
         run: |
           set -euo pipefail
           SCRAPER="YOHANANOF"
@@ -261,7 +264,7 @@ jobs:
             fi
             start_ts=$(date +%s)
             set +e
-            timeout --signal=TERM "${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER}m" \
+            timeout --signal=TERM --kill-after=45s "${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER}m" \
               docker run "${args[@]}" erlichsefi/israeli-supermarket-scarpers:latest
             exit_code=$?
             set -e
