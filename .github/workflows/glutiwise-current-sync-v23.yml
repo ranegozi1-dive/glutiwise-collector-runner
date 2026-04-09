@@ -104,23 +104,25 @@ jobs:
           }
           retry 3 docker pull erlichsefi/israeli-supermarket-scarpers:latest
 
-      - name: Download store, price, and promotion files
-        timeout-minutes: 55
+      - name: Initialize retailer download tracker
+        run: |
+          printf "retailer,status,attempts,last_exit_code,timeout_minutes,duration_seconds,notes\n" > out/download_retailer_status.csv
+
+      - name: Download RAMI_LEVY files
+        timeout-minutes: 16
         run: |
           set -euo pipefail
-          SCRAPERS=(RAMI_LEVY SHUFERSAL YOHANANOF)
+          SCRAPER="RAMI_LEVY"
           DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER="${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER:-12}"
           DOWNLOAD_RETRY_ATTEMPTS="${DOWNLOAD_RETRY_ATTEMPTS:-2}"
-          printf "retailer,status,attempts,last_exit_code,timeout_minutes,duration_seconds,notes\n" > out/download_retailer_status.csv
           LAST_EXIT_CODE=0
           LAST_DURATION_SECONDS=0
           run_scraper_once() {
-            local scraper="$1"
             local start_ts end_ts exit_code
             local args=(
               --rm
               -v "${{ github.workspace }}/dumps:/usr/src/app/dumps"
-              -e "ENABLED_SCRAPERS=${scraper}"
+              -e "ENABLED_SCRAPERS=${SCRAPER}"
               -e ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE,PROMO_FILE,PROMO_FULL_FILE"
               -e NUMBER_OF_PROCESSES="2"
               -e OUTPUT_MODE="disk"
@@ -140,41 +142,167 @@ jobs:
             LAST_DURATION_SECONDS=$((end_ts - start_ts))
             return "$exit_code"
           }
-          failed_scrapers=()
-          for scraper in "${SCRAPERS[@]}"; do
-            echo "Starting download for ${scraper}"
-            attempt=1
-            status="failed"
-            note="docker_run_failed"
-            while [ "$attempt" -le "$DOWNLOAD_RETRY_ATTEMPTS" ]; do
-              if run_scraper_once "$scraper"; then
-                status="success"
-                note="download_completed"
-                break
-              fi
-              if [ "$LAST_EXIT_CODE" -eq 124 ] || [ "$LAST_EXIT_CODE" -eq 137 ]; then
-                status="timeout"
-                note="download_timeout_per_retailer"
-                break
-              fi
-              if [ "$attempt" -ge "$DOWNLOAD_RETRY_ATTEMPTS" ]; then
-                status="failed"
-                note="docker_run_failed_after_retries"
-                break
-              fi
-              sleep $((attempt * 15))
-              attempt=$((attempt + 1))
-            done
-            printf "%s,%s,%s,%s,%s,%s,%s\n" \
-              "$scraper" "$status" "$attempt" "$LAST_EXIT_CODE" "$DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER" "$LAST_DURATION_SECONDS" "$note" \
-              >> out/download_retailer_status.csv
-            if [ "$status" != "success" ]; then
-              failed_scrapers+=("${scraper}:${status}")
+          attempt=1
+          status="failed"
+          note="docker_run_failed"
+          while [ "$attempt" -le "$DOWNLOAD_RETRY_ATTEMPTS" ]; do
+            echo "Starting download for ${SCRAPER} (attempt ${attempt}/${DOWNLOAD_RETRY_ATTEMPTS})"
+            if run_scraper_once; then
+              status="success"
+              note="download_completed"
+              break
             fi
+            if [ "$LAST_EXIT_CODE" -eq 124 ] || [ "$LAST_EXIT_CODE" -eq 137 ]; then
+              status="timeout"
+              note="download_timeout_per_retailer"
+              break
+            fi
+            if [ "$attempt" -ge "$DOWNLOAD_RETRY_ATTEMPTS" ]; then
+              status="failed"
+              note="docker_run_failed_after_retries"
+              break
+            fi
+            sleep $((attempt * 15))
+            attempt=$((attempt + 1))
           done
-          if [ "${#failed_scrapers[@]}" -gt 0 ]; then
-            echo "Retailer download failures: ${failed_scrapers[*]}"
+          printf "%s,%s,%s,%s,%s,%s,%s\n" \
+            "$SCRAPER" "$status" "$attempt" "$LAST_EXIT_CODE" "$DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER" "$LAST_DURATION_SECONDS" "$note" \
+            >> out/download_retailer_status.csv
+          if [ "$status" != "success" ]; then
+            echo "Retailer download failure recorded for ${SCRAPER}: ${status}"
           fi
+
+      - name: Download SHUFERSAL files
+        timeout-minutes: 16
+        run: |
+          set -euo pipefail
+          SCRAPER="SHUFERSAL"
+          DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER="${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER:-12}"
+          DOWNLOAD_RETRY_ATTEMPTS="${DOWNLOAD_RETRY_ATTEMPTS:-2}"
+          LAST_EXIT_CODE=0
+          LAST_DURATION_SECONDS=0
+          run_scraper_once() {
+            local start_ts end_ts exit_code
+            local args=(
+              --rm
+              -v "${{ github.workspace }}/dumps:/usr/src/app/dumps"
+              -e "ENABLED_SCRAPERS=${SCRAPER}"
+              -e ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE,PROMO_FILE,PROMO_FULL_FILE"
+              -e NUMBER_OF_PROCESSES="2"
+              -e OUTPUT_MODE="disk"
+              -e STORAGE_PATH="/usr/src/app/dumps"
+            )
+            if [ -n "${SCRAPER_TODAY}" ]; then
+              args+=( -e "TODAY=${SCRAPER_TODAY}" )
+            fi
+            start_ts=$(date +%s)
+            set +e
+            timeout --signal=TERM "${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER}m" \
+              docker run "${args[@]}" erlichsefi/israeli-supermarket-scarpers:latest
+            exit_code=$?
+            set -e
+            end_ts=$(date +%s)
+            LAST_EXIT_CODE="$exit_code"
+            LAST_DURATION_SECONDS=$((end_ts - start_ts))
+            return "$exit_code"
+          }
+          attempt=1
+          status="failed"
+          note="docker_run_failed"
+          while [ "$attempt" -le "$DOWNLOAD_RETRY_ATTEMPTS" ]; do
+            echo "Starting download for ${SCRAPER} (attempt ${attempt}/${DOWNLOAD_RETRY_ATTEMPTS})"
+            if run_scraper_once; then
+              status="success"
+              note="download_completed"
+              break
+            fi
+            if [ "$LAST_EXIT_CODE" -eq 124 ] || [ "$LAST_EXIT_CODE" -eq 137 ]; then
+              status="timeout"
+              note="download_timeout_per_retailer"
+              break
+            fi
+            if [ "$attempt" -ge "$DOWNLOAD_RETRY_ATTEMPTS" ]; then
+              status="failed"
+              note="docker_run_failed_after_retries"
+              break
+            fi
+            sleep $((attempt * 15))
+            attempt=$((attempt + 1))
+          done
+          printf "%s,%s,%s,%s,%s,%s,%s\n" \
+            "$SCRAPER" "$status" "$attempt" "$LAST_EXIT_CODE" "$DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER" "$LAST_DURATION_SECONDS" "$note" \
+            >> out/download_retailer_status.csv
+          if [ "$status" != "success" ]; then
+            echo "Retailer download failure recorded for ${SCRAPER}: ${status}"
+          fi
+
+      - name: Download YOHANANOF files
+        timeout-minutes: 16
+        run: |
+          set -euo pipefail
+          SCRAPER="YOHANANOF"
+          DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER="${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER:-12}"
+          DOWNLOAD_RETRY_ATTEMPTS="${DOWNLOAD_RETRY_ATTEMPTS:-2}"
+          LAST_EXIT_CODE=0
+          LAST_DURATION_SECONDS=0
+          run_scraper_once() {
+            local start_ts end_ts exit_code
+            local args=(
+              --rm
+              -v "${{ github.workspace }}/dumps:/usr/src/app/dumps"
+              -e "ENABLED_SCRAPERS=${SCRAPER}"
+              -e ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE,PROMO_FILE,PROMO_FULL_FILE"
+              -e NUMBER_OF_PROCESSES="2"
+              -e OUTPUT_MODE="disk"
+              -e STORAGE_PATH="/usr/src/app/dumps"
+            )
+            if [ -n "${SCRAPER_TODAY}" ]; then
+              args+=( -e "TODAY=${SCRAPER_TODAY}" )
+            fi
+            start_ts=$(date +%s)
+            set +e
+            timeout --signal=TERM "${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER}m" \
+              docker run "${args[@]}" erlichsefi/israeli-supermarket-scarpers:latest
+            exit_code=$?
+            set -e
+            end_ts=$(date +%s)
+            LAST_EXIT_CODE="$exit_code"
+            LAST_DURATION_SECONDS=$((end_ts - start_ts))
+            return "$exit_code"
+          }
+          attempt=1
+          status="failed"
+          note="docker_run_failed"
+          while [ "$attempt" -le "$DOWNLOAD_RETRY_ATTEMPTS" ]; do
+            echo "Starting download for ${SCRAPER} (attempt ${attempt}/${DOWNLOAD_RETRY_ATTEMPTS})"
+            if run_scraper_once; then
+              status="success"
+              note="download_completed"
+              break
+            fi
+            if [ "$LAST_EXIT_CODE" -eq 124 ] || [ "$LAST_EXIT_CODE" -eq 137 ]; then
+              status="timeout"
+              note="download_timeout_per_retailer"
+              break
+            fi
+            if [ "$attempt" -ge "$DOWNLOAD_RETRY_ATTEMPTS" ]; then
+              status="failed"
+              note="docker_run_failed_after_retries"
+              break
+            fi
+            sleep $((attempt * 15))
+            attempt=$((attempt + 1))
+          done
+          printf "%s,%s,%s,%s,%s,%s,%s\n" \
+            "$SCRAPER" "$status" "$attempt" "$LAST_EXIT_CODE" "$DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER" "$LAST_DURATION_SECONDS" "$note" \
+            >> out/download_retailer_status.csv
+          if [ "$status" != "success" ]; then
+            echo "Retailer download failure recorded for ${SCRAPER}: ${status}"
+          fi
+
+      - name: Build download inventory summary
+        if: always()
+        run: |
           python3 - <<'PY'
           import csv
           import json
