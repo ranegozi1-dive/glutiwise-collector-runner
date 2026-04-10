@@ -5182,6 +5182,108 @@ jobs:
                   )
               )
 
+          price_store_coverage_by_store_key = {
+              clean_text(row.get("store_key")): row
+              for row in price_store_coverage_rows
+              if clean_text(row.get("store_key"))
+          }
+          core_basket_family_keys = sorted({
+              clean_text(product_probe_metadata_by_barcode.get(anchor_probe["barcode"], {}).get("comparison_family_key"))
+              for basket_probe in basket_probe_definitions
+              for anchor_probe in basket_probe["items"]
+              if clean_text(product_probe_metadata_by_barcode.get(anchor_probe["barcode"], {}).get("comparison_family_key"))
+          })
+          curated_family_presence_by_store_key = {}
+          for store_key, store_rows in shadow_store_price_rows_by_store.items():
+              family_counter = Counter()
+              for row in store_rows:
+                  family_key = clean_text(
+                      product_probe_metadata_by_barcode.get(clean_text(row.get("barcode")), {}).get("comparison_family_key")
+                  )
+                  if family_key:
+                      family_counter[family_key] += 1
+              curated_family_presence_by_store_key[store_key] = family_counter
+
+          unresolved_candidate_rows_by_probe_store = defaultdict(list)
+          for row in store_side_equivalence_candidate_rows:
+              if row.get("chosen_layer") in ("unmatched", "not_proven"):
+                  unresolved_candidate_rows_by_probe_store[(
+                      clean_text(row.get("basket_probe_name")),
+                      clean_text(row.get("store_key")),
+                  )].append(row)
+
+          def infer_store_format_hint(store_name: str, retailer: str):
+              normalized_name = clean_text(store_name)
+              upper_name = normalized_name.upper()
+              if re.search(r"(^|[^A-Z])BE([^A-Z]|$)", upper_name):
+                  return "be_small_format"
+              if retailer == "ramilevy":
+                  return "discount_supermarket"
+              if retailer == "yohananof":
+                  return "large_supermarket"
+              if "אקספרס" in normalized_name:
+                  return "express_small_grocery"
+              if "שלי" in normalized_name:
+                  return "urban_small_grocery"
+              return "general_grocery"
+
+          def derive_store_gap_class(basket_probe_name: str, store_key: str):
+              diagnostic_rows = unresolved_candidate_rows_by_probe_store.get(
+                  (clean_text(basket_probe_name), clean_text(store_key)),
+                  [],
+              )
+              bucket_counts = Counter(
+                  clean_text(row.get("diagnostic_root_cause_bucket")) or "unknown"
+                  for row in diagnostic_rows
+              )
+              if bucket_counts.get("no_store_candidate_in_comparison_family", 0) >= max(
+                  bucket_counts.get("no_store_candidate_in_equivalence_group", 0),
+                  bucket_counts.get("same_family_same_category_candidate_outside_equivalence_group", 0),
+                  bucket_counts.get("same_family_same_form_factor_candidate_outside_equivalence_group", 0),
+              ):
+                  likely_gap_class = "likely_genuinely_shallow_store_assortment"
+              elif bucket_counts.get("same_family_same_category_candidate_outside_equivalence_group", 0) or bucket_counts.get("same_family_same_form_factor_candidate_outside_equivalence_group", 0):
+                  likely_gap_class = "likely_equivalence_group_derivation_gap"
+              elif bucket_counts.get("no_store_candidate_in_equivalence_group", 0):
+                  likely_gap_class = "likely_store_side_family_assignment_or_equivalence_grouping_gap"
+              else:
+                  likely_gap_class = "mixed_or_unclear"
+              return likely_gap_class, bucket_counts
+
+          def build_store_relevance_profile(store_key: str):
+              coverage_row = price_store_coverage_by_store_key.get(clean_text(store_key), {})
+              family_counter = curated_family_presence_by_store_key.get(clean_text(store_key), Counter())
+              valid_price_rows = int(coverage_row.get("valid_price_rows") or 0)
+              unique_barcodes = int(coverage_row.get("unique_barcodes") or 0)
+              core_family_presence_count = sum(
+                  1 for family_key in core_basket_family_keys
+                  if family_counter.get(family_key, 0) > 0
+              )
+              format_hint = infer_store_format_hint(
+                  coverage_row.get("store_name") or "",
+                  coverage_row.get("retailer") or "",
+              )
+              if format_hint == "be_small_format":
+                  grocery_depth_class = "small_format_depth"
+              elif valid_price_rows >= 4500 and core_family_presence_count >= 8:
+                  grocery_depth_class = "broad_grocery_depth"
+              elif valid_price_rows >= 1800 and core_family_presence_count >= 6:
+                  grocery_depth_class = "mid_grocery_depth"
+              else:
+                  grocery_depth_class = "shallow_grocery_depth"
+              return {
+                  "store_format_hint": format_hint,
+                  "grocery_depth_class": grocery_depth_class,
+                  "valid_price_rows": valid_price_rows,
+                  "unique_barcodes": unique_barcodes,
+                  "core_basket_family_presence_count": core_family_presence_count,
+                  "top_present_core_families": [
+                      family_key
+                      for family_key, _ in family_counter.most_common(5)
+                      if family_key in core_basket_family_keys
+                  ],
+              }
+
           def diagnose_family_gap_candidate(metadata: dict, family_rule: dict):
               category_key = clean_text(metadata.get("category_key"))
               family_tokens = metadata.get("family_tokens") or normalized_lookup_tokens_shadow(metadata.get("name") or "")
@@ -6893,6 +6995,57 @@ jobs:
               comparison_screen_store_cards_by_city_scope,
           )
 
+          store_relevance_classification_summary = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "small_format_stores_remain_visible_but_should_not_be_treated_as_full_grocery_by_default": True,
+              "basket_probes": {},
+          }
+          for basket_probe in basket_probe_definitions:
+              basket_probe_name = basket_probe["basket_probe_name"]
+              probe_store_rows = [
+                  row for row in basket_store_shadow_rows
+                  if row["basket_probe_name"] == basket_probe_name
+              ]
+              classification_rows = []
+              classification_counts = Counter()
+              for row in sorted(probe_store_rows, key=lambda store_row: store_row["store_key"]):
+                  profile = build_store_relevance_profile(row["store_key"])
+                  likely_gap_class, bucket_counts = derive_store_gap_class(
+                      basket_probe_name,
+                      row["store_key"],
+                  )
+                  if row["complete_with_budget_alternatives"]:
+                      relevance_classification = "comparison_ready_full_basket"
+                  elif row["near_full_after_user_approved_alternatives"]:
+                      relevance_classification = "comparison_ready_near_full_basket"
+                  elif profile["store_format_hint"] == "be_small_format":
+                      relevance_classification = "small_format_partial_basket_store"
+                  elif likely_gap_class == "likely_equivalence_group_derivation_gap":
+                      relevance_classification = "recoverable_derivation_gap"
+                  elif likely_gap_class == "likely_store_side_family_assignment_or_equivalence_grouping_gap":
+                      relevance_classification = "recoverable_family_or_equivalence_gap"
+                  else:
+                      relevance_classification = "genuinely_shallow_or_non_grocery_store"
+                  classification_counts[relevance_classification] += 1
+                  classification_rows.append({
+                      "store_key": row["store_key"],
+                      "retailer": row.get("retailer"),
+                      "city": row.get("city"),
+                      "relevance_classification": relevance_classification,
+                      "likely_gap_class": likely_gap_class,
+                      "diagnostic_bucket_counts": dict(bucket_counts.most_common(5)),
+                      **profile,
+                  })
+              store_relevance_classification_summary["basket_probes"][basket_probe_name] = {
+                  "classification_counts": dict(classification_counts.most_common()),
+                  "stores": classification_rows,
+              }
+          write_json(
+              OUT_DIR / "store_relevance_classification_summary.json",
+              store_relevance_classification_summary,
+          )
+
           city_selection_readiness_summary = {
               "shadow_only": True,
               "publish_gate_impact": "none",
@@ -7249,6 +7402,7 @@ jobs:
                       likely_gap_class = "likely_store_side_family_assignment_or_equivalence_grouping_gap"
                   else:
                       likely_gap_class = "mixed_or_unclear"
+                  profile = build_store_relevance_profile(store_key)
                   incomplete_store_summaries.append({
                       "store_key": store_key,
                       "retailer": store_row.get("retailer"),
@@ -7260,6 +7414,7 @@ jobs:
                       "budget_alternative_line_count": store_row["budget_alternative_line_count"],
                       "unresolved_line_count": len(unresolved_line_rows),
                       "likely_gap_class": likely_gap_class,
+                      **profile,
                       "top_unresolved_families": dict(unresolved_family_counts.most_common(5)),
                       "top_diagnostic_buckets": dict(diagnostic_bucket_counts.most_common(5)),
                       "unresolved_lines": [
@@ -8029,6 +8184,7 @@ jobs:
             out/comparison_screen_store_mode_mix_summary.json
             out/comparison_screen_store_mode_mix_by_city_scope.json
             out/comparison_screen_store_cards_by_city_scope.json
+            out/store_relevance_classification_summary.json
             out/city_selection_readiness_summary.json
             out/cart_summary_offer_coverage.json
             out/cart_summary_offer_coverage_by_city_scope.json
