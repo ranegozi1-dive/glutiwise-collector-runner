@@ -7366,6 +7366,159 @@ jobs:
               cart_summary_offer_coverage_by_city_scope,
           )
 
+          basket_resolution_ledger_by_city_scope = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "models_supabase_ready_basket_resolution_rows": True,
+              "comparison_screen_reflects_user_approved_cart": True,
+              "basket_probes": {},
+          }
+          for basket_probe in basket_probe_definitions:
+              basket_probe_name = basket_probe["basket_probe_name"]
+              selected_probe_size = basket_probe["selected_probe_size"]
+              probe_store_rows = [
+                  row for row in basket_store_shadow_rows
+                  if row["basket_probe_name"] == basket_probe_name
+              ]
+              probe_line_rows = [
+                  row for row in basket_line_shadow_rows
+                  if row["basket_probe_name"] == basket_probe_name
+              ]
+              probe_line_rows_by_store_key = defaultdict(list)
+              for line_row in probe_line_rows:
+                  probe_line_rows_by_store_key[line_row["store_key"]].append(line_row)
+              item_order_by_source_item_id = {
+                  anchor_probe["barcode"]: item_index
+                  for item_index, anchor_probe in enumerate(basket_probe["items"])
+              }
+              ordered_city_names = sorted({clean_text(row.get("city")) or "unknown" for row in probe_store_rows})
+              city_scope_breakdown = {}
+              for scope_size in range(1, len(ordered_city_names) + 1):
+                  for city_scope in combinations(ordered_city_names, scope_size):
+                      scope_rows = [
+                          row for row in probe_store_rows
+                          if (clean_text(row.get("city")) or "unknown") in city_scope
+                      ]
+                      scope_rows_by_store_key = {
+                          row["store_key"]: row
+                          for row in scope_rows
+                      }
+                      scope_offer_effects_by_anchor = {
+                          anchor_probe["barcode"]: summarize_cart_offer_effects(
+                              basket_probe_name,
+                              anchor_probe["barcode"],
+                              scope_rows_by_store_key,
+                          )
+                          for anchor_probe in basket_probe["items"]
+                      }
+                      store_resolution_rows = []
+                      for store_row in sorted(
+                          scope_rows,
+                          key=lambda row: (
+                              not row["complete_with_budget_alternatives"],
+                              not row["near_full_after_user_approved_alternatives"],
+                              row["resolved_missing_line_count"],
+                              row["optional_lower_cost_total_with_budget_alternatives"] if row["optional_lower_cost_total_with_budget_alternatives"] is not None else float("inf"),
+                              row["baseline_basket_total"] if row["baseline_basket_total"] is not None else float("inf"),
+                              row["store_key"],
+                          ),
+                      ):
+                          relevance_classification, likely_gap_class, bucket_counts, family_counts, profile = derive_store_relevance_classification(
+                              store_row,
+                              basket_probe_name,
+                          )
+                          line_status_rows = []
+                          for line_row in sorted(
+                              probe_line_rows_by_store_key.get(store_row["store_key"], []),
+                              key=lambda row: (
+                                  item_order_by_source_item_id.get(row["source_item_id"], 9999),
+                                  row["source_item_id"],
+                              ),
+                          ):
+                              chosen_layer = line_row["chosen_layer"]
+                              if chosen_layer == "exact_identity":
+                                  final_resolution_status = "exact"
+                              elif chosen_layer == "same_product_unit_normalized":
+                                  final_resolution_status = "normalized_exact"
+                              elif chosen_layer == "canonical_equivalent":
+                                  final_resolution_status = "approved_equivalent"
+                              elif chosen_layer == "budget_alternative":
+                                  final_resolution_status = "budget_alternative"
+                              elif chosen_layer == "not_proven":
+                                  final_resolution_status = "not_proven"
+                              else:
+                                  final_resolution_status = "unresolved"
+                              offer_effect_summary = scope_offer_effects_by_anchor.get(line_row["source_item_id"], {})
+                              store_key = line_row["store_key"]
+                              helps_full_completion = store_key in (
+                                  offer_effect_summary.get("canonical_full_completion_gain_store_keys", [])
+                                  + offer_effect_summary.get("budget_full_completion_gain_store_keys", [])
+                              )
+                              helps_near_full_completion = store_key in (
+                                  offer_effect_summary.get("canonical_near_full_completion_gain_store_keys", [])
+                                  + offer_effect_summary.get("budget_near_full_completion_gain_store_keys", [])
+                              )
+                              line_status_rows.append({
+                                  "source_item_id": line_row["source_item_id"],
+                                  "source_item_name": line_row["source_item_name"],
+                                  "comparison_family_key": (product_probe_metadata_by_barcode.get(line_row["source_item_id"], {}) or {}).get("comparison_family_key"),
+                                  "final_resolution_status": final_resolution_status,
+                                  "chosen_layer": chosen_layer,
+                                  "requires_user_approval_in_cart": chosen_layer in ("canonical_equivalent", "budget_alternative"),
+                                  "matched_item_id": line_row["matched_item_id"],
+                                  "matched_item_name": line_row["matched_item_name"],
+                                  "matched_price_value": line_row["matched_price_value"],
+                                  "baseline_line_price": line_row["baseline_line_price"],
+                                  "budget_line_price": line_row["budget_line_price"],
+                                  "gf_constraint_required": line_row["gf_constraint_required"],
+                                  "gf_evidence_source": line_row["gf_evidence_source"],
+                                  "equivalence_basis": line_row["equivalence_basis"],
+                                  "normalization_basis": line_row["normalization_basis"],
+                                  "reason_or_failure_reason": line_row["reason_or_failure_reason"],
+                                  "recommended_offer_layer_in_selected_city_scope": offer_effect_summary.get("recommended_offer_layer"),
+                                  "recommended_offer_role_in_selected_city_scope": offer_effect_summary.get("recommended_offer_role"),
+                                  "helps_store_reach_full_basket_in_selected_city_scope": helps_full_completion,
+                                  "helps_store_reach_near_full_basket_in_selected_city_scope": helps_near_full_completion,
+                              })
+                          store_resolution_rows.append({
+                              "store_key": store_row["store_key"],
+                              "retailer": store_row.get("retailer"),
+                              "city": store_row.get("city"),
+                              "selected_probe_size": selected_probe_size,
+                              "relevance_classification": relevance_classification,
+                              "likely_gap_class": likely_gap_class,
+                              "store_format_hint": profile["store_format_hint"],
+                              "grocery_depth_class": profile["grocery_depth_class"],
+                              "comparison_card_state": (
+                                  "full_basket"
+                                  if store_row["complete_with_budget_alternatives"]
+                                  else "near_full_basket"
+                                  if store_row["near_full_after_user_approved_alternatives"]
+                                  else "incomplete_basket"
+                              ),
+                              "exact_baseline_coverage": store_row["exact_baseline_coverage"],
+                              "complete_with_user_approved_equivalents": store_row["complete_with_user_approved_equivalents"],
+                              "complete_with_budget_alternatives": store_row["complete_with_budget_alternatives"],
+                              "near_full_after_user_approved_alternatives": store_row["near_full_after_user_approved_alternatives"],
+                              "covered_line_count": max(0, selected_probe_size - store_row["resolved_missing_line_count"]),
+                              "missing_line_count": store_row["resolved_missing_line_count"],
+                              "baseline_basket_total": store_row["baseline_basket_total"],
+                              "optional_lower_cost_total_if_budget_approved": store_row["optional_lower_cost_total_with_budget_alternatives"],
+                              "top_unresolved_families": dict(family_counts.most_common(5)),
+                              "top_diagnostic_bucket_counts": dict(bucket_counts.most_common(5)),
+                              "line_resolutions": line_status_rows,
+                          })
+                      city_scope_breakdown[" + ".join(city_scope)] = {
+                          "selected_city_count": len(city_scope),
+                          "store_count": len(scope_rows),
+                          "stores": store_resolution_rows,
+                      }
+              basket_resolution_ledger_by_city_scope["basket_probes"][basket_probe_name] = city_scope_breakdown
+          write_json(
+              OUT_DIR / "basket_resolution_ledger_by_city_scope.json",
+              basket_resolution_ledger_by_city_scope,
+          )
+
           cart_offer_completion_gain_summary = {
               "shadow_only": True,
               "publish_gate_impact": "none",
@@ -8270,6 +8423,7 @@ jobs:
             out/city_selection_readiness_summary.json
             out/cart_summary_offer_coverage.json
             out/cart_summary_offer_coverage_by_city_scope.json
+            out/basket_resolution_ledger_by_city_scope.json
             out/cart_offer_completion_gain_summary.json
             out/incomplete_store_basket_gap_summary.json
             out/equivalence_gap_examples.json
