@@ -6620,6 +6620,33 @@ jobs:
                   likely_gap_class = "mixed_or_unclear"
               return likely_gap_class, bucket_counts
 
+          def derive_store_relevance_classification(store_row: dict, basket_probe_name: str):
+              profile = build_store_relevance_profile(store_row["store_key"])
+              likely_gap_class, bucket_counts = derive_store_gap_class(
+                  basket_probe_name,
+                  store_row["store_key"],
+              )
+              if store_row["complete_with_budget_alternatives"]:
+                  relevance_classification = "comparison_ready_full_basket"
+              elif store_row["near_full_after_user_approved_alternatives"]:
+                  relevance_classification = "comparison_ready_near_full_basket"
+              elif profile["store_format_hint"] == "be_small_format":
+                  relevance_classification = "small_format_partial_basket_store"
+              elif likely_gap_class == "likely_equivalence_group_derivation_gap":
+                  relevance_classification = "recoverable_derivation_gap"
+              elif likely_gap_class == "likely_store_side_family_assignment_or_equivalence_grouping_gap":
+                  relevance_classification = "recoverable_family_or_equivalence_gap"
+              else:
+                  relevance_classification = "genuinely_shallow_or_non_grocery_store"
+              family_counts = Counter(
+                  clean_text(row.get("comparison_family_key")) or "unknown"
+                  for row in unresolved_candidate_rows_by_probe_store.get(
+                      (clean_text(basket_probe_name), clean_text(store_row["store_key"])),
+                      [],
+                  )
+              )
+              return relevance_classification, likely_gap_class, bucket_counts, family_counts, profile
+
           basket_completion_readiness_summary = {
               "shadow_only": True,
               "publish_gate_impact": "none",
@@ -6900,6 +6927,10 @@ jobs:
               city_scope_breakdown = {}
 
               def build_comparison_screen_store_card(row):
+                  relevance_classification, likely_gap_class, bucket_counts, family_counts, profile = derive_store_relevance_classification(
+                      row,
+                      basket_probe_name,
+                  )
                   if row["exact_baseline_coverage"]:
                       fulfillment_mode = "exact_only"
                   elif row["complete_with_user_approved_equivalents"]:
@@ -6940,6 +6971,44 @@ jobs:
                       "optional_lower_cost_total_if_budget_approved": row["optional_lower_cost_total_with_budget_alternatives"],
                       "has_optional_budget_savings": has_optional_budget_savings,
                       "reason_passed_or_failed": row["reason_passed_or_failed"],
+                      "relevance_classification": relevance_classification,
+                      "likely_gap_class": likely_gap_class,
+                      "store_format_hint": profile["store_format_hint"],
+                      "grocery_depth_class": profile["grocery_depth_class"],
+                      "top_unresolved_families": dict(family_counts.most_common(5)),
+                      "top_diagnostic_bucket_counts": dict(bucket_counts.most_common(5)),
+                  }
+
+              def build_excluded_store_card(row):
+                  relevance_classification, likely_gap_class, bucket_counts, family_counts, profile = derive_store_relevance_classification(
+                      row,
+                      basket_probe_name,
+                  )
+                  covered_line_count = max(0, selected_probe_size - row["resolved_missing_line_count"])
+                  return {
+                      "store_key": row["store_key"],
+                      "retailer": row.get("retailer"),
+                      "city": row.get("city"),
+                      "relevance_classification": relevance_classification,
+                      "likely_gap_class": likely_gap_class,
+                      "store_format_hint": profile["store_format_hint"],
+                      "grocery_depth_class": profile["grocery_depth_class"],
+                      "covered_line_count": covered_line_count,
+                      "missing_line_count": row["resolved_missing_line_count"],
+                      "coverage_display": f"{covered_line_count}/{selected_probe_size}",
+                      "exact_line_count": row["exact_line_count"],
+                      "normalized_line_count": row["normalized_line_count"],
+                      "canonical_line_count": row["canonical_line_count"],
+                      "budget_alternative_line_count": row["budget_alternative_line_count"],
+                      "top_unresolved_families": dict(family_counts.most_common(5)),
+                      "top_diagnostic_bucket_counts": dict(bucket_counts.most_common(5)),
+                      "reason_passed_or_failed": row["reason_passed_or_failed"],
+                      "should_surface_in_secondary_partial_store_section": relevance_classification in (
+                          "comparison_ready_near_full_basket",
+                          "small_format_partial_basket_store",
+                          "recoverable_derivation_gap",
+                          "recoverable_family_or_equivalence_gap",
+                      ),
                   }
 
               for scope_size in range(1, len(ordered_city_names) + 1):
@@ -6987,6 +7056,19 @@ jobs:
                               row["store_key"]
                               for row in scope_rows
                               if not row["near_full_after_user_approved_alternatives"]
+                          ],
+                          "excluded_incomplete_store_cards_sorted_by_missing_count": [
+                              build_excluded_store_card(row)
+                              for row in sorted(
+                                  (
+                                      row for row in scope_rows
+                                      if not row["near_full_after_user_approved_alternatives"]
+                                  ),
+                                  key=lambda row: (
+                                      row["resolved_missing_line_count"],
+                                      row["store_key"],
+                                  ),
+                              )
                           ],
                       }
               comparison_screen_store_cards_by_city_scope["basket_probes"][basket_probe_name] = city_scope_breakdown
