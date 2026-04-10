@@ -4051,7 +4051,7 @@ jobs:
                   "probe_priority": 4,
                   "allowed_category_tokens": ["מוצרי חלב"],
                   "required_any_tokens": ["לבנה", "קוטג", "cottage", "labneh", "גבינה לבנה"],
-                  "required_any_prefixes": ["לבנ", "קוטג"],
+                  "required_any_prefixes": ["לבנה", "קוטג"],
                   "category_bypass_forbidden_tokens": ["פנים", "face", "קרם", "cream", "סרום", "serum", "שמפו", "shampoo", "סבון", "soap", "מברשת", "brush", "משייף", "גלידה", "dessert", "מעדן", "מוצץ", "מוצצים", "פדים", "קוסמט", "baby", "מטרנה"],
                   "category_bypass_required_dimension": "weight",
                   "category_bypass_min_total_base_qty": 100.0,
@@ -4483,6 +4483,11 @@ jobs:
                   if family_key == "bottled_water":
                       return None, ("bottled_water_cosmetic_or_topical_water_token", matched_cosmetic_pattern)
                   return None, ("soft_cheese_non_dairy_or_cosmetic_token", matched_cosmetic_pattern)
+              if family_key == "soft_cheese_basic" and not any(
+                  clean_text(token).startswith("fatpct_")
+                  for token in (text_tokens or [])
+              ):
+                  return None, ("soft_cheese_missing_fatpct_for_category_bypass", None)
               if not preliminary_pack_signature:
                   if family_key == "bottled_water":
                       return None, ("bottled_water_missing_pack_signature_for_category_bypass", None)
