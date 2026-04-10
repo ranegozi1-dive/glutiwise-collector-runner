@@ -5204,14 +5204,6 @@ jobs:
                       family_counter[family_key] += 1
               curated_family_presence_by_store_key[store_key] = family_counter
 
-          unresolved_candidate_rows_by_probe_store = defaultdict(list)
-          for row in store_side_equivalence_candidate_rows:
-              if row.get("chosen_layer") in ("unmatched", "not_proven"):
-                  unresolved_candidate_rows_by_probe_store[(
-                      clean_text(row.get("basket_probe_name")),
-                      clean_text(row.get("store_key")),
-                  )].append(row)
-
           def infer_store_format_hint(store_name: str, retailer: str):
               normalized_name = clean_text(store_name)
               upper_name = normalized_name.upper()
@@ -5226,29 +5218,6 @@ jobs:
               if "שלי" in normalized_name:
                   return "urban_small_grocery"
               return "general_grocery"
-
-          def derive_store_gap_class(basket_probe_name: str, store_key: str):
-              diagnostic_rows = unresolved_candidate_rows_by_probe_store.get(
-                  (clean_text(basket_probe_name), clean_text(store_key)),
-                  [],
-              )
-              bucket_counts = Counter(
-                  clean_text(row.get("diagnostic_root_cause_bucket")) or "unknown"
-                  for row in diagnostic_rows
-              )
-              if bucket_counts.get("no_store_candidate_in_comparison_family", 0) >= max(
-                  bucket_counts.get("no_store_candidate_in_equivalence_group", 0),
-                  bucket_counts.get("same_family_same_category_candidate_outside_equivalence_group", 0),
-                  bucket_counts.get("same_family_same_form_factor_candidate_outside_equivalence_group", 0),
-              ):
-                  likely_gap_class = "likely_genuinely_shallow_store_assortment"
-              elif bucket_counts.get("same_family_same_category_candidate_outside_equivalence_group", 0) or bucket_counts.get("same_family_same_form_factor_candidate_outside_equivalence_group", 0):
-                  likely_gap_class = "likely_equivalence_group_derivation_gap"
-              elif bucket_counts.get("no_store_candidate_in_equivalence_group", 0):
-                  likely_gap_class = "likely_store_side_family_assignment_or_equivalence_grouping_gap"
-              else:
-                  likely_gap_class = "mixed_or_unclear"
-              return likely_gap_class, bucket_counts
 
           def build_store_relevance_profile(store_key: str):
               coverage_row = price_store_coverage_by_store_key.get(clean_text(store_key), {})
@@ -6619,6 +6588,37 @@ jobs:
               OUT_DIR / "store_side_equivalence_candidate_coverage_summary.json",
               store_side_equivalence_candidate_coverage_summary,
           )
+
+          unresolved_candidate_rows_by_probe_store = defaultdict(list)
+          for row in store_side_equivalence_candidate_rows:
+              if row.get("chosen_layer") in ("unmatched", "not_proven"):
+                  unresolved_candidate_rows_by_probe_store[(
+                      clean_text(row.get("basket_probe_name")),
+                      clean_text(row.get("store_key")),
+                  )].append(row)
+
+          def derive_store_gap_class(basket_probe_name: str, store_key: str):
+              diagnostic_rows = unresolved_candidate_rows_by_probe_store.get(
+                  (clean_text(basket_probe_name), clean_text(store_key)),
+                  [],
+              )
+              bucket_counts = Counter(
+                  clean_text(row.get("diagnostic_root_cause_bucket")) or "unknown"
+                  for row in diagnostic_rows
+              )
+              if bucket_counts.get("no_store_candidate_in_comparison_family", 0) >= max(
+                  bucket_counts.get("no_store_candidate_in_equivalence_group", 0),
+                  bucket_counts.get("same_family_same_category_candidate_outside_equivalence_group", 0),
+                  bucket_counts.get("same_family_same_form_factor_candidate_outside_equivalence_group", 0),
+              ):
+                  likely_gap_class = "likely_genuinely_shallow_store_assortment"
+              elif bucket_counts.get("same_family_same_category_candidate_outside_equivalence_group", 0) or bucket_counts.get("same_family_same_form_factor_candidate_outside_equivalence_group", 0):
+                  likely_gap_class = "likely_equivalence_group_derivation_gap"
+              elif bucket_counts.get("no_store_candidate_in_equivalence_group", 0):
+                  likely_gap_class = "likely_store_side_family_assignment_or_equivalence_grouping_gap"
+              else:
+                  likely_gap_class = "mixed_or_unclear"
+              return likely_gap_class, bucket_counts
 
           basket_completion_readiness_summary = {
               "shadow_only": True,
