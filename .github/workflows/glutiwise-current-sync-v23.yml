@@ -4051,6 +4051,10 @@ jobs:
                   "probe_priority": 4,
                   "allowed_category_tokens": ["מוצרי חלב"],
                   "required_any_tokens": ["לבנה", "קוטג", "cottage", "labneh", "גבינה לבנה"],
+                  "required_any_prefixes": ["לבנ", "קוטג"],
+                  "category_bypass_forbidden_tokens": ["פנים", "face", "קרם", "cream", "סרום", "serum", "שמפו", "shampoo", "סבון", "soap", "מברשת", "brush", "משייף", "גלידה", "dessert", "מעדן", "מוצץ", "מוצצים", "פדים", "קוסמט", "baby", "מטרנה"],
+                  "category_bypass_required_dimension": "weight",
+                  "category_bypass_min_total_base_qty": 100.0,
                   "forbidden_tokens": ["צ'יטוס", "yellow", "צהובה", "snack", "חטיף", "ממולדה", "ריבה", "jam", "dessert", "קינוח", "מעדן"],
                   "identity_strip_tokens": ["גבינה", "cheese"],
                   "unit_basis": "weight",
@@ -4461,7 +4465,8 @@ jobs:
               return bool(first_matching_rule_pattern(allowed_category_tokens, normalized_lookup_tokens_shadow(category_key)))
 
           def category_bypass_diagnostic_for_family_rule(name: str, family_rule: dict, text_tokens, preliminary_pack_signature=None):
-              if (family_rule or {}).get("comparison_family_key") != "bottled_water":
+              family_key = (family_rule or {}).get("comparison_family_key")
+              if family_key not in {"bottled_water", "soft_cheese_basic"}:
                   return None, None
               normalized_name_text = clean_lookup_text(name).lower()
               matched_cosmetic_pattern = first_matching_rule_pattern(
@@ -4475,16 +4480,24 @@ jobs:
                           matched_cosmetic_pattern = blocked_pattern
                           break
               if matched_cosmetic_pattern:
-                  return None, ("bottled_water_cosmetic_or_topical_water_token", matched_cosmetic_pattern)
+                  if family_key == "bottled_water":
+                      return None, ("bottled_water_cosmetic_or_topical_water_token", matched_cosmetic_pattern)
+                  return None, ("soft_cheese_non_dairy_or_cosmetic_token", matched_cosmetic_pattern)
               if not preliminary_pack_signature:
-                  return None, ("bottled_water_missing_pack_signature_for_category_bypass", None)
+                  if family_key == "bottled_water":
+                      return None, ("bottled_water_missing_pack_signature_for_category_bypass", None)
+                  return None, ("soft_cheese_missing_pack_signature_for_category_bypass", None)
               required_dimension = clean_text(family_rule.get("category_bypass_required_dimension"))
               if required_dimension and clean_text(preliminary_pack_signature.get("dimension")) != required_dimension:
-                  return None, ("bottled_water_non_volume_pack_signature_for_category_bypass", preliminary_pack_signature.get("dimension"))
+                  if family_key == "bottled_water":
+                      return None, ("bottled_water_non_volume_pack_signature_for_category_bypass", preliminary_pack_signature.get("dimension"))
+                  return None, ("soft_cheese_non_weight_pack_signature_for_category_bypass", preliminary_pack_signature.get("dimension"))
               total_base_qty = safe_decimal(preliminary_pack_signature.get("total_base_qty"))
               min_total_base_qty = safe_decimal(family_rule.get("category_bypass_min_total_base_qty"))
               if min_total_base_qty is not None and (total_base_qty is None or total_base_qty < min_total_base_qty):
-                  return None, ("bottled_water_pack_signature_below_volume_threshold", total_base_qty)
+                  if family_key == "bottled_water":
+                      return None, ("bottled_water_pack_signature_below_volume_threshold", total_base_qty)
+                  return None, ("soft_cheese_pack_signature_below_weight_threshold", total_base_qty)
               return {
                   "category_match_mode": "strong_name_with_pack_signature_category_bypass",
                   "pack_signature_derivation_rule": preliminary_pack_signature.get("derivation_rule") if preliminary_pack_signature else None,
@@ -5057,10 +5070,10 @@ jobs:
               "shadow_only": True,
               "publish_gate_impact": "none",
               "deterministic_derivations_added": {
-                  "comparison_family_key": "assigned from a small curated comparison_family_registry using token-aware required and forbidden pattern matching plus tightly scoped required-prefix matching for selected Hebrew family stems instead of loose substring hits; bottled_water may bypass category only when strong water tokens, a volume pack signature, and cosmetic-water exclusions all agree",
+                  "comparison_family_key": "assigned from a small curated comparison_family_registry using token-aware required and forbidden pattern matching plus tightly scoped required-prefix matching for selected Hebrew family stems instead of loose substring hits; bottled_water may bypass category only when strong water tokens, a volume pack signature, and cosmetic-water exclusions all agree, and soft_cheese_basic may bypass category only when strong cottage/labneh-style name evidence and a weight pack signature agree while cosmetic/non-dairy exclusions stay clear",
                   "brand_identity_key": "normalized brand plus manufacturer tokens with corporate suffix removal",
                   "line_signature": "name tokens with pack expressions, numeric noise, and brand/manufacturer tokens removed while preserving fat and size qualifiers when explicit",
-                  "pack_signature": "legacy pack parsing plus compact Hebrew unit suffix parsing, Hebrew quote-mark unit variants, eggs count parsing including construct-form egg labels, bottled-water liter multipack parsing when family rules allow it, and preliminary pack parsing used only for bottled-water category-bypass diagnostics",
+                  "pack_signature": "legacy pack parsing plus compact Hebrew unit suffix parsing, Hebrew quote-mark unit variants, eggs count parsing including construct-form egg labels, bottled-water liter multipack parsing when family rules allow it, and preliminary pack parsing used only for tightly scoped category-bypass diagnostics such as bottled_water volume checks and soft_cheese_basic weight checks",
                   "base_product_identity_key": "curated family identity built from normalized family tokens after family-specific strip tokens are removed",
                   "equivalence_group_key": "curated family plus form-factor derived group for selected staple families when that signal is stronger and more consistent than explicit substitute_group; otherwise explicit substitute_group plus curated family with form-factor enforced separately at match time, or derived curated family plus form-factor when no explicit group exists",
                   "comparison_form_factor_key": "curated family-specific use-case/form-factor rules first, such as egg count-only shell equivalence, milk fat+lactose-free, soft-cheese cottage-vs-labneh plus explicit fat percentage, tuna water-vs-oil, pasta shape, cereal subtype, bread type, frozen-vegetable broccoli-vs-cauliflower subtype, and water plainness; only then reduced base product identity fallback",
