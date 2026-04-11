@@ -1,9 +1,6 @@
 name: GlutiWise Current Sync to Supabase v23
 
 on:
-  schedule:
-    # GitHub Actions cron uses UTC. 04:17 UTC avoids the top-of-hour queue and gives a stable daily run.
-    - cron: "17 4 * * *"
   workflow_dispatch:
     inputs:
       write_to_supabase:
@@ -40,8 +37,8 @@ on:
         default: ""
 
 concurrency:
-  group: glutiwise-current-sync-live
-  cancel-in-progress: false
+  group: glutiwise-current-sync-${{ github.ref_name }}-${{ github.event_name }}
+  cancel-in-progress: true
 
 defaults:
   run:
