@@ -4225,6 +4225,11 @@ jobs:
           comparison_family_registry_by_key = {
               rule["comparison_family_key"]: rule for rule in comparison_family_registry
           }
+          if comparison_family_registry_by_key.get("bread_basic"):
+              comparison_family_registry_by_key["bread_basic"]["forbidden_tokens"] = list(dict.fromkeys(
+                  list(comparison_family_registry_by_key["bread_basic"].get("forbidden_tokens") or [])
+                  + ["\u05e7\u05de\u05d7", "flour", "\u05ea\u05e2\u05e8\u05d5\u05d1\u05ea", "mix"]
+              ))
           core_food_group_priority = {
               rule["comparison_family_key"]: rule["probe_priority"] for rule in comparison_family_registry
           }
@@ -5072,7 +5077,7 @@ jobs:
               "shadow_only": True,
               "publish_gate_impact": "none",
               "deterministic_derivations_added": {
-                  "comparison_family_key": "assigned from a small curated comparison_family_registry using token-aware required and forbidden pattern matching plus tightly scoped required-prefix matching for selected Hebrew family stems instead of loose substring hits; bottled_water may bypass category only when strong water tokens, a volume pack signature, and cosmetic-water exclusions all agree, and soft_cheese_basic may bypass category only when strong cottage/labneh-style name evidence and a weight pack signature agree while cosmetic/non-dairy exclusions stay clear",
+                  "comparison_family_key": "assigned from a small curated comparison_family_registry using token-aware required and forbidden pattern matching plus tightly scoped required-prefix matching for selected Hebrew family stems instead of loose substring hits; bread_basic now explicitly excludes flour and bread-mix style items, bottled_water may bypass category only when strong water tokens, a volume pack signature, and cosmetic-water exclusions all agree, and soft_cheese_basic may bypass category only when strong cottage/labneh-style name evidence and a weight pack signature agree while cosmetic/non-dairy exclusions stay clear",
                   "brand_identity_key": "normalized brand plus manufacturer tokens with corporate suffix removal",
                   "line_signature": "name tokens with pack expressions, numeric noise, and brand/manufacturer tokens removed while preserving fat and size qualifiers when explicit",
                   "pack_signature": "legacy pack parsing plus compact Hebrew unit suffix parsing, Hebrew quote-mark unit variants, eggs count parsing including construct-form egg labels, bottled-water liter multipack parsing when family rules allow it, and preliminary pack parsing used only for tightly scoped category-bypass diagnostics such as bottled_water volume checks and soft_cheese_basic weight checks",
@@ -6950,7 +6955,14 @@ jobs:
                       "store_key": row["store_key"],
                       "retailer": row.get("retailer"),
                       "city": row.get("city"),
+                      "should_surface_in_primary_comparison_results": True,
+                      "should_surface_in_secondary_partial_store_section": False,
                       "fulfillment_mode": fulfillment_mode,
+                      "user_visible_store_status": (
+                          "full_basket"
+                          if row["complete_with_budget_alternatives"]
+                          else "near_full_basket"
+                      ),
                       "comparison_card_state": (
                           "full_basket"
                           if row["complete_with_budget_alternatives"]
@@ -6982,10 +6994,23 @@ jobs:
                       basket_probe_name,
                   )
                   covered_line_count = max(0, selected_probe_size - row["resolved_missing_line_count"])
+                  should_surface_in_secondary_partial_store_section = relevance_classification in (
+                      "comparison_ready_near_full_basket",
+                      "small_format_partial_basket_store",
+                      "recoverable_derivation_gap",
+                      "recoverable_family_or_equivalence_gap",
+                  )
                   return {
                       "store_key": row["store_key"],
                       "retailer": row.get("retailer"),
                       "city": row.get("city"),
+                      "should_surface_in_primary_comparison_results": False,
+                      "should_surface_in_secondary_partial_store_section": should_surface_in_secondary_partial_store_section,
+                      "user_visible_store_status": (
+                          "secondary_partial_store"
+                          if should_surface_in_secondary_partial_store_section
+                          else "excluded_incomplete_store"
+                      ),
                       "relevance_classification": relevance_classification,
                       "likely_gap_class": likely_gap_class,
                       "store_format_hint": profile["store_format_hint"],
@@ -7000,12 +7025,6 @@ jobs:
                       "top_unresolved_families": dict(family_counts.most_common(5)),
                       "top_diagnostic_bucket_counts": dict(bucket_counts.most_common(5)),
                       "reason_passed_or_failed": row["reason_passed_or_failed"],
-                      "should_surface_in_secondary_partial_store_section": relevance_classification in (
-                          "comparison_ready_near_full_basket",
-                          "small_format_partial_basket_store",
-                          "recoverable_derivation_gap",
-                          "recoverable_family_or_equivalence_gap",
-                      ),
                   }
 
               for scope_size in range(1, len(ordered_city_names) + 1):
@@ -7455,11 +7474,20 @@ jobs:
                                   offer_effect_summary.get("canonical_near_full_completion_gain_store_keys", [])
                                   + offer_effect_summary.get("budget_near_full_completion_gain_store_keys", [])
                               )
+                              if final_resolution_status in ("exact", "normalized_exact"):
+                                  user_visible_resolution_group = "exact_baseline"
+                              elif final_resolution_status == "approved_equivalent":
+                                  user_visible_resolution_group = "approved_equivalent"
+                              elif final_resolution_status == "budget_alternative":
+                                  user_visible_resolution_group = "budget_alternative"
+                              else:
+                                  user_visible_resolution_group = "unresolved"
                               line_status_rows.append({
                                   "source_item_id": line_row["source_item_id"],
                                   "source_item_name": line_row["source_item_name"],
                                   "comparison_family_key": (product_probe_metadata_by_barcode.get(line_row["source_item_id"], {}) or {}).get("comparison_family_key"),
                                   "final_resolution_status": final_resolution_status,
+                                  "user_visible_resolution_group": user_visible_resolution_group,
                                   "chosen_layer": chosen_layer,
                                   "requires_user_approval_in_cart": chosen_layer in ("canonical_equivalent", "budget_alternative"),
                                   "matched_item_id": line_row["matched_item_id"],
@@ -7493,12 +7521,22 @@ jobs:
                                   if store_row["near_full_after_user_approved_alternatives"]
                                   else "incomplete_basket"
                               ),
+                              "should_surface_in_primary_comparison_results": bool(store_row["near_full_after_user_approved_alternatives"]),
+                              "should_surface_in_secondary_partial_store_section": relevance_classification in (
+                                  "comparison_ready_near_full_basket",
+                                  "small_format_partial_basket_store",
+                                  "recoverable_derivation_gap",
+                                  "recoverable_family_or_equivalence_gap",
+                              ) and not bool(store_row["near_full_after_user_approved_alternatives"]),
                               "exact_baseline_coverage": store_row["exact_baseline_coverage"],
                               "complete_with_user_approved_equivalents": store_row["complete_with_user_approved_equivalents"],
                               "complete_with_budget_alternatives": store_row["complete_with_budget_alternatives"],
                               "near_full_after_user_approved_alternatives": store_row["near_full_after_user_approved_alternatives"],
                               "covered_line_count": max(0, selected_probe_size - store_row["resolved_missing_line_count"]),
                               "missing_line_count": store_row["resolved_missing_line_count"],
+                              "exact_or_normalized_line_count": store_row["exact_line_count"] + store_row["normalized_line_count"],
+                              "requires_user_approval_line_count": store_row["canonical_line_count"] + store_row["budget_alternative_line_count"],
+                              "unresolved_line_count": store_row["unresolved_line_count"],
                               "baseline_basket_total": store_row["baseline_basket_total"],
                               "optional_lower_cost_total_if_budget_approved": store_row["optional_lower_cost_total_with_budget_alternatives"],
                               "top_unresolved_families": dict(family_counts.most_common(5)),
