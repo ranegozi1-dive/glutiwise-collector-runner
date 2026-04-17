@@ -40,7 +40,7 @@ on:
         default: ""
 
 concurrency:
-  group: glutiwise-current-sync-v25-live
+  group: glutiwise-current-sync-v25-recovery-live
   cancel-in-progress: false
 
 defaults:
