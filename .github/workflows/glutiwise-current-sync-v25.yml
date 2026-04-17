@@ -4228,6 +4228,11 @@ jobs:
           comparison_family_registry_by_key = {
               rule["comparison_family_key"]: rule for rule in comparison_family_registry
           }
+          if comparison_family_registry_by_key.get("bread_basic"):
+              comparison_family_registry_by_key["bread_basic"]["forbidden_tokens"] = list(dict.fromkeys(
+                  list(comparison_family_registry_by_key["bread_basic"].get("forbidden_tokens") or [])
+                  + ["קמח", "flour", "תערובת", "mix"]
+              ))
           core_food_group_priority = {
               rule["comparison_family_key"]: rule["probe_priority"] for rule in comparison_family_registry
           }
@@ -5075,7 +5080,7 @@ jobs:
               "shadow_only": True,
               "publish_gate_impact": "none",
               "deterministic_derivations_added": {
-                  "comparison_family_key": "assigned from a small curated comparison_family_registry using token-aware required and forbidden pattern matching plus tightly scoped required-prefix matching for selected Hebrew family stems instead of loose substring hits; bottled_water may bypass category only when strong water tokens, a volume pack signature, and cosmetic-water exclusions all agree, and soft_cheese_basic may bypass category only when strong cottage/labneh-style name evidence and a weight pack signature agree while cosmetic/non-dairy exclusions stay clear",
+                  "comparison_family_key": "assigned from a small curated comparison_family_registry using token-aware required and forbidden pattern matching plus tightly scoped required-prefix matching for selected Hebrew family stems instead of loose substring hits; bread_basic now explicitly excludes flour and bread-mix style items, bottled_water may bypass category only when strong water tokens, a volume pack signature, and cosmetic-water exclusions all agree, and soft_cheese_basic may bypass category only when strong cottage/labneh-style name evidence and a weight pack signature agree while cosmetic/non-dairy exclusions stay clear",
                   "brand_identity_key": "normalized brand plus manufacturer tokens with corporate suffix removal",
                   "line_signature": "name tokens with pack expressions, numeric noise, and brand/manufacturer tokens removed while preserving fat and size qualifiers when explicit",
                   "pack_signature": "legacy pack parsing plus compact Hebrew unit suffix parsing, Hebrew quote-mark unit variants, eggs count parsing including construct-form egg labels, bottled-water liter multipack parsing when family rules allow it, and preliminary pack parsing used only for tightly scoped category-bypass diagnostics such as bottled_water volume checks and soft_cheese_basic weight checks",
@@ -8225,7 +8230,7 @@ jobs:
         timeout-minutes: 10
         uses: actions/upload-artifact@v6
         with:
-          name: glutiwise-current-sync-v23-${{ github.run_id }}
+          name: glutiwise-current-sync-v25-${{ github.run_id }}
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
           if-no-files-found: warn
           path: |
