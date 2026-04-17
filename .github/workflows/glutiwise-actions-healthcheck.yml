@@ -1,0 +1,22 @@
+name: GlutiWise Actions Healthcheck
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: glutiwise-actions-healthcheck-${{ github.ref_name }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Runner healthcheck
+        run: |
+          echo "GlutiWise Actions healthcheck"
+          echo "ref=${GITHUB_REF_NAME}"
+          echo "sha=${GITHUB_SHA}"
