@@ -2656,6 +2656,10 @@ jobs:
               missing_price_store_keys,
               missing_promo_store_keys,
           )
+          target_coverage_by_store_key = {
+              clean_text(row["store_key"]): row
+              for row in target_coverage_by_store_rows
+          }
           target_coverage_by_city_retailer_rows = summarize_target_coverage_by_city_retailer(
               discovered_target_stores,
               successful_price_store_keys,
@@ -5273,6 +5277,7 @@ jobs:
 
           def build_store_relevance_profile(store_key: str):
               coverage_row = price_store_coverage_by_store_key.get(clean_text(store_key), {})
+              target_coverage_row = target_coverage_by_store_key.get(clean_text(store_key), {})
               family_counter = curated_family_presence_by_store_key.get(clean_text(store_key), Counter())
               valid_price_rows = int(coverage_row.get("valid_price_rows") or 0)
               unique_barcodes = int(coverage_row.get("unique_barcodes") or 0)
@@ -5292,11 +5297,19 @@ jobs:
                   grocery_depth_class = "mid_grocery_depth"
               else:
                   grocery_depth_class = "shallow_grocery_depth"
+              has_price_payload = bool(target_coverage_row.get("has_price_payload"))
+              has_promo_payload = bool(target_coverage_row.get("has_promo_payload"))
+              missing_price_file = bool(target_coverage_row.get("missing_price_file"))
+              missing_promo_file = bool(target_coverage_row.get("missing_promo_file"))
               return {
                   "store_format_hint": format_hint,
                   "grocery_depth_class": grocery_depth_class,
                   "valid_price_rows": valid_price_rows,
                   "unique_barcodes": unique_barcodes,
+                  "has_price_payload": has_price_payload,
+                  "has_promo_payload": has_promo_payload,
+                  "missing_price_file": missing_price_file,
+                  "missing_promo_file": missing_promo_file,
                   "core_basket_family_presence_count": core_family_presence_count,
                   "top_present_core_families": [
                       family_key
@@ -6682,6 +6695,13 @@ jobs:
                   relevance_classification = "comparison_ready_full_basket"
               elif store_row["near_full_after_user_approved_alternatives"]:
                   relevance_classification = "comparison_ready_near_full_basket"
+              elif (
+                  profile["missing_price_file"]
+                  and profile["missing_promo_file"]
+                  and not profile["has_price_payload"]
+                  and not profile["has_promo_payload"]
+              ):
+                  relevance_classification = "source_missing_target_store"
               elif profile["store_format_hint"] == "be_small_format":
                   relevance_classification = "small_format_partial_basket_store"
               elif likely_gap_class == "likely_equivalence_group_derivation_gap":
@@ -7045,6 +7065,10 @@ jobs:
                       "likely_gap_class": likely_gap_class,
                       "store_format_hint": profile["store_format_hint"],
                       "grocery_depth_class": profile["grocery_depth_class"],
+                      "has_price_payload": profile["has_price_payload"],
+                      "has_promo_payload": profile["has_promo_payload"],
+                      "missing_price_file": profile["missing_price_file"],
+                      "missing_promo_file": profile["missing_promo_file"],
                       "covered_line_count": covered_line_count,
                       "missing_line_count": row["resolved_missing_line_count"],
                       "coverage_display": f"{covered_line_count}/{selected_probe_size}",
@@ -7058,6 +7082,7 @@ jobs:
                       "should_surface_in_secondary_partial_store_section": relevance_classification in (
                           "comparison_ready_near_full_basket",
                           "small_format_partial_basket_store",
+                          "source_missing_target_store",
                           "recoverable_derivation_gap",
                           "recoverable_family_or_equivalence_gap",
                       ),
