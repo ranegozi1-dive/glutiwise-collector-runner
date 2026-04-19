@@ -72,6 +72,7 @@ jobs:
       SOURCE_MAX_AGE_HOURS: "48"
       ARTIFACT_RETENTION_DAYS: "1"
       DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER: "12"
+      SHUFERSAL_DOWNLOAD_TIMEOUT_MINUTES: "14"
       DOWNLOAD_RETRY_ATTEMPTS: "2"
       LOCKED_MVP_STORE_LIMIT: "29"
       MAX_TARGET_STORES_SAFE: "29"
@@ -174,12 +175,12 @@ jobs:
           fi
 
       - name: Download SHUFERSAL files
-        timeout-minutes: 16
+        timeout-minutes: 18
         continue-on-error: true
         run: |
           set -euo pipefail
           SCRAPER="SHUFERSAL"
-          DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER="${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER:-12}"
+          DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER="${SHUFERSAL_DOWNLOAD_TIMEOUT_MINUTES:-14}"
           DOWNLOAD_RETRY_ATTEMPTS="${DOWNLOAD_RETRY_ATTEMPTS:-2}"
           LAST_EXIT_CODE=0
           LAST_DURATION_SECONDS=0
