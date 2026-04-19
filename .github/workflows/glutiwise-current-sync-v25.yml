@@ -7065,6 +7065,9 @@ jobs:
                       "recoverable_derivation_gap",
                       "recoverable_family_or_equivalence_gap",
                   )
+                  should_surface_in_tertiary_shallow_store_section = relevance_classification == (
+                      "genuinely_shallow_or_non_grocery_store"
+                  )
                   return {
                       "store_key": row["store_key"],
                       "retailer": row.get("retailer"),
@@ -7088,10 +7091,15 @@ jobs:
                       "top_diagnostic_bucket_counts": dict(bucket_counts.most_common(5)),
                       "reason_passed_or_failed": row["reason_passed_or_failed"],
                       "should_surface_in_secondary_partial_store_section": should_surface_in_secondary_partial_store_section,
+                      "should_surface_in_tertiary_shallow_store_section": should_surface_in_tertiary_shallow_store_section,
                       "comparison_visibility_tier": (
                           "secondary_partial_store_section"
                           if should_surface_in_secondary_partial_store_section
-                          else "hidden_by_default"
+                          else (
+                              "tertiary_shallow_store_section"
+                              if should_surface_in_tertiary_shallow_store_section
+                              else "hidden_by_default"
+                          )
                       ),
                   }
 
@@ -7159,6 +7167,11 @@ jobs:
                               1
                               for row in excluded_incomplete_store_cards_sorted_by_missing_count
                               if row["comparison_visibility_tier"] == "secondary_partial_store_section"
+                          ),
+                          "tertiary_shallow_store_count": sum(
+                              1
+                              for row in excluded_incomplete_store_cards_sorted_by_missing_count
+                              if row["comparison_visibility_tier"] == "tertiary_shallow_store_section"
                           ),
                           "hidden_incomplete_store_count": sum(
                               1
