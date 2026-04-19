@@ -7026,6 +7026,7 @@ jobs:
                       "retailer": row.get("retailer"),
                       "city": row.get("city"),
                       "fulfillment_mode": fulfillment_mode,
+                      "comparison_visibility_tier": "primary_full_basket_results",
                       "comparison_card_state": (
                           "full_basket"
                           if row["complete_with_budget_alternatives"]
@@ -7057,6 +7058,13 @@ jobs:
                       basket_probe_name,
                   )
                   covered_line_count = max(0, selected_probe_size - row["resolved_missing_line_count"])
+                  should_surface_in_secondary_partial_store_section = relevance_classification in (
+                      "comparison_ready_near_full_basket",
+                      "small_format_partial_basket_store",
+                      "source_missing_target_store",
+                      "recoverable_derivation_gap",
+                      "recoverable_family_or_equivalence_gap",
+                  )
                   return {
                       "store_key": row["store_key"],
                       "retailer": row.get("retailer"),
@@ -7079,12 +7087,11 @@ jobs:
                       "top_unresolved_families": dict(family_counts.most_common(5)),
                       "top_diagnostic_bucket_counts": dict(bucket_counts.most_common(5)),
                       "reason_passed_or_failed": row["reason_passed_or_failed"],
-                      "should_surface_in_secondary_partial_store_section": relevance_classification in (
-                          "comparison_ready_near_full_basket",
-                          "small_format_partial_basket_store",
-                          "source_missing_target_store",
-                          "recoverable_derivation_gap",
-                          "recoverable_family_or_equivalence_gap",
+                      "should_surface_in_secondary_partial_store_section": should_surface_in_secondary_partial_store_section,
+                      "comparison_visibility_tier": (
+                          "secondary_partial_store_section"
+                          if should_surface_in_secondary_partial_store_section
+                          else "hidden_by_default"
                       ),
                   }
 
@@ -7102,6 +7109,19 @@ jobs:
                           row for row in scope_rows
                           if row["near_full_after_user_approved_alternatives"]
                           and not row["complete_with_budget_alternatives"]
+                      ]
+                      excluded_incomplete_store_cards_sorted_by_missing_count = [
+                          build_excluded_store_card(row)
+                          for row in sorted(
+                              (
+                                  row for row in scope_rows
+                                  if not row["near_full_after_user_approved_alternatives"]
+                              ),
+                              key=lambda row: (
+                                  row["resolved_missing_line_count"],
+                                  row["store_key"],
+                              ),
+                          )
                       ]
                       city_scope_breakdown[" + ".join(city_scope)] = {
                           "selected_city_count": len(city_scope),
@@ -7134,19 +7154,17 @@ jobs:
                               for row in scope_rows
                               if not row["near_full_after_user_approved_alternatives"]
                           ],
-                          "excluded_incomplete_store_cards_sorted_by_missing_count": [
-                              build_excluded_store_card(row)
-                              for row in sorted(
-                                  (
-                                      row for row in scope_rows
-                                      if not row["near_full_after_user_approved_alternatives"]
-                                  ),
-                                  key=lambda row: (
-                                      row["resolved_missing_line_count"],
-                                      row["store_key"],
-                                  ),
-                              )
-                          ],
+                          "excluded_incomplete_store_cards_sorted_by_missing_count": excluded_incomplete_store_cards_sorted_by_missing_count,
+                          "secondary_partial_store_count": sum(
+                              1
+                              for row in excluded_incomplete_store_cards_sorted_by_missing_count
+                              if row["comparison_visibility_tier"] == "secondary_partial_store_section"
+                          ),
+                          "hidden_incomplete_store_count": sum(
+                              1
+                              for row in excluded_incomplete_store_cards_sorted_by_missing_count
+                              if row["comparison_visibility_tier"] == "hidden_by_default"
+                          ),
                       }
               comparison_screen_store_cards_by_city_scope["basket_probes"][basket_probe_name] = city_scope_breakdown
           write_json(
