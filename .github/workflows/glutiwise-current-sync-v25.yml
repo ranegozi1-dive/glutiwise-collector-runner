@@ -342,6 +342,19 @@ jobs:
               return parent or "unknown"
 
           def parse_identity(filename: str):
+              shufersal_full_patterns = [
+                  (r"(?i)pricefull(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "price_full"),
+                  (r"(?i)promofull(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "promo_full"),
+                  (r"(?i)promo(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "promo"),
+              ]
+              for pattern, kind in shufersal_full_patterns:
+                  m = re.search(pattern, filename)
+                  if m:
+                      chain_id = m.group(1)
+                      store_id = m.group(3)
+                      source_ts = f"{m.group(4)}{m.group(5)}"
+                      return kind, chain_id, store_id, source_ts
+
               patterns = [
                   (r"(?i)pricefull(\d+)-(\d+)-(\d+)", "price_full"),
                   (r"(?i)promofull(\d+)-(\d+)-(\d+)", "promo_full"),
@@ -1351,6 +1364,18 @@ jobs:
           
           def parse_filename_identity(path: Path):
               name = path.name
+              shufersal_full_patterns = [
+                  (r"(?i)pricefull(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "price_full"),
+                  (r"(?i)promofull(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "promo_full"),
+                  (r"(?i)promo(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "promo"),
+              ]
+              for pattern, kind in shufersal_full_patterns:
+                  m = re.search(pattern, name)
+                  if m:
+                      chain_id = m.group(1)
+                      store_id = m.group(3)
+                      return kind, chain_id, store_id
+
               patterns = [
                   (r"(?i)pricefull(\d+)-(\d+)", "price_full"),
                   (r"(?i)promofull(\d+)-(\d+)", "promo_full"),
