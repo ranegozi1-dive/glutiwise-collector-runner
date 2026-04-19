@@ -40,7 +40,7 @@ on:
         default: ""
 
 concurrency:
-  group: glutiwise-current-sync-v25-recovery-live
+  group: glutiwise-current-sync-v25-recovery-live-2
   cancel-in-progress: false
 
 defaults:
@@ -6744,38 +6744,6 @@ jobs:
               )
               return relevance_classification, likely_gap_class, bucket_counts, family_counts, profile
 
-          def derive_source_completeness_state(profile: dict):
-              if (
-                  profile["missing_price_file"]
-                  and profile["missing_promo_file"]
-                  and not profile["has_price_payload"]
-                  and not profile["has_promo_payload"]
-              ):
-                  return "missing_price_and_promo"
-              if profile["missing_price_file"] and not profile["has_price_payload"]:
-                  return "missing_price_only"
-              if profile["missing_promo_file"] and not profile["has_promo_payload"]:
-                  return "missing_promo_only"
-              return "complete_price_and_promo"
-
-          def derive_store_basket_resolution_state(store_row: dict, relevance_classification: str):
-              if store_row["complete_with_budget_alternatives"]:
-                  if store_row["exact_baseline_coverage"]:
-                      return "full_basket_exact_only"
-                  if store_row["complete_with_user_approved_equivalents"]:
-                      return "full_basket_after_approved_equivalents"
-                  return "full_basket_with_budget_alternatives"
-              if store_row["near_full_after_user_approved_alternatives"]:
-                  return "near_full_after_approved_equivalents"
-              resolution_state_by_classification = {
-                  "source_missing_target_store": "partial_source_missing",
-                  "small_format_partial_basket_store": "partial_small_format",
-                  "recoverable_derivation_gap": "partial_recoverable_gap",
-                  "recoverable_family_or_equivalence_gap": "partial_recoverable_gap",
-                  "genuinely_shallow_or_non_grocery_store": "partial_shallow",
-              }
-              return resolution_state_by_classification.get(relevance_classification, "partial_other")
-
           basket_completion_readiness_summary = {
               "shadow_only": True,
               "publish_gate_impact": "none",
@@ -7060,17 +7028,12 @@ jobs:
                       row,
                       basket_probe_name,
                   )
-                  source_completeness_state = derive_source_completeness_state(profile)
                   if row["exact_baseline_coverage"]:
                       fulfillment_mode = "exact_only"
                   elif row["complete_with_user_approved_equivalents"]:
                       fulfillment_mode = "approved_equivalent_assisted"
                   else:
                       fulfillment_mode = "budget_alternative_assisted"
-                  store_basket_resolution_state = derive_store_basket_resolution_state(
-                      row,
-                      relevance_classification,
-                  )
                   covered_line_count = max(0, selected_probe_size - row["resolved_missing_line_count"])
                   comparison_screen_total = (
                       row["baseline_basket_total"]
@@ -7088,8 +7051,6 @@ jobs:
                       "retailer": row.get("retailer"),
                       "city": row.get("city"),
                       "fulfillment_mode": fulfillment_mode,
-                      "store_basket_resolution_state": store_basket_resolution_state,
-                      "source_completeness_state": source_completeness_state,
                       "comparison_visibility_tier": "primary_full_basket_results",
                       "comparison_card_state": (
                           "full_basket"
@@ -7121,7 +7082,6 @@ jobs:
                       row,
                       basket_probe_name,
                   )
-                  source_completeness_state = derive_source_completeness_state(profile)
                   covered_line_count = max(0, selected_probe_size - row["resolved_missing_line_count"])
                   should_surface_in_secondary_partial_store_section = relevance_classification in (
                       "comparison_ready_near_full_basket",
@@ -7133,17 +7093,11 @@ jobs:
                   should_surface_in_tertiary_shallow_store_section = relevance_classification == (
                       "genuinely_shallow_or_non_grocery_store"
                   )
-                  store_basket_resolution_state = derive_store_basket_resolution_state(
-                      row,
-                      relevance_classification,
-                  )
                   return {
                       "store_key": row["store_key"],
                       "retailer": row.get("retailer"),
                       "city": row.get("city"),
                       "relevance_classification": relevance_classification,
-                      "store_basket_resolution_state": store_basket_resolution_state,
-                      "source_completeness_state": source_completeness_state,
                       "likely_gap_class": likely_gap_class,
                       "store_format_hint": profile["store_format_hint"],
                       "grocery_depth_class": profile["grocery_depth_class"],
@@ -7205,7 +7159,6 @@ jobs:
                       city_scope_breakdown[" + ".join(city_scope)] = {
                           "selected_city_count": len(city_scope),
                           "store_count": len(scope_rows),
-                          "represented_store_count": len(scope_rows),
                           "full_store_cards_sorted_by_total": [
                               build_comparison_screen_store_card(row)
                               for row in sorted(
@@ -7250,7 +7203,6 @@ jobs:
                               for row in excluded_incomplete_store_cards_sorted_by_missing_count
                               if row["comparison_visibility_tier"] == "hidden_by_default"
                           ),
-                          "primary_visible_store_count": len(full_rows) + len(near_full_rows),
                       }
               comparison_screen_store_cards_by_city_scope["basket_probes"][basket_probe_name] = city_scope_breakdown
           write_json(
@@ -7277,19 +7229,12 @@ jobs:
                       row,
                       basket_probe_name,
                   )
-                  source_completeness_state = derive_source_completeness_state(profile)
-                  store_basket_resolution_state = derive_store_basket_resolution_state(
-                      row,
-                      relevance_classification,
-                  )
                   classification_counts[relevance_classification] += 1
                   classification_rows.append({
                       "store_key": row["store_key"],
                       "retailer": row.get("retailer"),
                       "city": row.get("city"),
                       "relevance_classification": relevance_classification,
-                      "store_basket_resolution_state": store_basket_resolution_state,
-                      "source_completeness_state": source_completeness_state,
                       "likely_gap_class": likely_gap_class,
                       "diagnostic_bucket_counts": dict(bucket_counts.most_common(5)),
                       "top_unresolved_families": dict(family_counts.most_common(5)),
