@@ -5272,9 +5272,8 @@ jobs:
               return "general_grocery"
 
           def build_store_relevance_profile(store_key: str):
-              normalized_store_key = clean_text(store_key)
-              coverage_row = price_store_coverage_by_store_key.get(normalized_store_key, {})
-              family_counter = curated_family_presence_by_store_key.get(normalized_store_key, Counter())
+              coverage_row = price_store_coverage_by_store_key.get(clean_text(store_key), {})
+              family_counter = curated_family_presence_by_store_key.get(clean_text(store_key), Counter())
               valid_price_rows = int(coverage_row.get("valid_price_rows") or 0)
               unique_barcodes = int(coverage_row.get("unique_barcodes") or 0)
               core_family_presence_count = sum(
@@ -5298,10 +5297,6 @@ jobs:
                   "grocery_depth_class": grocery_depth_class,
                   "valid_price_rows": valid_price_rows,
                   "unique_barcodes": unique_barcodes,
-                  "has_price_payload": normalized_store_key in price_store_key_set,
-                  "has_promo_payload": normalized_store_key in promo_store_key_set,
-                  "missing_price_file": normalized_store_key in missing_price_store_keys,
-                  "missing_promo_file": normalized_store_key in missing_promo_store_keys,
                   "core_basket_family_presence_count": core_family_presence_count,
                   "top_present_core_families": [
                       family_key
@@ -6683,9 +6678,7 @@ jobs:
                   basket_probe_name,
                   store_row["store_key"],
               )
-              if profile["missing_price_file"] or profile["missing_promo_file"] or not profile["has_price_payload"] or not profile["has_promo_payload"]:
-                  relevance_classification = "source_missing_target_store"
-              elif store_row["complete_with_budget_alternatives"]:
+              if store_row["complete_with_budget_alternatives"]:
                   relevance_classification = "comparison_ready_full_basket"
               elif store_row["near_full_after_user_approved_alternatives"]:
                   relevance_classification = "comparison_ready_near_full_basket"
@@ -7067,7 +7060,6 @@ jobs:
                           "small_format_partial_basket_store",
                           "recoverable_derivation_gap",
                           "recoverable_family_or_equivalence_gap",
-                          "source_missing_target_store",
                       ),
                   }
 
@@ -7157,9 +7149,7 @@ jobs:
                       basket_probe_name,
                       row["store_key"],
                   )
-                  if profile["missing_price_file"] or profile["missing_promo_file"] or not profile["has_price_payload"] or not profile["has_promo_payload"]:
-                      relevance_classification = "source_missing_target_store"
-                  elif row["complete_with_budget_alternatives"]:
+                  if row["complete_with_budget_alternatives"]:
                       relevance_classification = "comparison_ready_full_basket"
                   elif row["near_full_after_user_approved_alternatives"]:
                       relevance_classification = "comparison_ready_near_full_basket"
