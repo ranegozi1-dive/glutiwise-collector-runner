@@ -175,12 +175,12 @@ jobs:
           fi
 
       - name: Download SHUFERSAL files
-        timeout-minutes: 18
+        timeout-minutes: 22
         continue-on-error: true
         run: |
           set -euo pipefail
           SCRAPER="SHUFERSAL"
-          DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER="${SHUFERSAL_DOWNLOAD_TIMEOUT_MINUTES:-14}"
+          DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER="${SHUFERSAL_DOWNLOAD_TIMEOUT_MINUTES:-18}"
           DOWNLOAD_RETRY_ATTEMPTS="${DOWNLOAD_RETRY_ATTEMPTS:-2}"
           LAST_EXIT_CODE=0
           LAST_DURATION_SECONDS=0
