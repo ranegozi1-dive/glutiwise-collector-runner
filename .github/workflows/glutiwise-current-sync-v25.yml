@@ -5153,6 +5153,52 @@ jobs:
           }
           write_json(OUT_DIR / "comparison_source_contract.json", comparison_source_contract)
 
+          supabase_ingest_contract = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "intended_for_first_wet_run_planning": True,
+              "selected_city_scope_drives_visible_comparison_results": True,
+              "resolution_layers": {
+                  "exact_baseline": "same product resolution without user approval",
+                  "approved_equivalent": "very-close substitute that should only surface after explicit user approval in the cart screen",
+                  "budget_alternative": "lower-cost option that stays separate from baseline comparison and should only surface after explicit user approval",
+                  "unresolved": "line remains missing and must stay visible as a real gap",
+              },
+              "tables": {
+                  "products_current": {
+                      "purpose": "current normalized product metadata used for matching and user-visible catalog fields",
+                      "required_columns": ["barcode", "name", "category", "brand", "manufacturer", "gf_flag", "gf_verified", "substitute_group"],
+                      "primary_source_artifacts": ["product_payload_coverage.json", "comparison_source_contract.json"],
+                  },
+                  "stores_current": {
+                      "purpose": "current target store roster, city scope, and store relevance hints",
+                      "required_columns": ["store_key", "retailer", "city", "address", "store_format_hint", "grocery_depth_class", "relevance_classification"],
+                      "primary_source_artifacts": ["target_stores.csv", "store_relevance_classification_summary.json", "comparison_screen_store_cards_by_city_scope.json"],
+                  },
+                  "prices_current": {
+                      "purpose": "official current price rows per store and barcode",
+                      "required_columns": ["store_key", "barcode", "regular_price", "effective_price", "last_seen_at"],
+                      "primary_source_artifacts": ["comparison_source_contract.json", "source_freshness_summary.json", "download_stage_summary.json"],
+                  },
+                  "promotions_current": {
+                      "purpose": "current promotion header rows tied to stores and promotion identifiers",
+                      "required_columns": ["promotion_key", "store_key", "description", "last_seen_at"],
+                      "primary_source_artifacts": ["promotion_items_write_plan.json", "download_stage_summary.json"],
+                  },
+                  "basket_store_cards_current": {
+                      "purpose": "store-level comparison cards for the approved basket inside the selected city scope",
+                      "required_columns": ["basket_probe_name", "city_scope", "store_key", "comparison_card_state", "fulfillment_mode", "covered_line_count", "missing_line_count", "comparison_screen_total"],
+                      "primary_source_artifacts": ["comparison_screen_store_cards_by_city_scope.json", "comparison_screen_readiness_summary.json"],
+                  },
+                  "basket_offer_coverage_current": {
+                      "purpose": "city-scoped offer summaries that explain which exact lines need approval and which offers help completion",
+                      "required_columns": ["basket_probe_name", "city_scope", "source_item_id", "recommended_offer_layer", "recommended_offer_role", "helped_full_completion_store_count"],
+                      "primary_source_artifacts": ["cart_summary_offer_coverage_by_city_scope.json", "cart_offer_completion_gain_summary.json"],
+                  },
+              },
+          }
+          write_json(OUT_DIR / "supabase_ingest_contract.json", supabase_ingest_contract)
+
           shadow_store_rows_by_family = defaultdict(lambda: defaultdict(list))
           shadow_store_rows_by_equivalence_group = defaultdict(lambda: defaultdict(list))
           shadow_store_rows_by_same_product_key = defaultdict(lambda: defaultdict(list))
@@ -8285,6 +8331,7 @@ jobs:
             out/basket_shadow_root_cause_summary.json
             out/comparison_source_coverage_audit.json
             out/comparison_source_contract.json
+            out/supabase_ingest_contract.json
             out/non_exact_upgrade_impact_summary.json
             out/source_freshness_by_store.csv
             out/source_freshness_summary.json
