@@ -1,9 +1,6 @@
 name: GlutiWise Current Sync to Supabase v26
 
 on:
-  schedule:
-    # GitHub Actions cron uses UTC. 04:17 UTC avoids the top-of-hour queue and gives a stable daily run.
-    - cron: "17 4 * * *"
   workflow_dispatch:
     inputs:
       write_to_supabase:
@@ -40,7 +37,8 @@ on:
         default: ""
 
 concurrency:
-  group: glutiwise-current-sync-v26-live
+  # Keep each manual dry-run independent so an older stuck queued run cannot poison the next one.
+  group: glutiwise-current-sync-v26-${{ github.ref_name }}-${{ github.run_id }}
   cancel-in-progress: false
 
 defaults:
@@ -72,6 +70,7 @@ jobs:
       SOURCE_MAX_AGE_HOURS: "48"
       ARTIFACT_RETENTION_DAYS: "1"
       DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER: "12"
+      SHUFERSAL_DOWNLOAD_TIMEOUT_MINUTES: "18"
       DOWNLOAD_RETRY_ATTEMPTS: "2"
       LOCKED_MVP_STORE_LIMIT: "29"
       MAX_TARGET_STORES_SAFE: "29"
@@ -174,12 +173,12 @@ jobs:
           fi
 
       - name: Download SHUFERSAL files
-        timeout-minutes: 16
+        timeout-minutes: 22
         continue-on-error: true
         run: |
           set -euo pipefail
           SCRAPER="SHUFERSAL"
-          DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER="${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER:-12}"
+          DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER="${SHUFERSAL_DOWNLOAD_TIMEOUT_MINUTES:-18}"
           DOWNLOAD_RETRY_ATTEMPTS="${DOWNLOAD_RETRY_ATTEMPTS:-2}"
           LAST_EXIT_CODE=0
           LAST_DURATION_SECONDS=0
@@ -341,6 +340,19 @@ jobs:
               return parent or "unknown"
 
           def parse_identity(filename: str):
+              shufersal_full_patterns = [
+                  (r"(?i)pricefull(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "price_full"),
+                  (r"(?i)promofull(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "promo_full"),
+                  (r"(?i)promo(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "promo"),
+              ]
+              for pattern, kind in shufersal_full_patterns:
+                  m = re.search(pattern, filename)
+                  if m:
+                      chain_id = m.group(1)
+                      store_id = m.group(3)
+                      source_ts = f"{m.group(4)}{m.group(5)}"
+                      return kind, chain_id, store_id, source_ts
+
               patterns = [
                   (r"(?i)pricefull(\d+)-(\d+)-(\d+)", "price_full"),
                   (r"(?i)promofull(\d+)-(\d+)-(\d+)", "promo_full"),
@@ -454,9 +466,9 @@ jobs:
           
           TARGET_RETAILERS = ("shufersal", "ramilevy", "yohananof")
           LOCKED_MVP_CITIES = (
-              "δεγ δωψεο",
-              "λτψ ραΰ",
-              "ψξϊ δωψεο",
+              "Χ”Χ•Χ“ Χ”Χ©Χ¨Χ•Χ",
+              "Χ›Χ¤Χ¨ Χ΅Χ‘Χ",
+              "Χ¨ΧΧª Χ”Χ©Χ¨Χ•Χ",
           )
           SCOPE_PROFILES = {
               "free_mvp_3_cities": LOCKED_MVP_CITIES,
@@ -561,7 +573,7 @@ jobs:
           
           def clean_lookup_text(value) -> str:
               text = clean_text(value)
-              text = text.replace('"', ' ').replace("Χ", " ").replace("'", " ").replace("Ψ", " ")
+              text = text.replace('"', ' ').replace("Χ³", " ").replace("'", " ").replace("Χ΄", " ")
               text = text.replace("-", " ").replace("/", " ").replace("\\", " ")
               text = re.sub(r"\s+", " ", text).strip()
               return text
@@ -574,10 +586,10 @@ jobs:
               if not v:
                   return True
               placeholders = {
-                  "unknown", "μΰ ιγες", "μΰ ιγεςδ", "null", "none", "n/a", "na",
-                  "μμΰ", "0", "---", "-", "_none_", "_off_not_found_", "_off_no_brand_",
+                  "unknown", "ΧΧ Χ™Χ“Χ•ΧΆ", "ΧΧ Χ™Χ“Χ•ΧΆΧ”", "null", "none", "n/a", "na",
+                  "ΧΧΧ", "0", "---", "-", "_none_", "_off_not_found_", "_off_no_brand_",
                   "_off_no_manufacturer_", "not found", "brand not found", "manufacturer not found",
-                  "ξωϊπδ", "λμμι", "generic", "nan", "nil",
+                  "ΧΧ©ΧªΧ Χ”", "Χ›ΧΧΧ™", "generic", "nan", "nil",
               }
               if v in placeholders:
                   return True
@@ -697,8 +709,8 @@ jobs:
               if not v:
                   return True
               generic_tokens = {
-                  "αςξ", "ας ξ", "ηαψδ", "ϊςωιεϊ", "ξτςμ", "μεβιρθιχδ", "ωιεεχ", "ιαεΰ", "ιαεΰ εωιεεχ",
-                  "χξςεπΰεϊ", "ψωϊ", "ξζεο", "τψξφαθιεϊ", "ξςαγεϊ", "group", "ltd", "inc", "corp", "co"
+                  "Χ‘ΧΆΧ", "Χ‘ΧΆ Χ", "Χ—Χ‘Χ¨Χ”", "ΧªΧΆΧ©Χ™Χ•Χª", "ΧΧ¤ΧΆΧ", "ΧΧ•Χ’Χ™Χ΅ΧΧ™Χ§Χ”", "Χ©Χ™Χ•Χ•Χ§", "Χ™Χ‘Χ•Χ", "Χ™Χ‘Χ•Χ Χ•Χ©Χ™Χ•Χ•Χ§",
+                  "Χ§ΧΧΆΧ•Χ ΧΧ•Χª", "Χ¨Χ©Χª", "ΧΧ–Χ•Χ", "Χ¤Χ¨ΧΧ¦Χ‘ΧΧ™Χ•Χª", "ΧΧΆΧ‘Χ“Χ•Χª", "group", "ltd", "inc", "corp", "co"
               }
               return any(tok in v for tok in generic_tokens)
           
@@ -820,11 +832,11 @@ jobs:
           def retailer_from(chain_id: str, chain_name: str):
               cid = clean_text(chain_id)
               cname = clean_text(chain_name)
-              if "ωετψρμ" in cname:
+              if "Χ©Χ•Χ¤Χ¨Χ΅Χ" in cname:
                   return "shufersal"
-              if "ψξι" in cname and "μει" in cname:
+              if "Χ¨ΧΧ™" in cname and "ΧΧ•Χ™" in cname:
                   return "ramilevy"
-              if "ιεηππεσ" in cname or "YOHANANOF" in cname.upper():
+              if "Χ™Χ•Χ—Χ Χ Χ•Χ£" in cname or "YOHANANOF" in cname.upper():
                   return "yohananof"
               return CHAIN_ID_TO_RETAILER.get(cid)
           
@@ -868,30 +880,30 @@ jobs:
                       continue
                   text = clean_lookup_text(raw)
                   text_no_space = collapse_for_match(raw)
-                  tokens = [tok for tok in re.split(r"[^A-Za-zΰ-ϊ0-9]+", text) if tok]
+                  tokens = [tok for tok in re.split(r"[^A-Za-zΧ-Χª0-9]+", text) if tok]
                   token_set = set(tokens)
                   source_matches = []
-                  if ("δεγ" in token_set and "δωψεο" in token_set) or "δεγδωψεο" in text_no_space:
-                      source_matches.append("δεγ δωψεο")
-                  if ("λτψ" in token_set and "ραΰ" in token_set) or "λτψραΰ" in text_no_space or 'λ"ρ' in raw or 'λΨρ' in raw:
-                      source_matches.append("λτψ ραΰ")
+                  if ("Χ”Χ•Χ“" in token_set and "Χ”Χ©Χ¨Χ•Χ" in token_set) or "Χ”Χ•Χ“Χ”Χ©Χ¨Χ•Χ" in text_no_space:
+                      source_matches.append("Χ”Χ•Χ“ Χ”Χ©Χ¨Χ•Χ")
+                  if ("Χ›Χ¤Χ¨" in token_set and "Χ΅Χ‘Χ" in token_set) or "Χ›Χ¤Χ¨Χ΅Χ‘Χ" in text_no_space or 'Χ›"Χ΅' in raw or 'Χ›Χ΄Χ΅' in raw:
+                      source_matches.append("Χ›Χ¤Χ¨ Χ΅Χ‘Χ")
                   pt_abbrev = (
-                      'τ"ϊ' in raw
-                      or 'τΨϊ' in raw
-                      or 'τϊ' in token_set
-                      or ('τ' in token_set and 'ϊ' in token_set)
+                      'Χ¤"Χª' in raw
+                      or 'Χ¤Χ΄Χª' in raw
+                      or 'Χ¤Χª' in token_set
+                      or ('Χ¤' in token_set and 'Χª' in token_set)
                   )
                   if (
-                      ("τϊη" in token_set and ("ϊχεδ" in token_set or "ϊχεεδ" in token_set))
-                      or "τϊηϊχεδ" in text_no_space
-                      or "τϊηϊχεεδ" in text_no_space
+                      ("Χ¤ΧªΧ—" in token_set and ("ΧªΧ§Χ•Χ”" in token_set or "ΧªΧ§Χ•Χ•Χ”" in token_set))
+                      or "Χ¤ΧªΧ—ΧªΧ§Χ•Χ”" in text_no_space
+                      or "Χ¤ΧªΧ—ΧªΧ§Χ•Χ•Χ”" in text_no_space
                       or pt_abbrev
                   ):
-                      source_matches.append("τϊη ϊχεεδ")
-                  if ("ψξϊ" in token_set and "δωψεο" in token_set) or "ψξϊδωψεο" in text_no_space:
-                      source_matches.append("ψξϊ δωψεο")
-                  if "ψςππδ" in token_set or "ψςππδ" in text_no_space:
-                      source_matches.append("ψςππδ")
+                      source_matches.append("Χ¤ΧªΧ— ΧªΧ§Χ•Χ•Χ”")
+                  if ("Χ¨ΧΧª" in token_set and "Χ”Χ©Χ¨Χ•Χ" in token_set) or "Χ¨ΧΧªΧ”Χ©Χ¨Χ•Χ" in text_no_space:
+                      source_matches.append("Χ¨ΧΧª Χ”Χ©Χ¨Χ•Χ")
+                  if "Χ¨ΧΆΧ Χ Χ”" in token_set or "Χ¨ΧΆΧ Χ Χ”" in text_no_space:
+                      source_matches.append("Χ¨ΧΆΧ Χ Χ”")
                   for city in source_matches:
                       matches.append(city)
                       reasons.append(f"{source_name}:{raw}")
@@ -927,7 +939,7 @@ jobs:
                   v = clean_text(value)
                   return (
                       0 if text_is_placeholder(v) else 1,
-                      1 if re.search(r"[A-Za-zΰ-ϊ]", v) else 0,
+                      1 if re.search(r"[A-Za-zΧ-Χª]", v) else 0,
                       len(v),
                       v.count(" "),
                   )
@@ -937,9 +949,9 @@ jobs:
               text = " ".join(filter(None, [clean_text(title), clean_text(description), clean_text(benefit_text)])).lower()
               if is_club:
                   return "club"
-              if re.search(r"\b[2-9]\s*α", text) or "χπδ" in text or "ξϊπδ" in text or "δωπι" in text:
+              if re.search(r"\b[2-9]\s*Χ‘", text) or "Χ§Χ Χ”" in text or "ΧΧªΧ Χ”" in text or "Χ”Χ©Χ Χ™" in text:
                   return "multibuy"
-              if "%" in text or "δπηδ" in text:
+              if "%" in text or "Χ”Χ Χ—Χ”" in text:
                   return "discount"
               if text:
                   return "simple"
@@ -968,9 +980,9 @@ jobs:
               raw = clean_text(value).lower()
               if not raw:
                   return None
-              if raw in {"1", "true", "t", "yes", "y", "λο"}:
+              if raw in {"1", "true", "t", "yes", "y", "Χ›Χ"}:
                   return True
-              if raw in {"0", "false", "f", "no", "n", "μΰ"}:
+              if raw in {"0", "false", "f", "no", "n", "ΧΧ"}:
                   return False
               return None
 
@@ -989,30 +1001,30 @@ jobs:
                   .lower()
                   .replace('"', '')
                   .replace("'", "")
-                  .replace("Χ", "")
-                  .replace("Ψ", "")
+                  .replace("Χ³", "")
+                  .replace("Χ΄", "")
               )
               aliases = {
                   "kg": ("weight", 1000.0, "g"),
                   "g": ("weight", 1.0, "g"),
                   "gr": ("weight", 1.0, "g"),
-                  "β": ("weight", 1.0, "g"),
-                  "χβ": ("weight", 1000.0, "g"),
-                  "βψ": ("weight", 1.0, "g"),
-                  "βψν": ("weight", 1.0, "g"),
+                  "Χ’": ("weight", 1.0, "g"),
+                  "Χ§Χ’": ("weight", 1000.0, "g"),
+                  "Χ’Χ¨": ("weight", 1.0, "g"),
+                  "Χ’Χ¨Χ": ("weight", 1.0, "g"),
                   "l": ("volume", 1000.0, "ml"),
                   "lt": ("volume", 1000.0, "ml"),
                   "liter": ("volume", 1000.0, "ml"),
                   "litre": ("volume", 1000.0, "ml"),
                   "ml": ("volume", 1.0, "ml"),
-                  "μ": ("volume", 1000.0, "ml"),
-                  "μιθψ": ("volume", 1000.0, "ml"),
-                  "ξμ": ("volume", 1.0, "ml"),
+                  "Χ": ("volume", 1000.0, "ml"),
+                  "ΧΧ™ΧΧ¨": ("volume", 1000.0, "ml"),
+                  "ΧΧ": ("volume", 1.0, "ml"),
               }
               return aliases.get(unit)
 
           def pack_unit_pattern():
-              return r"(?:kg|g|gr|ml|l|lt|liter|litre|χ(?:[\"ΧΨ]+)?β|βψν|βψ|β|μιθψ|μ|ξ(?:[\"ΧΨ]+)?μ|ξμ)"
+              return r"(?:kg|g|gr|ml|l|lt|liter|litre|Χ§(?:[\"Χ³Χ΄]+)?Χ’|Χ’Χ¨Χ|Χ’Χ¨|Χ’|ΧΧ™ΧΧ¨|Χ|Χ(?:[\"Χ³Χ΄]+)?Χ|ΧΧ)"
 
           def parse_pack_signature(name: str):
               text = clean_lookup_text(name).lower().replace(",", ".")
@@ -1101,9 +1113,9 @@ jobs:
               if not raw:
                   return None, None
               patterns = [
-                  r"(?<!\d)(\d{1,2})\s*α[- ]?(\d{1,4}(?:\.\d{1,2})?)",
-                  r"χπδ\s*(\d{1,2}).{0,12}?α[- ]?(\d{1,4}(?:\.\d{1,2})?)",
-                  r"(?:ξΰψζ|ιη[ι']?)\s*(\d{1,2}).{0,12}?α[- ]?(\d{1,4}(?:\.\d{1,2})?)",
+                  r"(?<!\d)(\d{1,2})\s*Χ‘[- ]?(\d{1,4}(?:\.\d{1,2})?)",
+                  r"Χ§Χ Χ”\s*(\d{1,2}).{0,12}?Χ‘[- ]?(\d{1,4}(?:\.\d{1,2})?)",
+                  r"(?:ΧΧΧ¨Χ–|Χ™Χ—[Χ™']?)\s*(\d{1,2}).{0,12}?Χ‘[- ]?(\d{1,4}(?:\.\d{1,2})?)",
               ]
               for pattern in patterns:
                   match = re.search(pattern, raw)
@@ -1144,7 +1156,7 @@ jobs:
                   if match:
                       discount_percent = safe_percent(match.group(1))
               if promotion_type != "multibuy" and not fixed_price:
-                  match = re.search(r"(?:α-|α|¤)\s*(\d{1,4}(?:[\.,]\d{1,2})?)\s*¤?", merged_text.replace(",", "."))
+                  match = re.search(r"(?:Χ‘-|Χ‘|β‚ª)\s*(\d{1,4}(?:[\.,]\d{1,2})?)\s*β‚ª?", merged_text.replace(",", "."))
                   if match:
                       fixed_price = safe_decimal(match.group(1))
               return {
@@ -1350,6 +1362,18 @@ jobs:
           
           def parse_filename_identity(path: Path):
               name = path.name
+              shufersal_full_patterns = [
+                  (r"(?i)pricefull(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "price_full"),
+                  (r"(?i)promofull(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "promo_full"),
+                  (r"(?i)promo(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "promo"),
+              ]
+              for pattern, kind in shufersal_full_patterns:
+                  m = re.search(pattern, name)
+                  if m:
+                      chain_id = m.group(1)
+                      store_id = m.group(3)
+                      return kind, chain_id, store_id
+
               patterns = [
                   (r"(?i)pricefull(\d+)-(\d+)", "price_full"),
                   (r"(?i)promofull(\d+)-(\d+)", "promo_full"),
@@ -1899,7 +1923,7 @@ jobs:
                       ]
                       for marker in club_markers:
                           marker_text = clean_text(marker).lower()
-                          if marker_text in {"1", "true", "yes"} or "ξεςγεο" in marker_text or "club" in marker_text:
+                          if marker_text in {"1", "true", "yes"} or "ΧΧ•ΧΆΧ“Χ•Χ" in marker_text or "club" in marker_text:
                               is_club = True
                               break
                       start_at = parse_datetime_value(
@@ -2655,6 +2679,10 @@ jobs:
               missing_price_store_keys,
               missing_promo_store_keys,
           )
+          target_coverage_by_store_key = {
+              clean_text(row["store_key"]): row
+              for row in target_coverage_by_store_rows
+          }
           target_coverage_by_city_retailer_rows = summarize_target_coverage_by_city_retailer(
               discovered_target_stores,
               successful_price_store_keys,
@@ -3104,17 +3132,17 @@ jobs:
                   "beauty", "cosmetic", "pharm", "drug", "care", "clean", "laundry", "diaper", "toilet", "paper",
                   "pet", "dog", "cat", "household", "kitchen", "bath", "electrical", "toy",
                   "snack", "chips", "candy", "chocolate", "cookie", "biscuit", "energy", "cola", "soda", "beer", "wine",
-                  "αιεθι", "χερξθ", "τΰψν", "θεΰμθ", "ηιϊεμ", "πιχει", "λαιρδ", "ηιεϊ", "ξηξγ", "αιϊ", "θιτεη",
-                  "ηθισ", "ηθιτιν", "πωπεω", "πωπεωιν", "ξξϊχ", "ξξϊχιν", "ωεχεμγ", "ςεβιδ", "ςεβιεϊ", "αιρχεειθ", "αιρχεειθιν",
-                  "ξωχδ ΰπψβιδ", "αιψδ", "ιιο",
+                  "Χ‘Χ™Χ•ΧΧ™", "Χ§Χ•Χ΅ΧΧ", "Χ¤ΧΧ¨Χ", "ΧΧ•ΧΧΧ", "Χ—Χ™ΧªΧ•Χ", "Χ Χ™Χ§Χ•Χ™", "Χ›Χ‘Χ™Χ΅Χ”", "Χ—Χ™Χ•Χª", "ΧΧ—ΧΧ“", "Χ‘Χ™Χª", "ΧΧ™Χ¤Χ•Χ—",
+                  "Χ—ΧΧ™Χ£", "Χ—ΧΧ™Χ¤Χ™Χ", "Χ Χ©Χ Χ•Χ©", "Χ Χ©Χ Χ•Χ©Χ™Χ", "ΧΧΧªΧ§", "ΧΧΧªΧ§Χ™Χ", "Χ©Χ•Χ§Χ•ΧΧ“", "ΧΆΧ•Χ’Χ™Χ”", "ΧΆΧ•Χ’Χ™Χ•Χª", "Χ‘Χ™Χ΅Χ§Χ•Χ•Χ™Χ", "Χ‘Χ™Χ΅Χ§Χ•Χ•Χ™ΧΧ™Χ",
+                  "ΧΧ©Χ§Χ” ΧΧ Χ¨Χ’Χ™Χ”", "Χ‘Χ™Χ¨Χ”", "Χ™Χ™Χ",
               }
               include_tokens = {
                   "food", "grocery", "bread", "bakery", "milk", "dairy", "cheese", "yogurt", "egg", "eggs",
                   "cereal", "oats", "rice", "pasta", "flour", "oil", "sauce", "vegetable", "fruit", "frozen vegetable",
                   "meat", "fish", "chicken", "legume", "bean", "lentil", "tuna", "water",
-                  "ξζεο", "ξλεμϊ", "μην", "ξΰτδ", "ημα", "ξεφψι ημα", "βαιπδ", "ιεβεψθ", "αιφδ", "αιφιν", "γβπι", "ωιαεμϊ", "ΰεψζ",
-                  "τρθδ", "χξη", "ωξο", "ψεθα", "ιψχ", "ιψχεϊ", "τιψεϊ", "τιψεϊ ειψχεϊ", "χτεΰ", "χτεΰιν", "αωψ", "γβ", "ςεσ",
-                  "χθπιεϊ", "ωςεςιϊ", "ςγωιν", "θεπδ", "ξιν",
+                  "ΧΧ–Χ•Χ", "ΧΧ›Χ•ΧΧª", "ΧΧ—Χ", "ΧΧΧ¤Χ”", "Χ—ΧΧ‘", "ΧΧ•Χ¦Χ¨Χ™ Χ—ΧΧ‘", "Χ’Χ‘Χ™Χ Χ”", "Χ™Χ•Χ’Χ•Χ¨Χ", "Χ‘Χ™Χ¦Χ”", "Χ‘Χ™Χ¦Χ™Χ", "Χ“Χ’Χ Χ™", "Χ©Χ™Χ‘Χ•ΧΧª", "ΧΧ•Χ¨Χ–",
+                  "Χ¤Χ΅ΧΧ”", "Χ§ΧΧ—", "Χ©ΧΧ", "Χ¨Χ•ΧΧ‘", "Χ™Χ¨Χ§", "Χ™Χ¨Χ§Χ•Χª", "Χ¤Χ™Χ¨Χ•Χª", "Χ¤Χ™Χ¨Χ•Χª Χ•Χ™Χ¨Χ§Χ•Χª", "Χ§Χ¤Χ•Χ", "Χ§Χ¤Χ•ΧΧ™Χ", "Χ‘Χ©Χ¨", "Χ“Χ’", "ΧΆΧ•Χ£",
+                  "Χ§ΧΧ Χ™Χ•Χª", "Χ©ΧΆΧ•ΧΆΧ™Χª", "ΧΆΧ“Χ©Χ™Χ", "ΧΧ•Χ Χ”", "ΧΧ™Χ",
               }
               if any(token in text for token in exclude_tokens):
                   return False
@@ -3933,37 +3961,37 @@ jobs:
 
           brand_identity_stopwords = {
               "ltd", "inc", "co", "company", "corp", "foods", "food", "group",
-              "αςξ", "ας\"ξ", "ηαψδ", "ϊςωιεϊ", "ξζεο", "ιωψΰμ",
+              "Χ‘ΧΆΧ", "Χ‘ΧΆ\"Χ", "Χ—Χ‘Χ¨Χ”", "ΧªΧΆΧ©Χ™Χ•Χª", "ΧΧ–Χ•Χ", "Χ™Χ©Χ¨ΧΧ",
           }
           family_signature_stopwords = {
-              "ξΰψζ", "ιη", "ιηιγεϊ", "ΰψιζδ", "pack", "packs", "pcs", "piece", "pieces",
-              "classic", "extra", "original", "new", "ηγω",
+              "ΧΧΧ¨Χ–", "Χ™Χ—", "Χ™Χ—Χ™Χ“Χ•Χª", "ΧΧ¨Χ™Χ–Χ”", "pack", "packs", "pcs", "piece", "pieces",
+              "classic", "extra", "original", "new", "Χ—Χ“Χ©",
           }
           explicit_non_food_tokens = {
-              "τιιψι", "fairy", "πιχει", "πιχιεο", "λαιρδ", "θεΰμθ", "ηιϊεμ", "αιεθι", "χερξθ", "τΰψν",
+              "Χ¤Χ™Χ™Χ¨Χ™", "fairy", "Χ Χ™Χ§Χ•Χ™", "Χ Χ™Χ§Χ™Χ•Χ", "Χ›Χ‘Χ™Χ΅Χ”", "ΧΧ•ΧΧΧ", "Χ—Χ™ΧªΧ•Χ", "Χ‘Χ™Χ•ΧΧ™", "Χ§Χ•Χ΅ΧΧ", "Χ¤ΧΧ¨Χ",
               "beauty", "cosmetic", "pharm", "drug", "clean", "laundry", "diaper", "toilet", "paper",
               "pet", "dog", "cat", "household", "bath",
           }
           non_core_food_tokens = {
-              "αξαδ", "ΰτψετε", "φιθερ", "φ'ιθερ", "χμιχ", "ξιμχι", "γπιΰμδ", "ειθξιπφιχ", "χεψπτμχρ λψιεϊ",
-              "ηθισ", "ηθιτιν", "πωπεω", "πωπεωιν", "ξξϊχ", "ξξϊχιν", "ωεχεμγ", "ςεβιδ", "ςεβιεϊ", "αιρχεειθ", "αιρχεειθιν",
-              "ξωχδ ΰπψβιδ", "χεμδ", "ρεγδ", "αιψδ", "ιιο", "snack", "chips", "candy", "chocolate", "cookie", "biscuit",
+              "Χ‘ΧΧ‘Χ”", "ΧΧ¤Χ¨Χ•Χ¤Χ•", "Χ¦Χ™ΧΧ•Χ΅", "Χ¦'Χ™ΧΧ•Χ΅", "Χ§ΧΧ™Χ§", "ΧΧ™ΧΧ§Χ™", "Χ“Χ Χ™ΧΧΧ”", "Χ•Χ™ΧΧΧ™Χ Χ¦Χ™Χ§", "Χ§Χ•Χ¨Χ Χ¤ΧΧ§Χ΅ Χ›Χ¨Χ™Χ•Χª",
+              "Χ—ΧΧ™Χ£", "Χ—ΧΧ™Χ¤Χ™Χ", "Χ Χ©Χ Χ•Χ©", "Χ Χ©Χ Χ•Χ©Χ™Χ", "ΧΧΧªΧ§", "ΧΧΧªΧ§Χ™Χ", "Χ©Χ•Χ§Χ•ΧΧ“", "ΧΆΧ•Χ’Χ™Χ”", "ΧΆΧ•Χ’Χ™Χ•Χª", "Χ‘Χ™Χ΅Χ§Χ•Χ•Χ™Χ", "Χ‘Χ™Χ΅Χ§Χ•Χ•Χ™ΧΧ™Χ",
+              "ΧΧ©Χ§Χ” ΧΧ Χ¨Χ’Χ™Χ”", "Χ§Χ•ΧΧ”", "Χ΅Χ•Χ“Χ”", "Χ‘Χ™Χ¨Χ”", "Χ™Χ™Χ", "snack", "chips", "candy", "chocolate", "cookie", "biscuit",
               "energy", "cola", "soda", "beer", "wine",
           }
           suspicious_category_keys = {
-              "", "ΰηψ", "other", "misc", "unknown", "1",
+              "", "ΧΧ—Χ¨", "other", "misc", "unknown", "1",
           }
           core_food_group_rules = [
-              ("bread_bakery", ("μην", "τιϊδ", "ημδ", "θεψθιδ", "bread", "pita", "tortilla")),
-              ("milk_dairy_basic", ("ημα", "βαιπδ", "ιεβεψθ", "χεθβ", "μαπδ", "milk", "cheese", "yogurt", "cottage")),
-              ("eggs_basic", ("αιφδ", "αιφιν", "egg", "eggs")),
-              ("cereal_breakfast", ("γβπι", "χεψπτμχρ", "ωιαεμϊ", "βψπεμδ", "cereal", "cornflakes", "oats", "granola")),
-              ("pasta_rice_grains", ("τρθδ", "ΰθψιεϊ", "ΰεψζ", "χερχερ", "pasta", "noodles", "rice", "couscous")),
-              ("pantry_oil_sauce", ("ωξο", "ψεθα", "θηιπδ", "ςβαπιεϊ", "tomato", "oil", "sauce", "tahini")),
-              ("protein_canned_legumes", ("θεπδ", "χθπιεϊ", "ωςεςιϊ", "ςγωιν", "ηεξερ", "tuna", "beans", "lentils", "legume")),
-              ("meat_poultry_fish", ("ςεσ", "αωψ", "γβ", "πχπιχ", "τρθψξδ", "chicken", "meat", "fish", "sausage", "pastrami")),
-              ("water_basic", ("ξιν", "ξιν ξιπψμιιν", "water")),
-              ("frozen_vegetables", ("χτεΰ", "χτεΰιν", "ιψχεϊ χτεΰιν", "frozen vegetable")),
+              ("bread_bakery", ("ΧΧ—Χ", "Χ¤Χ™ΧªΧ”", "Χ—ΧΧ”", "ΧΧ•Χ¨ΧΧ™Χ”", "bread", "pita", "tortilla")),
+              ("milk_dairy_basic", ("Χ—ΧΧ‘", "Χ’Χ‘Χ™Χ Χ”", "Χ™Χ•Χ’Χ•Χ¨Χ", "Χ§Χ•ΧΧ’", "ΧΧ‘Χ Χ”", "milk", "cheese", "yogurt", "cottage")),
+              ("eggs_basic", ("Χ‘Χ™Χ¦Χ”", "Χ‘Χ™Χ¦Χ™Χ", "egg", "eggs")),
+              ("cereal_breakfast", ("Χ“Χ’Χ Χ™", "Χ§Χ•Χ¨Χ Χ¤ΧΧ§Χ΅", "Χ©Χ™Χ‘Χ•ΧΧª", "Χ’Χ¨Χ Χ•ΧΧ”", "cereal", "cornflakes", "oats", "granola")),
+              ("pasta_rice_grains", ("Χ¤Χ΅ΧΧ”", "ΧΧΧ¨Χ™Χ•Χª", "ΧΧ•Χ¨Χ–", "Χ§Χ•Χ΅Χ§Χ•Χ΅", "pasta", "noodles", "rice", "couscous")),
+              ("pantry_oil_sauce", ("Χ©ΧΧ", "Χ¨Χ•ΧΧ‘", "ΧΧ—Χ™Χ Χ”", "ΧΆΧ’Χ‘Χ Χ™Χ•Χª", "tomato", "oil", "sauce", "tahini")),
+              ("protein_canned_legumes", ("ΧΧ•Χ Χ”", "Χ§ΧΧ Χ™Χ•Χª", "Χ©ΧΆΧ•ΧΆΧ™Χª", "ΧΆΧ“Χ©Χ™Χ", "Χ—Χ•ΧΧ•Χ΅", "tuna", "beans", "lentils", "legume")),
+              ("meat_poultry_fish", ("ΧΆΧ•Χ£", "Χ‘Χ©Χ¨", "Χ“Χ’", "Χ Χ§Χ Χ™Χ§", "Χ¤Χ΅ΧΧ¨ΧΧ”", "chicken", "meat", "fish", "sausage", "pastrami")),
+              ("water_basic", ("ΧΧ™Χ", "ΧΧ™Χ ΧΧ™Χ Χ¨ΧΧ™Χ™Χ", "water")),
+              ("frozen_vegetables", ("Χ§Χ¤Χ•Χ", "Χ§Χ¤Χ•ΧΧ™Χ", "Χ™Χ¨Χ§Χ•Χª Χ§Χ¤Χ•ΧΧ™Χ", "frozen vegetable")),
           ]
           core_food_group_priority = {
               group_name: index for index, (group_name, _) in enumerate(core_food_group_rules, start=1)
@@ -3974,10 +4002,10 @@ jobs:
                   "comparison_family_key": "bread_basic",
                   "why": "staple bread items only; excludes pretzels, breadcrumbs, cakes, and snack bakery",
                   "probe_priority": 1,
-                  "allowed_category_tokens": ["μην", "ξΰτιν"],
-                  "required_any_tokens": ["μην", "τιϊδ", "ημδ", "bread", "pita", "challah"],
-                  "forbidden_tokens": ["αιιβμδ", "pretzel", "τιψεψι", "τψεψι", "crumb", "crumbs", "breadcrumbs", "χψεθεο", "χψεθεπιν", "ςεβ", "cake", "cookie", "biscuit", "ηθισ", "snack", "ωεχεμγ"],
-                  "identity_strip_tokens": ["μην", "τιϊδ", "ημδ", "bread", "pita", "challah"],
+                  "allowed_category_tokens": ["ΧΧ—Χ", "ΧΧΧ¤Χ™Χ"],
+                  "required_any_tokens": ["ΧΧ—Χ", "Χ¤Χ™ΧªΧ”", "Χ—ΧΧ”", "bread", "pita", "challah"],
+                  "forbidden_tokens": ["Χ‘Χ™Χ™Χ’ΧΧ”", "pretzel", "Χ¤Χ™Χ¨Χ•Χ¨Χ™", "Χ¤Χ¨Χ•Χ¨Χ™", "crumb", "crumbs", "breadcrumbs", "Χ§Χ¨Χ•ΧΧ•Χ", "Χ§Χ¨Χ•ΧΧ•Χ Χ™Χ", "ΧΆΧ•Χ’", "cake", "cookie", "biscuit", "Χ—ΧΧ™Χ£", "snack", "Χ©Χ•Χ§Χ•ΧΧ“"],
+                  "identity_strip_tokens": ["ΧΧ—Χ", "Χ¤Χ™ΧªΧ”", "Χ—ΧΧ”", "bread", "pita", "challah"],
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
@@ -4000,11 +4028,11 @@ jobs:
                   "comparison_family_key": "eggs",
                   "why": "shell eggs sold by count; canonical equivalence is count-based and does not require premium husbandry markers to match",
                   "probe_priority": 2,
-                  "allowed_category_tokens": ["αιφδ", "αιφιν", "egg", "eggs"],
-                  "required_any_tokens": ["αιφδ", "αιφιν", "egg", "eggs"],
+                  "allowed_category_tokens": ["Χ‘Χ™Χ¦Χ”", "Χ‘Χ™Χ¦Χ™Χ", "egg", "eggs"],
+                  "required_any_tokens": ["Χ‘Χ™Χ¦Χ”", "Χ‘Χ™Χ¦Χ™Χ", "egg", "eggs"],
                   "required_any_prefixes": ["\u05d1\u05d9\u05e6"],
-                  "forbidden_tokens": ["ωεχεμγ", "cake"],
-                  "identity_strip_tokens": ["αιφ", "αιφι", "egg", "eggs", "ξωχ", "θψιεϊ"],
+                  "forbidden_tokens": ["Χ©Χ•Χ§Χ•ΧΧ“", "cake"],
+                  "identity_strip_tokens": ["Χ‘Χ™Χ¦", "Χ‘Χ™Χ¦Χ™", "egg", "eggs", "ΧΧ©Χ§", "ΧΧ¨Χ™Χ•Χª"],
                   "unit_basis": "count",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
@@ -4017,10 +4045,10 @@ jobs:
                       {"key": "omega", "any_tokens": ["\u05d0\u05d5\u05de\u05d2\u05d4", "omega"]},
                       {"key": "free_range", "any_tokens": ["\u05d7\u05d5\u05e4\u05e9", "free range"]},
                       {"key": "organic", "any_tokens": ["\u05d0\u05d5\u05e8\u05d2\u05e0\u05d9", "organic"]},
-                      {"key": "size_xl", "any_tokens": ["xl", "xxl", "ςπχ", "ςπχιεϊ"]},
-                      {"key": "size_l", "any_tokens": ["l", "large", "βγεμ", "βγεμεϊ"]},
-                      {"key": "size_m", "any_tokens": ["m", "medium", "αιπεπι", "αιπεπιεϊ"]},
-                      {"key": "size_s", "any_tokens": ["s", "small", "χθο", "χθπεϊ"]},
+                      {"key": "size_xl", "any_tokens": ["xl", "xxl", "ΧΆΧ Χ§", "ΧΆΧ Χ§Χ™Χ•Χª"]},
+                      {"key": "size_l", "any_tokens": ["l", "large", "Χ’Χ“Χ•Χ", "Χ’Χ“Χ•ΧΧ•Χª"]},
+                      {"key": "size_m", "any_tokens": ["m", "medium", "Χ‘Χ™Χ Χ•Χ Χ™", "Χ‘Χ™Χ Χ•Χ Χ™Χ•Χª"]},
+                      {"key": "size_s", "any_tokens": ["s", "small", "Χ§ΧΧ", "Χ§ΧΧ Χ•Χª"]},
                   ],
                   "form_factor_default": "shell_eggs",
                   "probe_max_items": 2,
@@ -4029,10 +4057,10 @@ jobs:
                   "comparison_family_key": "milk_basic",
                   "why": "plain dairy milk only; excludes oat, soy, and flavored beverages",
                   "probe_priority": 3,
-                  "allowed_category_tokens": ["ξεφψι ημα", "ξωχΰεϊ"],
-                  "required_any_tokens": ["ημα", "milk"],
-                  "forbidden_tokens": ["ωιαεμϊ", "ωχγιν", "ρειδ", "soy", "oat", "almond", "ωεχε", "φ'ιθερ", "ιεβεψθ", "βαιπδ", "ξξψη", "spread", "τεγιπβ", "ωεχεμγ", "θαμδ", "θαμΰεϊ", "ψιαϊ", "ωξτε", "shampoo", "ραεο", "soap", "τμξεμια", "palmolive", "θιτεη", "beauty"],
-                  "identity_strip_tokens": ["ημα", "milk"],
+                  "allowed_category_tokens": ["ΧΧ•Χ¦Χ¨Χ™ Χ—ΧΧ‘", "ΧΧ©Χ§ΧΧ•Χª"],
+                  "required_any_tokens": ["Χ—ΧΧ‘", "milk"],
+                  "forbidden_tokens": ["Χ©Χ™Χ‘Χ•ΧΧª", "Χ©Χ§Χ“Χ™Χ", "Χ΅Χ•Χ™Χ”", "soy", "oat", "almond", "Χ©Χ•Χ§Χ•", "Χ¦'Χ™ΧΧ•Χ΅", "Χ™Χ•Χ’Χ•Χ¨Χ", "Χ’Χ‘Χ™Χ Χ”", "ΧΧΧ¨Χ—", "spread", "Χ¤Χ•Χ“Χ™Χ Χ’", "Χ©Χ•Χ§Χ•ΧΧ“", "ΧΧ‘ΧΧ”", "ΧΧ‘ΧΧΧ•Χª", "Χ¨Χ™Χ‘Χª", "Χ©ΧΧ¤Χ•", "shampoo", "Χ΅Χ‘Χ•Χ", "soap", "Χ¤ΧΧΧ•ΧΧ™Χ‘", "palmolive", "ΧΧ™Χ¤Χ•Χ—", "beauty"],
+                  "identity_strip_tokens": ["Χ—ΧΧ‘", "milk"],
                   "unit_basis": "volume",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
@@ -4049,14 +4077,14 @@ jobs:
                   "comparison_family_key": "soft_cheese_basic",
                   "why": "basic white cheese, cottage, and labneh family only, with explicit fat percentage preserved when available",
                   "probe_priority": 4,
-                  "allowed_category_tokens": ["ξεφψι ημα"],
-                  "required_any_tokens": ["μαπδ", "χεθβ", "cottage", "labneh", "βαιπδ μαπδ"],
-                  "required_any_prefixes": ["μαπδ", "χεθβ"],
-                  "category_bypass_forbidden_tokens": ["τπιν", "face", "χψν", "cream", "ρψεν", "serum", "ωξτε", "shampoo", "ραεο", "soap", "ξαψωϊ", "brush", "ξωιισ", "βμιγδ", "dessert", "ξςγο", "ξεφυ", "ξεφφιν", "τγιν", "χερξθ", "baby", "ξθψπδ"],
+                  "allowed_category_tokens": ["ΧΧ•Χ¦Χ¨Χ™ Χ—ΧΧ‘"],
+                  "required_any_tokens": ["ΧΧ‘Χ Χ”", "Χ§Χ•ΧΧ’", "cottage", "labneh", "Χ’Χ‘Χ™Χ Χ” ΧΧ‘Χ Χ”"],
+                  "required_any_prefixes": ["ΧΧ‘Χ Χ”", "Χ§Χ•ΧΧ’"],
+                  "category_bypass_forbidden_tokens": ["Χ¤Χ Χ™Χ", "face", "Χ§Χ¨Χ", "cream", "Χ΅Χ¨Χ•Χ", "serum", "Χ©ΧΧ¤Χ•", "shampoo", "Χ΅Χ‘Χ•Χ", "soap", "ΧΧ‘Χ¨Χ©Χª", "brush", "ΧΧ©Χ™Χ™Χ£", "Χ’ΧΧ™Χ“Χ”", "dessert", "ΧΧΆΧ“Χ", "ΧΧ•Χ¦Χ¥", "ΧΧ•Χ¦Χ¦Χ™Χ", "Χ¤Χ“Χ™Χ", "Χ§Χ•Χ΅ΧΧ", "baby", "ΧΧΧ¨Χ Χ”"],
                   "category_bypass_required_dimension": "weight",
                   "category_bypass_min_total_base_qty": 100.0,
-                  "forbidden_tokens": ["φ'ιθερ", "yellow", "φδεαδ", "snack", "ηθισ", "ξξεμγδ", "ψιαδ", "jam", "dessert", "χιπεη", "ξςγο"],
-                  "identity_strip_tokens": ["βαιπδ", "cheese"],
+                  "forbidden_tokens": ["Χ¦'Χ™ΧΧ•Χ΅", "yellow", "Χ¦Χ”Χ•Χ‘Χ”", "snack", "Χ—ΧΧ™Χ£", "ΧΧΧ•ΧΧ“Χ”", "Χ¨Χ™Χ‘Χ”", "jam", "dessert", "Χ§Χ™Χ Χ•Χ—", "ΧΧΆΧ“Χ"],
+                  "identity_strip_tokens": ["Χ’Χ‘Χ™Χ Χ”", "cheese"],
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
@@ -4074,11 +4102,11 @@ jobs:
                   "comparison_family_key": "cereal_basic",
                   "why": "breakfast cereals and oats, including chocolate/pillow-style breakfast cereals when they are still true cereal products, but excluding snack bars, desserts, and candy-like items",
                   "probe_priority": 5,
-                  "allowed_category_tokens": ["γβπι"],
-                  "required_any_tokens": ["χεψπτμχρ", "cornflakes", "βψπεμδ", "granola", "ωιαεμϊ", "oats", "cereal"],
+                  "allowed_category_tokens": ["Χ“Χ’Χ Χ™"],
+                  "required_any_tokens": ["Χ§Χ•Χ¨Χ Χ¤ΧΧ§Χ΅", "cornflakes", "Χ’Χ¨Χ Χ•ΧΧ”", "granola", "Χ©Χ™Χ‘Χ•ΧΧª", "oats", "cereal"],
                   "required_any_prefixes": ["\u05d3\u05d2\u05e0"],
-                  "forbidden_tokens": ["αψ", "bar", "ηθισ", "snack", "ξιμχι", "milky", "χμιχ", "click", "dessert", "χιπεη"],
-                  "identity_strip_tokens": ["γβπι", "αεχψ", "cereal"],
+                  "forbidden_tokens": ["Χ‘Χ¨", "bar", "Χ—ΧΧ™Χ£", "snack", "ΧΧ™ΧΧ§Χ™", "milky", "Χ§ΧΧ™Χ§", "click", "dessert", "Χ§Χ™Χ Χ•Χ—"],
+                  "identity_strip_tokens": ["Χ“Χ’Χ Χ™", "Χ‘Χ•Χ§Χ¨", "cereal"],
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
@@ -4098,10 +4126,10 @@ jobs:
                   "comparison_family_key": "pasta_basic",
                   "why": "dry pasta and noodles only; excludes instant cups, ravioli, and sauces",
                   "probe_priority": 6,
-                  "allowed_category_tokens": ["τρθδ", "ΰθψιεϊ"],
-                  "required_any_tokens": ["τρθδ", "ρτβθι", "τπδ", "τεζιμι", "μιπβ", "ΰθψιεϊ", "pasta", "spaghetti"],
-                  "forbidden_tokens": ["ξπδ ηξδ", "ψΰξο", "πεγμρ", "ravioli", "ψαιεμι", "ψεθα", "μζπιδ", "instant"],
-                  "identity_strip_tokens": ["τρθδ", "ΰθψιεϊ", "pasta", "spaghetti"],
+                  "allowed_category_tokens": ["Χ¤Χ΅ΧΧ”", "ΧΧΧ¨Χ™Χ•Χª"],
+                  "required_any_tokens": ["Χ¤Χ΅ΧΧ”", "Χ΅Χ¤Χ’ΧΧ™", "Χ¤Χ Χ”", "Χ¤Χ•Χ–Χ™ΧΧ™", "ΧΧ™Χ Χ’", "ΧΧΧ¨Χ™Χ•Χª", "pasta", "spaghetti"],
+                  "forbidden_tokens": ["ΧΧ Χ” Χ—ΧΧ”", "Χ¨ΧΧΧ", "Χ Χ•Χ“ΧΧ΅", "ravioli", "Χ¨Χ‘Χ™Χ•ΧΧ™", "Χ¨Χ•ΧΧ‘", "ΧΧ–Χ Χ™Χ”", "instant"],
+                  "identity_strip_tokens": ["Χ¤Χ΅ΧΧ”", "ΧΧΧ¨Χ™Χ•Χª", "pasta", "spaghetti"],
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
@@ -4122,10 +4150,10 @@ jobs:
                   "comparison_family_key": "rice_couscous_basic",
                   "why": "dry rice and couscous staples only; excludes toys, balloons, noodles, and prepared add-ons",
                   "probe_priority": 7,
-                  "allowed_category_tokens": ["ΰεψζ", "ΰηψ", "γβπιν"],
-                  "required_any_tokens": ["ΰεψζ", "rice", "χερχερ", "couscous"],
-                  "forbidden_tokens": ["ξπδ ηξδ", "instant", "ψΰξο", "πεγμρ", "noodles", "ΰθψιεϊ", "ρμθ", "ηεξυ", "γτι", "φ'ιτρ", "ξιμει", "ψεθα", "αμεο", "αμεπιν", "balloon", "balloons", "φςφες", "toy", "τψιλιεϊ", "crackers", "γιιρδ", "ξθψπδ", "baby"],
-                  "identity_strip_tokens": ["ΰεψζ", "rice", "χερχερ", "couscous"],
+                  "allowed_category_tokens": ["ΧΧ•Χ¨Χ–", "ΧΧ—Χ¨", "Χ“Χ’Χ Χ™Χ"],
+                  "required_any_tokens": ["ΧΧ•Χ¨Χ–", "rice", "Χ§Χ•Χ΅Χ§Χ•Χ΅", "couscous"],
+                  "forbidden_tokens": ["ΧΧ Χ” Χ—ΧΧ”", "instant", "Χ¨ΧΧΧ", "Χ Χ•Χ“ΧΧ΅", "noodles", "ΧΧΧ¨Χ™Χ•Χª", "Χ΅ΧΧ", "Χ—Χ•ΧΧ¥", "Χ“Χ¤Χ™", "Χ¦'Χ™Χ¤Χ΅", "ΧΧ™ΧΧ•Χ™", "Χ¨Χ•ΧΧ‘", "Χ‘ΧΧ•Χ", "Χ‘ΧΧ•Χ Χ™Χ", "balloon", "balloons", "Χ¦ΧΆΧ¦Χ•ΧΆ", "toy", "Χ¤Χ¨Χ™Χ›Χ™Χ•Χª", "crackers", "Χ“Χ™Χ™Χ΅Χ”", "ΧΧΧ¨Χ Χ”", "baby"],
+                  "identity_strip_tokens": ["ΧΧ•Χ¨Χ–", "rice", "Χ§Χ•Χ΅Χ§Χ•Χ΅", "couscous"],
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
@@ -4144,10 +4172,10 @@ jobs:
                   "comparison_family_key": "tuna_basic",
                   "why": "canned tuna by preserved style such as water or oil",
                   "probe_priority": 8,
-                  "allowed_category_tokens": ["γβιν", "ωιξεψιν"],
-                  "required_any_tokens": ["θεπδ", "tuna"],
+                  "allowed_category_tokens": ["Χ“Χ’Χ™Χ", "Χ©Χ™ΧΧ•Χ¨Χ™Χ"],
+                  "required_any_tokens": ["ΧΧ•Χ Χ”", "tuna"],
                   "forbidden_tokens": [],
-                  "identity_strip_tokens": ["θεπδ", "tuna", "ωιξεψιν"],
+                  "identity_strip_tokens": ["ΧΧ•Χ Χ”", "tuna", "Χ©Χ™ΧΧ•Χ¨Χ™Χ"],
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
@@ -4163,10 +4191,10 @@ jobs:
                   "comparison_family_key": "legumes_basic",
                   "why": "dry or canned legumes such as lentils and beans, excluding prepared dips",
                   "probe_priority": 9,
-                  "allowed_category_tokens": ["χθπιεϊ", "ωιξεψιν", "ΰηψ"],
-                  "required_any_tokens": ["ςγωιν", "ωςεςιϊ", "lentils", "beans", "ηεξερ ιαω"],
-                  "forbidden_tokens": ["ξξψη", "ρμθ", "dip", "spread", "ωςεςιϊ ιψεχδ", "green bean", "green beans"],
-                  "identity_strip_tokens": ["χθπιεϊ", "legumes"],
+                  "allowed_category_tokens": ["Χ§ΧΧ Χ™Χ•Χª", "Χ©Χ™ΧΧ•Χ¨Χ™Χ", "ΧΧ—Χ¨"],
+                  "required_any_tokens": ["ΧΆΧ“Χ©Χ™Χ", "Χ©ΧΆΧ•ΧΆΧ™Χª", "lentils", "beans", "Χ—Χ•ΧΧ•Χ΅ Χ™Χ‘Χ©"],
+                  "forbidden_tokens": ["ΧΧΧ¨Χ—", "Χ΅ΧΧ", "dip", "spread", "Χ©ΧΆΧ•ΧΆΧ™Χª Χ™Χ¨Χ•Χ§Χ”", "green bean", "green beans"],
+                  "identity_strip_tokens": ["Χ§ΧΧ Χ™Χ•Χª", "legumes"],
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
@@ -4178,10 +4206,10 @@ jobs:
                   "comparison_family_key": "tahini_basic",
                   "why": "plain tahini products only; raw or whole wording does not create a stricter form-factor split",
                   "probe_priority": 10,
-                  "allowed_category_tokens": ["ωιξεψιν", "ξξψηιν", "ΰηψ"],
-                  "required_any_tokens": ["θηιπδ", "tahini"],
-                  "forbidden_tokens": ["ημαδ", "halva"],
-                  "identity_strip_tokens": ["θηιπδ", "tahini", "βεμξιϊ", "raw"],
+                  "allowed_category_tokens": ["Χ©Χ™ΧΧ•Χ¨Χ™Χ", "ΧΧΧ¨Χ—Χ™Χ", "ΧΧ—Χ¨"],
+                  "required_any_tokens": ["ΧΧ—Χ™Χ Χ”", "tahini"],
+                  "forbidden_tokens": ["Χ—ΧΧ‘Χ”", "halva"],
+                  "identity_strip_tokens": ["ΧΧ—Χ™Χ Χ”", "tahini", "Χ’Χ•ΧΧΧ™Χª", "raw"],
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
@@ -4196,10 +4224,10 @@ jobs:
                   "category_bypass_forbidden_tokens": ["\u05de\u05d9\u05e1\u05dc\u05e8", "micellar", "\u05d4\u05d9\u05d3\u05e8\u05d4", "hydra", "\u05d2'\u05dc", "gel", "\u05e4\u05e0\u05d9\u05dd", "face", "\u05e1\u05e8\u05d5\u05dd", "serum", "\u05e7\u05e8\u05dd", "cream", "boost", "\u05d1\u05d5\u05e1\u05d8"],
                   "category_bypass_required_dimension": "volume",
                   "category_bypass_min_total_base_qty": 500.0,
-                  "allowed_category_tokens": ["ξωχΰεϊ"],
-                  "required_any_tokens": ["ξιν", "water"],
-                  "forbidden_tokens": ["ρεγδ", "cola", "χεμδ", "ξεβζ", "θςξιν", "flavor", "ειθξιπ"],
-                  "identity_strip_tokens": ["ξιν", "ξιπψμιιν", "water"],
+                  "allowed_category_tokens": ["ΧΧ©Χ§ΧΧ•Χª"],
+                  "required_any_tokens": ["ΧΧ™Χ", "water"],
+                  "forbidden_tokens": ["Χ΅Χ•Χ“Χ”", "cola", "Χ§Χ•ΧΧ”", "ΧΧ•Χ’Χ–", "ΧΧΆΧΧ™Χ", "flavor", "Χ•Χ™ΧΧΧ™Χ "],
+                  "identity_strip_tokens": ["ΧΧ™Χ", "ΧΧ™Χ Χ¨ΧΧ™Χ™Χ", "water"],
                   "unit_basis": "volume",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
@@ -4215,10 +4243,10 @@ jobs:
                       {"key": "cauliflower", "any_tokens": ["\u05db\u05e8\u05d5\u05d1\u05d9\u05ea", "cauliflower"]},
                   ],
                   "probe_priority": 12,
-                  "allowed_category_tokens": ["χτεΰ", "ιψχεϊ"],
-                  "required_any_tokens": ["μχθ", "ΰτεπδ", "αψεχεμι", "λψεαιϊ", "ιψχεϊ", "frozen"],
-                  "forbidden_tokens": ["βμιγδ", "dessert", "φ'ιτρ", "τιιπθ", "pizza", "γεμφ'δ"],
-                  "identity_strip_tokens": ["χτεΰ", "χτεΰιν", "ιψχεϊ", "frozen", "vegetables"],
+                  "allowed_category_tokens": ["Χ§Χ¤Χ•Χ", "Χ™Χ¨Χ§Χ•Χª"],
+                  "required_any_tokens": ["ΧΧ§Χ", "ΧΧ¤Χ•Χ Χ”", "Χ‘Χ¨Χ•Χ§Χ•ΧΧ™", "Χ›Χ¨Χ•Χ‘Χ™Χª", "Χ™Χ¨Χ§Χ•Χª", "frozen"],
+                  "forbidden_tokens": ["Χ’ΧΧ™Χ“Χ”", "dessert", "Χ¦'Χ™Χ¤Χ΅", "Χ¤Χ™Χ™Χ Χ", "pizza", "Χ“Χ•ΧΧ¦'Χ”"],
+                  "identity_strip_tokens": ["Χ§Χ¤Χ•Χ", "Χ§Χ¤Χ•ΧΧ™Χ", "Χ™Χ¨Χ§Χ•Χª", "frozen", "vegetables"],
                   "unit_basis": "weight",
                   "allow_unit_normalization": True,
                   "allow_canonical_equivalent": True,
@@ -4231,7 +4259,7 @@ jobs:
           if comparison_family_registry_by_key.get("bread_basic"):
               comparison_family_registry_by_key["bread_basic"]["forbidden_tokens"] = list(dict.fromkeys(
                   list(comparison_family_registry_by_key["bread_basic"].get("forbidden_tokens") or [])
-                  + ["χξη", "flour", "ϊςψεαϊ", "mix"]
+                  + ["Χ§ΧΧ—", "flour", "ΧªΧΆΧ¨Χ•Χ‘Χª", "mix"]
               ))
           core_food_group_priority = {
               rule["comparison_family_key"]: rule["probe_priority"] for rule in comparison_family_registry
@@ -4243,7 +4271,7 @@ jobs:
               seen = set()
               for value in values:
                   text = clean_lookup_text(value).lower()
-                  text = re.sub(r"[^0-9a-zA-Zΰ-ϊ]+", " ", text)
+                  text = re.sub(r"[^0-9a-zA-ZΧ-Χª]+", " ", text)
                   for token in re.split(r"\s+", text):
                       if not token or token in blocked:
                           continue
@@ -4295,7 +4323,7 @@ jobs:
                   }
               family_key = (family_rule or {}).get("comparison_family_key")
               if family_key == "eggs":
-                  match = re.search(r"\b(?P<count>\d{1,2})\s*(?:αιφ(?:δ|ιν|ι)?|egg|eggs)\b", text)
+                  match = re.search(r"\b(?P<count>\d{1,2})\s*(?:Χ‘Χ™Χ¦(?:Χ”|Χ™Χ|Χ™)?|egg|eggs)\b", text)
                   if match:
                       count = safe_positive_int(match.group("count"))
                       if count is not None and 4 <= count <= 30:
@@ -4355,7 +4383,7 @@ jobs:
               tokens = []
               seen = set()
               allowed_short_tokens = {"s", "m", "l", "xl", "xxl"}
-              for token in re.split(r"\s+", re.sub(r"[^0-9a-zA-Zΰ-ϊ]+", " ", text)):
+              for token in re.split(r"\s+", re.sub(r"[^0-9a-zA-ZΧ-Χª]+", " ", text)):
                   if not token or token in removable_tokens or token in family_signature_stopwords:
                       continue
                   if re.fullmatch(r"\d+(?:\.\d+)?", token):
@@ -4375,7 +4403,7 @@ jobs:
               normalized = clean_lookup_text(text).lower()
               if not normalized:
                   return []
-              normalized = re.sub(r"[^0-9a-zA-ZΧΰ-Χϊ]+", " ", normalized)
+              normalized = re.sub(r"[^0-9a-zA-ZΧ³Χ-Χ³Χª]+", " ", normalized)
               return [token for token in re.split(r"\s+", normalized) if token]
 
           def first_matching_rule_pattern(patterns, text_tokens):
@@ -4537,13 +4565,13 @@ jobs:
                           continue
                   if family_rule.get("comparison_family_key") == "eggs":
                       eggs_non_shell_pattern = first_matching_rule_pattern(
-                          ["ξφδ", "ξφεϊ", "matzo", "bread", "μην", "τιϊδ", "ημδ", "cake", "cookie", "biscuit"],
+                          ["ΧΧ¦Χ”", "ΧΧ¦Χ•Χª", "matzo", "bread", "ΧΧ—Χ", "Χ¤Χ™ΧªΧ”", "Χ—ΧΧ”", "cake", "cookie", "biscuit"],
                           text_tokens,
                       )
                       if eggs_non_shell_pattern:
                           continue
                       eggs_weight_pattern = first_matching_rule_pattern(
-                          ["βψ", "βψν", "χβ", "g", "kg"],
+                          ["Χ’Χ¨", "Χ’Χ¨Χ", "Χ§Χ’", "g", "kg"],
                           text_tokens,
                       )
                       if eggs_weight_pattern:
@@ -5153,6 +5181,57 @@ jobs:
           }
           write_json(OUT_DIR / "comparison_source_contract.json", comparison_source_contract)
 
+          supabase_ingest_contract = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "intended_for_first_wet_run_planning": True,
+              "selected_city_scope_drives_visible_comparison_results": True,
+              "resolution_layers": {
+                  "exact_baseline": "same product resolution without user approval",
+                  "approved_equivalent": "very-close substitute that should only surface after explicit user approval in the cart screen",
+                  "budget_alternative": "lower-cost option that stays separate from baseline comparison and should only surface after explicit user approval",
+                  "unresolved": "line remains missing and must stay visible as a real gap",
+              },
+              "tables": {
+                  "products_current": {
+                      "purpose": "current normalized product metadata used for matching and user-visible catalog fields",
+                      "required_columns": ["barcode", "name", "category", "brand", "manufacturer", "gf_flag", "gf_verified", "substitute_group"],
+                      "primary_source_artifacts": ["product_payload_coverage.json", "comparison_source_contract.json"],
+                  },
+                  "stores_current": {
+                      "purpose": "current target store roster, city scope, store relevance hints, and source completeness state",
+                      "required_columns": ["store_key", "retailer", "city", "address", "store_format_hint", "grocery_depth_class", "relevance_classification", "has_price_payload", "has_promo_payload", "missing_price_file", "missing_promo_file"],
+                      "primary_source_artifacts": ["target_stores.csv", "store_relevance_classification_summary.json", "comparison_screen_store_cards_by_city_scope.json", "target_coverage_by_store.csv"],
+                  },
+                  "prices_current": {
+                      "purpose": "official current price rows per store and barcode",
+                      "required_columns": ["store_key", "barcode", "regular_price", "effective_price", "last_seen_at"],
+                      "primary_source_artifacts": ["comparison_source_contract.json", "source_freshness_summary.json", "download_stage_summary.json"],
+                  },
+                  "promotions_current": {
+                      "purpose": "current promotion header rows tied to stores and promotion identifiers",
+                      "required_columns": ["promotion_key", "store_key", "description", "last_seen_at"],
+                      "primary_source_artifacts": ["promotion_items_write_plan.json", "download_stage_summary.json"],
+                  },
+                  "basket_store_cards_current": {
+                      "purpose": "store-level comparison cards for the approved basket inside the selected city scope",
+                      "required_columns": ["basket_probe_name", "city_scope", "store_key", "comparison_card_state", "comparison_visibility_tier", "fulfillment_mode", "covered_line_count", "missing_line_count", "comparison_screen_total"],
+                      "primary_source_artifacts": ["comparison_screen_store_cards_by_city_scope.json", "comparison_screen_readiness_summary.json", "store_relevance_classification_summary.json"],
+                  },
+                  "basket_line_resolutions_current": {
+                      "purpose": "line-level basket resolution ledger per store for exact, approved-equivalent, budget, and unresolved outcomes",
+                      "required_columns": ["basket_probe_name", "source_item_id", "store_key", "matched_item_id", "chosen_layer", "confidence_class", "gf_constraint_required", "equivalence_basis", "matched_price_value", "baseline_line_price", "budget_line_price", "reason_or_failure_reason"],
+                      "primary_source_artifacts": ["basket_line_shadow_matches.csv", "comparison_source_contract.json", "comparison_screen_readiness_summary.json"],
+                  },
+                  "basket_offer_coverage_current": {
+                      "purpose": "city-scoped offer summaries that explain which exact lines need approval and which offers help completion",
+                      "required_columns": ["basket_probe_name", "city_scope", "source_item_id", "recommended_offer_layer", "recommended_offer_role", "helped_full_completion_store_count"],
+                      "primary_source_artifacts": ["cart_summary_offer_coverage_by_city_scope.json", "cart_offer_completion_gain_summary.json"],
+                  },
+              },
+          }
+          write_json(OUT_DIR / "supabase_ingest_contract.json", supabase_ingest_contract)
+
           shadow_store_rows_by_family = defaultdict(lambda: defaultdict(list))
           shadow_store_rows_by_equivalence_group = defaultdict(lambda: defaultdict(list))
           shadow_store_rows_by_same_product_key = defaultdict(lambda: defaultdict(list))
@@ -5218,14 +5297,15 @@ jobs:
                   return "discount_supermarket"
               if retailer == "yohananof":
                   return "large_supermarket"
-              if "ΰχρτψρ" in normalized_name:
+              if "ΧΧ§Χ΅Χ¤Χ¨Χ΅" in normalized_name:
                   return "express_small_grocery"
-              if "ωμι" in normalized_name:
+              if "Χ©ΧΧ™" in normalized_name:
                   return "urban_small_grocery"
               return "general_grocery"
 
           def build_store_relevance_profile(store_key: str):
               coverage_row = price_store_coverage_by_store_key.get(clean_text(store_key), {})
+              target_coverage_row = target_coverage_by_store_key.get(clean_text(store_key), {})
               family_counter = curated_family_presence_by_store_key.get(clean_text(store_key), Counter())
               valid_price_rows = int(coverage_row.get("valid_price_rows") or 0)
               unique_barcodes = int(coverage_row.get("unique_barcodes") or 0)
@@ -5245,11 +5325,19 @@ jobs:
                   grocery_depth_class = "mid_grocery_depth"
               else:
                   grocery_depth_class = "shallow_grocery_depth"
+              has_price_payload = bool(target_coverage_row.get("has_price_payload"))
+              has_promo_payload = bool(target_coverage_row.get("has_promo_payload"))
+              missing_price_file = bool(target_coverage_row.get("missing_price_file"))
+              missing_promo_file = bool(target_coverage_row.get("missing_promo_file"))
               return {
                   "store_format_hint": format_hint,
                   "grocery_depth_class": grocery_depth_class,
                   "valid_price_rows": valid_price_rows,
                   "unique_barcodes": unique_barcodes,
+                  "has_price_payload": has_price_payload,
+                  "has_promo_payload": has_promo_payload,
+                  "missing_price_file": missing_price_file,
+                  "missing_promo_file": missing_promo_file,
                   "core_basket_family_presence_count": core_family_presence_count,
                   "top_present_core_families": [
                       family_key
@@ -6635,6 +6723,13 @@ jobs:
                   relevance_classification = "comparison_ready_full_basket"
               elif store_row["near_full_after_user_approved_alternatives"]:
                   relevance_classification = "comparison_ready_near_full_basket"
+              elif (
+                  profile["missing_price_file"]
+                  and profile["missing_promo_file"]
+                  and not profile["has_price_payload"]
+                  and not profile["has_promo_payload"]
+              ):
+                  relevance_classification = "source_missing_target_store"
               elif profile["store_format_hint"] == "be_small_format":
                   relevance_classification = "small_format_partial_basket_store"
               elif likely_gap_class == "likely_equivalence_group_derivation_gap":
@@ -6959,6 +7054,7 @@ jobs:
                       "retailer": row.get("retailer"),
                       "city": row.get("city"),
                       "fulfillment_mode": fulfillment_mode,
+                      "comparison_visibility_tier": "primary_full_basket_results",
                       "comparison_card_state": (
                           "full_basket"
                           if row["complete_with_budget_alternatives"]
@@ -6990,6 +7086,16 @@ jobs:
                       basket_probe_name,
                   )
                   covered_line_count = max(0, selected_probe_size - row["resolved_missing_line_count"])
+                  should_surface_in_secondary_partial_store_section = relevance_classification in (
+                      "comparison_ready_near_full_basket",
+                      "small_format_partial_basket_store",
+                      "source_missing_target_store",
+                      "recoverable_derivation_gap",
+                      "recoverable_family_or_equivalence_gap",
+                  )
+                  should_surface_in_tertiary_shallow_store_section = relevance_classification == (
+                      "genuinely_shallow_or_non_grocery_store"
+                  )
                   return {
                       "store_key": row["store_key"],
                       "retailer": row.get("retailer"),
@@ -6998,6 +7104,10 @@ jobs:
                       "likely_gap_class": likely_gap_class,
                       "store_format_hint": profile["store_format_hint"],
                       "grocery_depth_class": profile["grocery_depth_class"],
+                      "has_price_payload": profile["has_price_payload"],
+                      "has_promo_payload": profile["has_promo_payload"],
+                      "missing_price_file": profile["missing_price_file"],
+                      "missing_promo_file": profile["missing_promo_file"],
                       "covered_line_count": covered_line_count,
                       "missing_line_count": row["resolved_missing_line_count"],
                       "coverage_display": f"{covered_line_count}/{selected_probe_size}",
@@ -7008,11 +7118,16 @@ jobs:
                       "top_unresolved_families": dict(family_counts.most_common(5)),
                       "top_diagnostic_bucket_counts": dict(bucket_counts.most_common(5)),
                       "reason_passed_or_failed": row["reason_passed_or_failed"],
-                      "should_surface_in_secondary_partial_store_section": relevance_classification in (
-                          "comparison_ready_near_full_basket",
-                          "small_format_partial_basket_store",
-                          "recoverable_derivation_gap",
-                          "recoverable_family_or_equivalence_gap",
+                      "should_surface_in_secondary_partial_store_section": should_surface_in_secondary_partial_store_section,
+                      "should_surface_in_tertiary_shallow_store_section": should_surface_in_tertiary_shallow_store_section,
+                      "comparison_visibility_tier": (
+                          "secondary_partial_store_section"
+                          if should_surface_in_secondary_partial_store_section
+                          else (
+                              "tertiary_shallow_store_section"
+                              if should_surface_in_tertiary_shallow_store_section
+                              else "hidden_by_default"
+                          )
                       ),
                   }
 
@@ -7030,6 +7145,19 @@ jobs:
                           row for row in scope_rows
                           if row["near_full_after_user_approved_alternatives"]
                           and not row["complete_with_budget_alternatives"]
+                      ]
+                      excluded_incomplete_store_cards_sorted_by_missing_count = [
+                          build_excluded_store_card(row)
+                          for row in sorted(
+                              (
+                                  row for row in scope_rows
+                                  if not row["near_full_after_user_approved_alternatives"]
+                              ),
+                              key=lambda row: (
+                                  row["resolved_missing_line_count"],
+                                  row["store_key"],
+                              ),
+                          )
                       ]
                       city_scope_breakdown[" + ".join(city_scope)] = {
                           "selected_city_count": len(city_scope),
@@ -7062,19 +7190,22 @@ jobs:
                               for row in scope_rows
                               if not row["near_full_after_user_approved_alternatives"]
                           ],
-                          "excluded_incomplete_store_cards_sorted_by_missing_count": [
-                              build_excluded_store_card(row)
-                              for row in sorted(
-                                  (
-                                      row for row in scope_rows
-                                      if not row["near_full_after_user_approved_alternatives"]
-                                  ),
-                                  key=lambda row: (
-                                      row["resolved_missing_line_count"],
-                                      row["store_key"],
-                                  ),
-                              )
-                          ],
+                          "excluded_incomplete_store_cards_sorted_by_missing_count": excluded_incomplete_store_cards_sorted_by_missing_count,
+                          "secondary_partial_store_count": sum(
+                              1
+                              for row in excluded_incomplete_store_cards_sorted_by_missing_count
+                              if row["comparison_visibility_tier"] == "secondary_partial_store_section"
+                          ),
+                          "tertiary_shallow_store_count": sum(
+                              1
+                              for row in excluded_incomplete_store_cards_sorted_by_missing_count
+                              if row["comparison_visibility_tier"] == "tertiary_shallow_store_section"
+                          ),
+                          "hidden_incomplete_store_count": sum(
+                              1
+                              for row in excluded_incomplete_store_cards_sorted_by_missing_count
+                              if row["comparison_visibility_tier"] == "hidden_by_default"
+                          ),
                       }
               comparison_screen_store_cards_by_city_scope["basket_probes"][basket_probe_name] = city_scope_breakdown
           write_json(
@@ -7097,23 +7228,10 @@ jobs:
               classification_rows = []
               classification_counts = Counter()
               for row in sorted(probe_store_rows, key=lambda store_row: store_row["store_key"]):
-                  profile = build_store_relevance_profile(row["store_key"])
-                  likely_gap_class, bucket_counts = derive_store_gap_class(
+                  relevance_classification, likely_gap_class, bucket_counts, family_counts, profile = derive_store_relevance_classification(
+                      row,
                       basket_probe_name,
-                      row["store_key"],
                   )
-                  if row["complete_with_budget_alternatives"]:
-                      relevance_classification = "comparison_ready_full_basket"
-                  elif row["near_full_after_user_approved_alternatives"]:
-                      relevance_classification = "comparison_ready_near_full_basket"
-                  elif profile["store_format_hint"] == "be_small_format":
-                      relevance_classification = "small_format_partial_basket_store"
-                  elif likely_gap_class == "likely_equivalence_group_derivation_gap":
-                      relevance_classification = "recoverable_derivation_gap"
-                  elif likely_gap_class == "likely_store_side_family_assignment_or_equivalence_grouping_gap":
-                      relevance_classification = "recoverable_family_or_equivalence_gap"
-                  else:
-                      relevance_classification = "genuinely_shallow_or_non_grocery_store"
                   classification_counts[relevance_classification] += 1
                   classification_rows.append({
                       "store_key": row["store_key"],
@@ -7122,6 +7240,7 @@ jobs:
                       "relevance_classification": relevance_classification,
                       "likely_gap_class": likely_gap_class,
                       "diagnostic_bucket_counts": dict(bucket_counts.most_common(5)),
+                      "top_unresolved_families": dict(family_counts.most_common(5)),
                       **profile,
                   })
               store_relevance_classification_summary["basket_probes"][basket_probe_name] = {
@@ -8230,7 +8349,7 @@ jobs:
         timeout-minutes: 10
         uses: actions/upload-artifact@v6
         with:
-          name: glutiwise-current-sync-v26-${{ github.run_id }}
+          name: glutiwise-current-sync-v25-${{ github.run_id }}
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
           if-no-files-found: warn
           path: |
@@ -8285,6 +8404,7 @@ jobs:
             out/basket_shadow_root_cause_summary.json
             out/comparison_source_coverage_audit.json
             out/comparison_source_contract.json
+            out/supabase_ingest_contract.json
             out/non_exact_upgrade_impact_summary.json
             out/source_freshness_by_store.csv
             out/source_freshness_summary.json
