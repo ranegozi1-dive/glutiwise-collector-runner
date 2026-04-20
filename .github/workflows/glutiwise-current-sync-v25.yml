@@ -5218,11 +5218,6 @@ jobs:
                       "required_columns": ["basket_probe_name", "city_scope", "store_key", "comparison_card_state", "comparison_visibility_tier", "fulfillment_mode", "covered_line_count", "missing_line_count", "comparison_screen_total"],
                       "primary_source_artifacts": ["comparison_screen_store_cards_by_city_scope.json", "comparison_screen_readiness_summary.json", "store_relevance_classification_summary.json"],
                   },
-                  "basket_line_resolutions_current": {
-                      "purpose": "line-level basket resolution ledger per store for exact, approved-equivalent, budget, and unresolved outcomes",
-                      "required_columns": ["basket_probe_name", "source_item_id", "store_key", "matched_item_id", "chosen_layer", "confidence_class", "gf_constraint_required", "equivalence_basis", "matched_price_value", "baseline_line_price", "budget_line_price", "reason_or_failure_reason"],
-                      "primary_source_artifacts": ["basket_line_shadow_matches.csv", "comparison_source_contract.json", "comparison_screen_readiness_summary.json"],
-                  },
                   "basket_offer_coverage_current": {
                       "purpose": "city-scoped offer summaries that explain which exact lines need approval and which offers help completion",
                       "required_columns": ["basket_probe_name", "city_scope", "source_item_id", "recommended_offer_layer", "recommended_offer_role", "helped_full_completion_store_count"],
