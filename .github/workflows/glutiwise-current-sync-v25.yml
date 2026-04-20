@@ -4475,6 +4475,15 @@ jobs:
                   matched_pattern = first_matching_rule_pattern(pattern_rule.get("any_tokens"), text_tokens)
                   if not matched_pattern and support_tokens:
                       matched_pattern = first_matching_rule_pattern(pattern_rule.get("any_tokens"), support_tokens)
+                  if (
+                      not matched_pattern
+                      and family_key == "tuna_basic"
+                  ):
+                      matched_pattern = first_matching_rule_pattern_in_text(
+                          pattern_rule.get("any_tokens"),
+                          text_tokens or [],
+                          f"{' '.join(text_tokens or [])} {' '.join(support_tokens or [])}",
+                      )
                   if not matched_pattern:
                       continue
                   key = clean_text(pattern_rule.get("key"))
