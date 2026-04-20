@@ -7159,6 +7159,7 @@ jobs:
                       city_scope_breakdown[" + ".join(city_scope)] = {
                           "selected_city_count": len(city_scope),
                           "store_count": len(scope_rows),
+                          "represented_store_count": len(scope_rows),
                           "full_store_cards_sorted_by_total": [
                               build_comparison_screen_store_card(row)
                               for row in sorted(
@@ -7203,6 +7204,7 @@ jobs:
                               for row in excluded_incomplete_store_cards_sorted_by_missing_count
                               if row["comparison_visibility_tier"] == "hidden_by_default"
                           ),
+                          "primary_visible_store_count": len(full_rows) + len(near_full_rows),
                       }
               comparison_screen_store_cards_by_city_scope["basket_probes"][basket_probe_name] = city_scope_breakdown
           write_json(
