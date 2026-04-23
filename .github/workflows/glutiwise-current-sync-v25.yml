@@ -1,9 +1,6 @@
 ﻿name: GlutiWise Current Sync to Supabase v25
 
 on:
-  schedule:
-    # GitHub Actions cron uses UTC. 04:17 UTC avoids the top-of-hour queue and gives a stable daily run.
-    - cron: "17 4 * * *"
   workflow_dispatch:
     inputs:
       write_to_supabase:
@@ -40,7 +37,8 @@ on:
         default: ""
 
 concurrency:
-  group: glutiwise-current-sync-v25-live
+  # Keep each manual dry-run independent so an older stuck queued run cannot poison the next one.
+  group: glutiwise-current-sync-v25-${{ github.ref_name }}-${{ github.run_id }}
   cancel-in-progress: false
 
 defaults:
@@ -72,6 +70,7 @@ jobs:
       SOURCE_MAX_AGE_HOURS: "48"
       ARTIFACT_RETENTION_DAYS: "1"
       DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER: "12"
+      SHUFERSAL_DOWNLOAD_TIMEOUT_MINUTES: "18"
       DOWNLOAD_RETRY_ATTEMPTS: "2"
       LOCKED_MVP_STORE_LIMIT: "29"
       MAX_TARGET_STORES_SAFE: "29"
@@ -174,12 +173,12 @@ jobs:
           fi
 
       - name: Download SHUFERSAL files
-        timeout-minutes: 16
+        timeout-minutes: 22
         continue-on-error: true
         run: |
           set -euo pipefail
           SCRAPER="SHUFERSAL"
-          DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER="${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER:-12}"
+          DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER="${SHUFERSAL_DOWNLOAD_TIMEOUT_MINUTES:-18}"
           DOWNLOAD_RETRY_ATTEMPTS="${DOWNLOAD_RETRY_ATTEMPTS:-2}"
           LAST_EXIT_CODE=0
           LAST_DURATION_SECONDS=0
@@ -341,6 +340,18 @@ jobs:
               return parent or "unknown"
 
           def parse_identity(filename: str):
+              shufersal_full_patterns = [
+                  (r"(?i)pricefull(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "price_full"),
+                  (r"(?i)promofull(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "promo_full"),
+                  (r"(?i)promo(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "promo"),
+              ]
+              for pattern, kind in shufersal_full_patterns:
+                  m = re.search(pattern, filename)
+                  if m:
+                      chain_id = m.group(1)
+                      store_id = m.group(3)
+                      source_ts = f"{m.group(4)}{m.group(5)}"
+                      return kind, chain_id, store_id, source_ts
               patterns = [
                   (r"(?i)pricefull(\d+)-(\d+)-(\d+)", "price_full"),
                   (r"(?i)promofull(\d+)-(\d+)-(\d+)", "promo_full"),
@@ -1350,6 +1361,17 @@ jobs:
           
           def parse_filename_identity(path: Path):
               name = path.name
+              shufersal_full_patterns = [
+                  (r"(?i)pricefull(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "price_full"),
+                  (r"(?i)promofull(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "promo_full"),
+                  (r"(?i)promo(\d+)-(\d+)-(\d+)-(\d{8})-(\d{6})", "promo"),
+              ]
+              for pattern, kind in shufersal_full_patterns:
+                  m = re.search(pattern, name)
+                  if m:
+                      chain_id = m.group(1)
+                      store_id = m.group(3)
+                      return kind, chain_id, store_id
               patterns = [
                   (r"(?i)pricefull(\d+)-(\d+)", "price_full"),
                   (r"(?i)promofull(\d+)-(\d+)", "promo_full"),
@@ -1455,6 +1477,25 @@ jobs:
 
           def select_fields(row, allowed_fields):
               return {key: row[key] for key in allowed_fields if key in row}
+ 
+          PRICES_CURRENT_DB_FIELDS = (
+              "price_key",
+              "barcode",
+              "store_key",
+              "price",
+              "updated_at",
+              "last_seen_at",
+              "regular_price",
+              "effective_price",
+              "has_promotion",
+              "has_club_promotion",
+              "applied_promotion_key",
+              "applied_promotion_title",
+              "applied_promotion_type",
+              "promotion_benefit_text",
+              "promotion_start_at",
+              "promotion_end_at",
+          )
 
           PROMOTIONS_CURRENT_DB_FIELDS = (
               "promotion_key",
@@ -1470,6 +1511,15 @@ jobs:
               "end_at",
               "updated_at",
               "last_seen_at",
+          )
+
+          PROMOTION_ITEMS_CURRENT_DB_FIELDS = (
+              "promotion_item_key",
+              "promotion_key",
+              "barcode",
+              "updated_at",
+              "last_seen_at",
+              "raw_payload",
           )
           
           def fetch_existing_products(barcodes):
@@ -2655,6 +2705,10 @@ jobs:
               missing_price_store_keys,
               missing_promo_store_keys,
           )
+          target_coverage_by_store_key = {
+              clean_text(row["store_key"]): row
+              for row in target_coverage_by_store_rows
+          }
           target_coverage_by_city_retailer_rows = summarize_target_coverage_by_city_retailer(
               discovered_target_stores,
               successful_price_store_keys,
@@ -4228,6 +4282,11 @@ jobs:
           comparison_family_registry_by_key = {
               rule["comparison_family_key"]: rule for rule in comparison_family_registry
           }
+          if comparison_family_registry_by_key.get("bread_basic"):
+              comparison_family_registry_by_key["bread_basic"]["forbidden_tokens"] = list(dict.fromkeys(
+                  list(comparison_family_registry_by_key["bread_basic"].get("forbidden_tokens") or [])
+                  + ["קמח", "flour", "תערובת", "mix"]
+              ))
           core_food_group_priority = {
               rule["comparison_family_key"]: rule["probe_priority"] for rule in comparison_family_registry
           }
@@ -5075,7 +5134,7 @@ jobs:
               "shadow_only": True,
               "publish_gate_impact": "none",
               "deterministic_derivations_added": {
-                  "comparison_family_key": "assigned from a small curated comparison_family_registry using token-aware required and forbidden pattern matching plus tightly scoped required-prefix matching for selected Hebrew family stems instead of loose substring hits; bottled_water may bypass category only when strong water tokens, a volume pack signature, and cosmetic-water exclusions all agree, and soft_cheese_basic may bypass category only when strong cottage/labneh-style name evidence and a weight pack signature agree while cosmetic/non-dairy exclusions stay clear",
+                  "comparison_family_key": "assigned from a small curated comparison_family_registry using token-aware required and forbidden pattern matching plus tightly scoped required-prefix matching for selected Hebrew family stems instead of loose substring hits; bread_basic now explicitly excludes flour and bread-mix style items, bottled_water may bypass category only when strong water tokens, a volume pack signature, and cosmetic-water exclusions all agree, and soft_cheese_basic may bypass category only when strong cottage/labneh-style name evidence and a weight pack signature agree while cosmetic/non-dairy exclusions stay clear",
                   "brand_identity_key": "normalized brand plus manufacturer tokens with corporate suffix removal",
                   "line_signature": "name tokens with pack expressions, numeric noise, and brand/manufacturer tokens removed while preserving fat and size qualifiers when explicit",
                   "pack_signature": "legacy pack parsing plus compact Hebrew unit suffix parsing, Hebrew quote-mark unit variants, eggs count parsing including construct-form egg labels, bottled-water liter multipack parsing when family rules allow it, and preliminary pack parsing used only for tightly scoped category-bypass diagnostics such as bottled_water volume checks and soft_cheese_basic weight checks",
@@ -5147,6 +5206,52 @@ jobs:
               },
           }
           write_json(OUT_DIR / "comparison_source_contract.json", comparison_source_contract)
+
+          supabase_ingest_contract = {
+              "shadow_only": True,
+              "publish_gate_impact": "none",
+              "intended_for_first_wet_run_planning": True,
+              "selected_city_scope_drives_visible_comparison_results": True,
+              "resolution_layers": {
+                  "exact_baseline": "same product resolution without user approval",
+                  "approved_equivalent": "very-close substitute that should only surface after explicit user approval in the cart screen",
+                  "budget_alternative": "lower-cost option that stays separate from baseline comparison and should only surface after explicit user approval",
+                  "unresolved": "line remains missing and must stay visible as a real gap",
+              },
+              "tables": {
+                  "products_current": {
+                      "purpose": "current normalized product metadata used for matching and user-visible catalog fields",
+                      "required_columns": ["barcode", "name", "category", "brand", "manufacturer", "gf_flag", "gf_verified", "substitute_group"],
+                      "primary_source_artifacts": ["product_payload_coverage.json", "comparison_source_contract.json"],
+                  },
+                  "stores_current": {
+                      "purpose": "current target store roster, city scope, store relevance hints, and source completeness state",
+                      "required_columns": ["store_key", "retailer", "city", "address", "store_format_hint", "grocery_depth_class", "relevance_classification", "has_price_payload", "has_promo_payload", "missing_price_file", "missing_promo_file"],
+                      "primary_source_artifacts": ["target_stores.csv", "store_relevance_classification_summary.json", "comparison_screen_store_cards_by_city_scope.json", "target_coverage_by_store.csv"],
+                  },
+                  "prices_current": {
+                      "purpose": "official current price rows per store and barcode",
+                      "required_columns": ["store_key", "barcode", "regular_price", "effective_price", "last_seen_at"],
+                      "primary_source_artifacts": ["comparison_source_contract.json", "source_freshness_summary.json", "download_stage_summary.json"],
+                  },
+                  "promotions_current": {
+                      "purpose": "current promotion header rows tied to stores and promotion identifiers",
+                      "required_columns": ["promotion_key", "store_key", "description", "last_seen_at"],
+                      "primary_source_artifacts": ["promotion_items_write_plan.json", "download_stage_summary.json"],
+                  },
+                  "basket_store_cards_current": {
+                      "purpose": "store-level comparison cards for the approved basket inside the selected city scope",
+                      "required_columns": ["basket_probe_name", "city_scope", "store_key", "comparison_card_state", "comparison_visibility_tier", "fulfillment_mode", "covered_line_count", "missing_line_count", "comparison_screen_total"],
+                      "primary_source_artifacts": ["comparison_screen_store_cards_by_city_scope.json", "comparison_screen_readiness_summary.json", "store_relevance_classification_summary.json"],
+                  },
+                  "basket_offer_coverage_current": {
+                      "purpose": "city-scoped offer summaries that explain which exact lines need approval and which offers help completion",
+                      "required_columns": ["basket_probe_name", "city_scope", "source_item_id", "recommended_offer_layer", "recommended_offer_role", "helped_full_completion_store_count"],
+                      "primary_source_artifacts": ["cart_summary_offer_coverage_by_city_scope.json", "cart_offer_completion_gain_summary.json"],
+                  },
+              },
+          }
+          write_json(OUT_DIR / "supabase_ingest_contract.json", supabase_ingest_contract)
 
           shadow_store_rows_by_family = defaultdict(lambda: defaultdict(list))
           shadow_store_rows_by_equivalence_group = defaultdict(lambda: defaultdict(list))
@@ -5221,6 +5326,7 @@ jobs:
 
           def build_store_relevance_profile(store_key: str):
               coverage_row = price_store_coverage_by_store_key.get(clean_text(store_key), {})
+              target_coverage_row = target_coverage_by_store_key.get(clean_text(store_key), {})
               family_counter = curated_family_presence_by_store_key.get(clean_text(store_key), Counter())
               valid_price_rows = int(coverage_row.get("valid_price_rows") or 0)
               unique_barcodes = int(coverage_row.get("unique_barcodes") or 0)
@@ -5240,11 +5346,19 @@ jobs:
                   grocery_depth_class = "mid_grocery_depth"
               else:
                   grocery_depth_class = "shallow_grocery_depth"
+              has_price_payload = bool(target_coverage_row.get("has_price_payload"))
+              has_promo_payload = bool(target_coverage_row.get("has_promo_payload"))
+              missing_price_file = bool(target_coverage_row.get("missing_price_file"))
+              missing_promo_file = bool(target_coverage_row.get("missing_promo_file"))
               return {
                   "store_format_hint": format_hint,
                   "grocery_depth_class": grocery_depth_class,
                   "valid_price_rows": valid_price_rows,
                   "unique_barcodes": unique_barcodes,
+                  "has_price_payload": has_price_payload,
+                  "has_promo_payload": has_promo_payload,
+                  "missing_price_file": missing_price_file,
+                  "missing_promo_file": missing_promo_file,
                   "core_basket_family_presence_count": core_family_presence_count,
                   "top_present_core_families": [
                       family_key
@@ -6630,6 +6744,13 @@ jobs:
                   relevance_classification = "comparison_ready_full_basket"
               elif store_row["near_full_after_user_approved_alternatives"]:
                   relevance_classification = "comparison_ready_near_full_basket"
+              elif (
+                  profile["missing_price_file"]
+                  and profile["missing_promo_file"]
+                  and not profile["has_price_payload"]
+                  and not profile["has_promo_payload"]
+              ):
+                  relevance_classification = "source_missing_target_store"
               elif profile["store_format_hint"] == "be_small_format":
                   relevance_classification = "small_format_partial_basket_store"
               elif likely_gap_class == "likely_equivalence_group_derivation_gap":
@@ -6954,6 +7075,7 @@ jobs:
                       "retailer": row.get("retailer"),
                       "city": row.get("city"),
                       "fulfillment_mode": fulfillment_mode,
+                      "comparison_visibility_tier": "primary_full_basket_results",
                       "comparison_card_state": (
                           "full_basket"
                           if row["complete_with_budget_alternatives"]
@@ -6985,6 +7107,16 @@ jobs:
                       basket_probe_name,
                   )
                   covered_line_count = max(0, selected_probe_size - row["resolved_missing_line_count"])
+                  should_surface_in_secondary_partial_store_section = relevance_classification in (
+                      "comparison_ready_near_full_basket",
+                      "small_format_partial_basket_store",
+                      "source_missing_target_store",
+                      "recoverable_derivation_gap",
+                      "recoverable_family_or_equivalence_gap",
+                  )
+                  should_surface_in_tertiary_shallow_store_section = relevance_classification == (
+                      "genuinely_shallow_or_non_grocery_store"
+                  )
                   return {
                       "store_key": row["store_key"],
                       "retailer": row.get("retailer"),
@@ -6993,6 +7125,10 @@ jobs:
                       "likely_gap_class": likely_gap_class,
                       "store_format_hint": profile["store_format_hint"],
                       "grocery_depth_class": profile["grocery_depth_class"],
+                      "has_price_payload": profile["has_price_payload"],
+                      "has_promo_payload": profile["has_promo_payload"],
+                      "missing_price_file": profile["missing_price_file"],
+                      "missing_promo_file": profile["missing_promo_file"],
                       "covered_line_count": covered_line_count,
                       "missing_line_count": row["resolved_missing_line_count"],
                       "coverage_display": f"{covered_line_count}/{selected_probe_size}",
@@ -7003,11 +7139,16 @@ jobs:
                       "top_unresolved_families": dict(family_counts.most_common(5)),
                       "top_diagnostic_bucket_counts": dict(bucket_counts.most_common(5)),
                       "reason_passed_or_failed": row["reason_passed_or_failed"],
-                      "should_surface_in_secondary_partial_store_section": relevance_classification in (
-                          "comparison_ready_near_full_basket",
-                          "small_format_partial_basket_store",
-                          "recoverable_derivation_gap",
-                          "recoverable_family_or_equivalence_gap",
+                      "should_surface_in_secondary_partial_store_section": should_surface_in_secondary_partial_store_section,
+                      "should_surface_in_tertiary_shallow_store_section": should_surface_in_tertiary_shallow_store_section,
+                      "comparison_visibility_tier": (
+                          "secondary_partial_store_section"
+                          if should_surface_in_secondary_partial_store_section
+                          else (
+                              "tertiary_shallow_store_section"
+                              if should_surface_in_tertiary_shallow_store_section
+                              else "hidden_by_default"
+                          )
                       ),
                   }
 
@@ -7025,6 +7166,19 @@ jobs:
                           row for row in scope_rows
                           if row["near_full_after_user_approved_alternatives"]
                           and not row["complete_with_budget_alternatives"]
+                      ]
+                      excluded_incomplete_store_cards_sorted_by_missing_count = [
+                          build_excluded_store_card(row)
+                          for row in sorted(
+                              (
+                                  row for row in scope_rows
+                                  if not row["near_full_after_user_approved_alternatives"]
+                              ),
+                              key=lambda row: (
+                                  row["resolved_missing_line_count"],
+                                  row["store_key"],
+                              ),
+                          )
                       ]
                       city_scope_breakdown[" + ".join(city_scope)] = {
                           "selected_city_count": len(city_scope),
@@ -7057,19 +7211,22 @@ jobs:
                               for row in scope_rows
                               if not row["near_full_after_user_approved_alternatives"]
                           ],
-                          "excluded_incomplete_store_cards_sorted_by_missing_count": [
-                              build_excluded_store_card(row)
-                              for row in sorted(
-                                  (
-                                      row for row in scope_rows
-                                      if not row["near_full_after_user_approved_alternatives"]
-                                  ),
-                                  key=lambda row: (
-                                      row["resolved_missing_line_count"],
-                                      row["store_key"],
-                                  ),
-                              )
-                          ],
+                          "excluded_incomplete_store_cards_sorted_by_missing_count": excluded_incomplete_store_cards_sorted_by_missing_count,
+                          "secondary_partial_store_count": sum(
+                              1
+                              for row in excluded_incomplete_store_cards_sorted_by_missing_count
+                              if row["comparison_visibility_tier"] == "secondary_partial_store_section"
+                          ),
+                          "tertiary_shallow_store_count": sum(
+                              1
+                              for row in excluded_incomplete_store_cards_sorted_by_missing_count
+                              if row["comparison_visibility_tier"] == "tertiary_shallow_store_section"
+                          ),
+                          "hidden_incomplete_store_count": sum(
+                              1
+                              for row in excluded_incomplete_store_cards_sorted_by_missing_count
+                              if row["comparison_visibility_tier"] == "hidden_by_default"
+                          ),
                       }
               comparison_screen_store_cards_by_city_scope["basket_probes"][basket_probe_name] = city_scope_breakdown
           write_json(
@@ -7092,23 +7249,10 @@ jobs:
               classification_rows = []
               classification_counts = Counter()
               for row in sorted(probe_store_rows, key=lambda store_row: store_row["store_key"]):
-                  profile = build_store_relevance_profile(row["store_key"])
-                  likely_gap_class, bucket_counts = derive_store_gap_class(
+                  relevance_classification, likely_gap_class, bucket_counts, family_counts, profile = derive_store_relevance_classification(
+                      row,
                       basket_probe_name,
-                      row["store_key"],
                   )
-                  if row["complete_with_budget_alternatives"]:
-                      relevance_classification = "comparison_ready_full_basket"
-                  elif row["near_full_after_user_approved_alternatives"]:
-                      relevance_classification = "comparison_ready_near_full_basket"
-                  elif profile["store_format_hint"] == "be_small_format":
-                      relevance_classification = "small_format_partial_basket_store"
-                  elif likely_gap_class == "likely_equivalence_group_derivation_gap":
-                      relevance_classification = "recoverable_derivation_gap"
-                  elif likely_gap_class == "likely_store_side_family_assignment_or_equivalence_grouping_gap":
-                      relevance_classification = "recoverable_family_or_equivalence_gap"
-                  else:
-                      relevance_classification = "genuinely_shallow_or_non_grocery_store"
                   classification_counts[relevance_classification] += 1
                   classification_rows.append({
                       "store_key": row["store_key"],
@@ -7117,6 +7261,7 @@ jobs:
                       "relevance_classification": relevance_classification,
                       "likely_gap_class": likely_gap_class,
                       "diagnostic_bucket_counts": dict(bucket_counts.most_common(5)),
+                      "top_unresolved_families": dict(family_counts.most_common(5)),
                       **profile,
                   })
               store_relevance_classification_summary["basket_probes"][basket_probe_name] = {
@@ -7892,10 +8037,50 @@ jobs:
           write_json(OUT_DIR / "artifact_self_check.json", artifact_self_check)
           
           source_freshness_ok = not stale_price_source_store_keys and not stale_promo_source_store_keys
-          strict_target_coverage_ok = not missing_price_store_keys and not failed_price_store_rows and not missing_promo_store_keys and not failed_promo_store_rows and source_freshness_ok
-          store_readiness_ok = not weak_target_store_keys
+          comparison_publish_probe_name = "core_food_basket_20"
+          comparison_publish_probe = comparison_screen_readiness_summary["basket_probes"].get(comparison_publish_probe_name, {})
+          comparison_publish_city_breakdown = comparison_publish_probe.get("city_breakdown", {})
+          comparison_publish_store_rows_by_key = {
+              row["store_key"]: row
+              for row in basket_store_shadow_rows
+              if row["basket_probe_name"] == comparison_publish_probe_name
+          }
+          comparison_publish_relevance_by_store_key = {
+              store_key: derive_store_relevance_classification(row, comparison_publish_probe_name)[0]
+              for store_key, row in comparison_publish_store_rows_by_key.items()
+          }
+          comparison_relevance_probe = store_relevance_classification_summary["basket_probes"].get(comparison_publish_probe_name, {})
+          comparison_relevance_counts = Counter(comparison_relevance_probe.get("classification_counts", {}))
+          tolerated_missing_target_store_keys = sorted(
+              store_key
+              for store_key in sorted(set(missing_price_store_keys) | set(missing_promo_store_keys))
+              if comparison_publish_relevance_by_store_key.get(store_key) in (
+                  "source_missing_target_store",
+                  "small_format_partial_basket_store",
+              )
+          )
+          effective_missing_price_store_keys = sorted(set(missing_price_store_keys) - set(tolerated_missing_target_store_keys))
+          effective_missing_promo_store_keys = sorted(set(missing_promo_store_keys) - set(tolerated_missing_target_store_keys))
+          effective_missing_coverage_store_keys = sorted(set(store_set_consistency.get("target_missing_in_coverage", [])) - set(tolerated_missing_target_store_keys))
+          strict_target_coverage_ok = not effective_missing_price_store_keys and not failed_price_store_rows and not effective_missing_promo_store_keys and not failed_promo_store_rows and source_freshness_ok
+          store_set_consistency_ok = not store_set_consistency.get("target_missing_cities") and not effective_missing_price_store_keys and not effective_missing_promo_store_keys and not effective_missing_coverage_store_keys and not store_set_consistency.get("price_not_in_target") and not store_set_consistency.get("promo_not_in_target") and not store_set_consistency.get("coverage_not_in_target")
+          store_set_consistency["tolerated_missing_target_store_keys"] = tolerated_missing_target_store_keys
+          store_set_consistency["blocking_target_missing_in_prices"] = effective_missing_price_store_keys
+          store_set_consistency["blocking_target_missing_in_promotions"] = effective_missing_promo_store_keys
+          store_set_consistency["blocking_target_missing_in_coverage"] = effective_missing_coverage_store_keys
+          store_set_consistency["store_set_consistency_ok"] = store_set_consistency_ok
+          write_json(OUT_DIR / "store_set_consistency.json", store_set_consistency)
+          comparison_publish_ready_store_count = int(comparison_publish_probe.get("eligible_full_store_count_after_user_approved_equivalents") or 0)
+          comparison_publish_city_gaps = sorted(
+              city_name
+              for city_name in TARGET_CITIES
+              if int((comparison_publish_city_breakdown.get(city_name) or {}).get("eligible_full_store_count_after_user_approved_equivalents") or 0) == 0
+          )
+          comparison_recoverable_gap_store_count = int(comparison_relevance_counts.get("recoverable_derivation_gap", 0)) + int(comparison_relevance_counts.get("recoverable_family_or_equivalence_gap", 0))
+          store_readiness_ok = comparison_publish_ready_store_count > 0 and not comparison_publish_city_gaps and comparison_recoverable_gap_store_count == 0
           covered_target_store_keys = sorted(target_store_key_set & price_store_key_set & promo_store_key_set)
-          uncovered_target_store_keys = sorted(target_store_key_set - set(covered_target_store_keys))
+          quarantined_target_store_keys = tolerated_missing_target_store_keys
+          uncovered_target_store_keys = sorted(target_store_key_set - set(covered_target_store_keys) - set(quarantined_target_store_keys))
           covered_target_city_set = {discovered_stores_map[key]["canonical_city"] for key in covered_target_store_keys}
           covered_target_retailer_set = {discovered_stores_map[key]["retailer"] for key in covered_target_store_keys}
           missing_covered_target_cities = sorted(set(TARGET_CITIES) - covered_target_city_set)
@@ -7949,7 +8134,6 @@ jobs:
               uncovered_target_rows,
               ["store_key", "retailer", "store_name", "city", "missing_price_file", "missing_promo_file", "has_price_payload", "has_promo_payload"],
           )
-          quarantined_target_store_keys = []
           write_json(OUT_DIR / "partial_safe_mode_summary.json", {
               "write_mode": write_mode,
               "covered_target_store_count": len(covered_target_store_keys),
@@ -7957,7 +8141,7 @@ jobs:
               "quarantined_target_store_count": len(quarantined_target_store_keys),
               "covered_store_keys": covered_target_store_keys,
               "quarantined_store_keys": quarantined_target_store_keys,
-              "note": "Full-comparison-only mode: the workflow writes only when every selected MVP store has both prices and promotions. Otherwise the DB is left untouched and the previous complete comparison remains in place.",
+              "note": "Compare-ready publish mode may quarantine source-missing or small-format gap stores by deleting their stale current-state rows while keeping the larger comparison-ready scope publishable.",
           })
           write_json(OUT_DIR / "db_write_decision.json", {
               "write_mode": write_mode,
@@ -7965,6 +8149,13 @@ jobs:
               "source_freshness_ok": source_freshness_ok,
               "store_readiness_ok": store_readiness_ok,
               "store_set_consistency_ok": store_set_consistency_ok,
+              "comparison_publish_probe_name": comparison_publish_probe_name,
+              "comparison_publish_ready_store_count": comparison_publish_ready_store_count,
+              "comparison_publish_city_gaps": comparison_publish_city_gaps,
+              "comparison_recoverable_gap_store_count": comparison_recoverable_gap_store_count,
+              "tolerated_missing_target_store_keys": tolerated_missing_target_store_keys,
+              "blocking_missing_price_store_keys": effective_missing_price_store_keys,
+              "blocking_missing_promo_store_keys": effective_missing_promo_store_keys,
               "artifact_self_check_ok": artifact_self_check["artifact_self_check_ok"],
               "store_readiness_consistency_ok": store_readiness_consistency["consistency_ok"],
               "artifact_self_check_reasons": artifact_self_check["reasons"],
@@ -8003,6 +8194,8 @@ jobs:
               "successful_promo_store_keys": len(successful_promo_store_keys),
               "missing_price_store_keys": len(missing_price_store_keys),
               "missing_promo_store_keys": len(missing_promo_store_keys),
+              "blocking_missing_price_store_keys": len(effective_missing_price_store_keys),
+              "blocking_missing_promo_store_keys": len(effective_missing_promo_store_keys),
               "failed_promo_store_rows": len(failed_promo_store_rows),
               "legacy_store_key_aliases": len(legacy_store_key_aliases),
               "unresolved_existing_target_rows": len(unresolved_existing_target_rows),
@@ -8013,6 +8206,8 @@ jobs:
               "artifact_self_check_ok": artifact_self_check["artifact_self_check_ok"],
               "strict_target_coverage_ok": strict_target_coverage_ok,
               "store_readiness_ok": store_readiness_ok,
+              "comparison_publish_ready_store_count": comparison_publish_ready_store_count,
+              "comparison_recoverable_gap_store_count": comparison_recoverable_gap_store_count,
               "covered_target_store_keys": len(covered_target_store_keys),
               "uncovered_target_store_keys": len(uncovered_target_store_keys),
               "quarantined_target_store_keys": len(quarantined_target_store_keys),
@@ -8029,16 +8224,16 @@ jobs:
           write_json(OUT_DIR / "payload_keysets_summary.json", {
               "products": summarize_payload_keysets(products_payload),
               "stores": summarize_payload_keysets(stores_payload),
-              "prices_current": summarize_payload_keysets(prices_payload),
+              "prices_current": summarize_payload_keysets([select_fields(row, PRICES_CURRENT_DB_FIELDS) for row in prices_payload]),
               "promotions_current": summarize_payload_keysets([select_fields(row, PROMOTIONS_CURRENT_DB_FIELDS) for row in promotions_payload]),
-              "promotion_items_current": summarize_payload_keysets(promotion_items_payload),
+              "promotion_items_current": summarize_payload_keysets([select_fields(row, PROMOTION_ITEMS_CURRENT_DB_FIELDS) for row in promotion_items_payload]),
           })
           write_json(OUT_DIR / "promotion_items_write_plan.json", {
               "write_promotion_items": WRITE_PROMOTION_ITEMS,
               "compare_ready_summary": compare_ready_summary,
               "promotion_items_payload_total": len(promotion_items_payload),
               "recommended_for_supabase_free": False,
-              "note": "Compare-ready mode keeps promotion_items_current disabled by default for the scheduled Free-plan run. The workflow still requires full store coverage before publishing.",
+              "note": "Compare-ready mode keeps promotion_items_current disabled by default for the scheduled Free-plan run. Publish can tolerate quarantined source-missing or small-format gaps while still requiring fresh official coverage for the comparison-ready scope.",
           })
           write_json(OUT_DIR / "run_summary.json", {
               **payload_counts,
@@ -8074,26 +8269,34 @@ jobs:
               if not store_set_consistency_ok:
                   coverage_errors.append("store_set_consistency_ok=false")
               if not store_readiness_ok:
-                  coverage_errors.append(f"weak_target_store_keys={len(weak_target_store_keys)}")
+                  coverage_errors.append(f"comparison_publish_ready_store_count={comparison_publish_ready_store_count}")
+                  if comparison_publish_city_gaps:
+                      coverage_errors.append(f"comparison_publish_city_gaps={len(comparison_publish_city_gaps)}")
+                  if comparison_recoverable_gap_store_count:
+                      coverage_errors.append(f"comparison_recoverable_gap_store_count={comparison_recoverable_gap_store_count}")
               if not product_hard_quality_ok:
                   coverage_errors.append(
                       f"product_hard_quality_failed(name>={minimum_name_pct_hard},category>={minimum_category_pct},placeholder_leaks=0)"
                   )
-              message = "DB write blocked because the selected MVP scope is not complete enough for a full daily comparison: " + ", ".join(coverage_errors)
+              message = "DB write blocked because the selected MVP scope is not safe enough for compare-ready publish: " + ", ".join(coverage_errors)
               if WRITE_TO_SUPABASE:
                   raise SystemExit(message)
               log(message)
-              log("WRITE_TO_SUPABASE=false -> payload built for inspection only. Full comparison publish gate not approved.")
+              log("WRITE_TO_SUPABASE=false -> payload built for inspection only. Compare-ready publish gate not approved.")
               sys.exit(0)
           
           if not WRITE_TO_SUPABASE:
-              log("WRITE_TO_SUPABASE=false -> full target coverage achieved; DB write is ready.")
+              log("WRITE_TO_SUPABASE=false -> compare-ready publish gate achieved; DB write is ready.")
               sys.exit(0)
           
           safe_write_store_keys = set(covered_target_store_keys)
           quarantined_target_store_key_set = set(quarantined_target_store_keys)
           safe_price_pairs = {(row["store_key"], row["barcode"]) for row in prices_payload if row["store_key"] in safe_write_store_keys}
-          prices_payload_to_write = [row for row in prices_payload if row["store_key"] in safe_write_store_keys]
+          prices_payload_to_write = [
+              select_fields(row, PRICES_CURRENT_DB_FIELDS)
+              for row in prices_payload
+              if row["store_key"] in safe_write_store_keys
+          ]
           promotions_payload_to_write = [
               select_fields(row, PROMOTIONS_CURRENT_DB_FIELDS)
               for row in promotions_payload
@@ -8101,7 +8304,8 @@ jobs:
           ]
           promotion_store_key_by_key = {row["promotion_key"]: row["store_key"] for row in promotions_payload_to_write}
           promotion_items_payload_to_write = [
-              row for row in promotion_items_payload
+              select_fields(row, PROMOTION_ITEMS_CURRENT_DB_FIELDS)
+              for row in promotion_items_payload
               if (promotion_store_key_by_key.get(row["promotion_key"]), row["barcode"]) in safe_price_pairs
           ]
           processed_promotion_keys_to_write = {row["promotion_key"] for row in promotions_payload_to_write}
@@ -8280,6 +8484,7 @@ jobs:
             out/basket_shadow_root_cause_summary.json
             out/comparison_source_coverage_audit.json
             out/comparison_source_contract.json
+            out/supabase_ingest_contract.json
             out/non_exact_upgrade_impact_summary.json
             out/source_freshness_by_store.csv
             out/source_freshness_summary.json
