@@ -1,4 +1,4 @@
-name: GlutiWise Current Sync to Supabase v25
+name: GlutiWise Current Sync to Supabase v26
 
 on:
   workflow_dispatch:
@@ -36,10 +36,6 @@ on:
         type: string
         default: ""
 
-concurrency:
-  # Keep each manual dry-run independent so an older stuck queued run cannot poison the next one.
-  group: glutiwise-current-sync-v25-${{ github.ref_name }}-${{ github.run_id }}
-  cancel-in-progress: false
 
 defaults:
   run:
@@ -8434,7 +8430,7 @@ jobs:
         timeout-minutes: 10
         uses: actions/upload-artifact@v6
         with:
-          name: glutiwise-current-sync-v25-${{ github.run_id }}
+          name: glutiwise-current-sync-v26-${{ github.run_id }}
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
           if-no-files-found: warn
           path: |
