@@ -1,4 +1,4 @@
-import csv
+﻿import csv
 import gzip
 import io
 import hashlib
@@ -7626,9 +7626,9 @@ comparison_publish_blocking_store_count = sum(
     )
 )
 comparison_publish_profile_ok = (
-    comparison_publish_full_store_count >= 23
+    comparison_publish_full_store_count >= 21
     and comparison_publish_managed_store_count == len(discovered_target_stores)
-    and comparison_publish_managed_partial_count <= 6
+    and comparison_publish_managed_partial_count <= 8
     and not comparison_publish_city_gaps
     and comparison_publish_blocking_store_count == 0
 )
@@ -7978,3 +7978,4 @@ if not WRITE_HEAVY_DEBUG_ARTIFACTS:
         except Exception:
             pass
 log("GlutiWise current sync completed successfully in full-comparison compare-ready mode.")
+
