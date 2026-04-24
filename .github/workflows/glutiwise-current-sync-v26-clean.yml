@@ -1,0 +1,398 @@
+name: GlutiWise Current Sync to Supabase v26 Clean
+
+on:
+  workflow_dispatch:
+    inputs:
+      write_to_supabase:
+        description: "Write to Supabase"
+        required: true
+        type: boolean
+        default: false
+      write_promotion_items:
+        description: "Write promotion_items_current debug layer"
+        required: true
+        type: boolean
+        default: false
+      mvp_scope_profile:
+        description: "Locked MVP scope profile"
+        required: true
+        type: choice
+        options:
+          - free_mvp_3_cities
+        default: free_mvp_3_cities
+      target_cities_csv:
+        description: "Optional comma-separated subset override from the locked MVP cities only: Hod HaSharon, Kfar Saba, Ramat HaSharon"
+        required: false
+        type: string
+        default: ""
+      allow_large_promotion_scope:
+        description: "Override Free-plan guardrails for large promotion-item writes"
+        required: true
+        type: boolean
+        default: false
+      scraper_today:
+        description: "Optional UTC override for scraper TODAY, format YYYY-MM-DD HH:MM"
+        required: false
+        type: string
+        default: ""
+
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      GITHUB_EVENT_NAME: ${{ github.event_name }}
+      WRITE_TO_SUPABASE: ${{ inputs.write_to_supabase || 'false' }}
+      WRITE_PROMOTION_ITEMS: ${{ inputs.write_promotion_items || 'false' }}
+      MVP_SCOPE_PROFILE: ${{ inputs.mvp_scope_profile || 'free_mvp_3_cities' }}
+      TARGET_CITIES_CSV: ${{ inputs.target_cities_csv || '' }}
+      ALLOW_LARGE_PROMOTION_SCOPE: ${{ inputs.allow_large_promotion_scope || 'false' }}
+      SCRAPER_TODAY: ${{ inputs.scraper_today || '' }}
+      SCHEDULED_SCOPE_PROFILE: "free_mvp_3_cities"
+      SCHEDULED_WRITE_TO_SUPABASE: "false"
+      SCHEDULED_WRITE_PROMOTION_ITEMS: "false"
+      SCHEDULED_ALLOW_LARGE_PROMOTION_SCOPE: "false"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
+      WRITE_HEAVY_DEBUG_ARTIFACTS: "false"
+      SOURCE_MAX_AGE_HOURS: "48"
+      ARTIFACT_RETENTION_DAYS: "1"
+      DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER: "12"
+      SHUFERSAL_DOWNLOAD_TIMEOUT_MINUTES: "18"
+      DOWNLOAD_RETRY_ATTEMPTS: "2"
+      LOCKED_MVP_STORE_LIMIT: "29"
+      MAX_TARGET_STORES_SAFE: "29"
+      SECONDARY_SOURCE_MODE: "cheapersal_qa_ready_no_fetch"
+      SECONDARY_SOURCE_CANDIDATE: "cheapersal"
+      SECONDARY_SOURCE_FETCH_ENABLED: "false"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare folders
+        run: |
+          mkdir -p dumps out out/chunks
+
+      - name: Pull scraper image
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          retry() {
+            local max_attempts="$1"
+            shift
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                return 1
+              fi
+              sleep $((attempt * 10))
+              attempt=$((attempt + 1))
+            done
+          }
+          retry 3 docker pull erlichsefi/israeli-supermarket-scarpers:latest
+
+      - name: Initialize retailer download tracker
+        run: |
+          printf "retailer,status,attempts,last_exit_code,timeout_minutes,duration_seconds,notes\n" > out/download_retailer_status.csv
+
+      - name: Download RAMI_LEVY files
+        timeout-minutes: 16
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          SCRAPER="RAMI_LEVY"
+          DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER="${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER:-12}"
+          DOWNLOAD_RETRY_ATTEMPTS="${DOWNLOAD_RETRY_ATTEMPTS:-2}"
+          LAST_EXIT_CODE=0
+          LAST_DURATION_SECONDS=0
+          run_scraper_once() {
+            local start_ts end_ts exit_code
+            local args=(
+              --rm
+              -v "${{ github.workspace }}/dumps:/usr/src/app/dumps"
+              -e "ENABLED_SCRAPERS=${SCRAPER}"
+              -e ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE,PROMO_FULL_FILE"
+              -e NUMBER_OF_PROCESSES="2"
+              -e OUTPUT_MODE="disk"
+              -e STORAGE_PATH="/usr/src/app/dumps"
+            )
+            if [ -n "${SCRAPER_TODAY}" ]; then
+              args+=( -e "TODAY=${SCRAPER_TODAY}" )
+            fi
+            start_ts=$(date +%s)
+            set +e
+            timeout --signal=TERM --kill-after=45s "${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER}m" \
+              docker run "${args[@]}" erlichsefi/israeli-supermarket-scarpers:latest
+            exit_code=$?
+            set -e
+            end_ts=$(date +%s)
+            LAST_EXIT_CODE="$exit_code"
+            LAST_DURATION_SECONDS=$((end_ts - start_ts))
+            return "$exit_code"
+          }
+          attempt=1
+          status="failed"
+          note="docker_run_failed"
+          while [ "$attempt" -le "$DOWNLOAD_RETRY_ATTEMPTS" ]; do
+            echo "Starting download for ${SCRAPER} (attempt ${attempt}/${DOWNLOAD_RETRY_ATTEMPTS})"
+            if run_scraper_once; then
+              status="success"
+              note="download_completed"
+              break
+            fi
+            if [ "$LAST_EXIT_CODE" -eq 124 ] || [ "$LAST_EXIT_CODE" -eq 137 ]; then
+              status="timeout"
+              note="download_timeout_per_retailer"
+              break
+            fi
+            if [ "$attempt" -ge "$DOWNLOAD_RETRY_ATTEMPTS" ]; then
+              status="failed"
+              note="docker_run_failed_after_retries"
+              break
+            fi
+            sleep $((attempt * 15))
+            attempt=$((attempt + 1))
+          done
+          printf "%s,%s,%s,%s,%s,%s,%s\n" \
+            "$SCRAPER" "$status" "$attempt" "$LAST_EXIT_CODE" "$DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER" "$LAST_DURATION_SECONDS" "$note" \
+            >> out/download_retailer_status.csv
+          if [ "$status" != "success" ]; then
+            echo "Retailer download failure recorded for ${SCRAPER}: ${status}"
+          fi
+
+      - name: Download SHUFERSAL files
+        timeout-minutes: 22
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          SCRAPER="SHUFERSAL"
+          DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER="${SHUFERSAL_DOWNLOAD_TIMEOUT_MINUTES:-18}"
+          DOWNLOAD_RETRY_ATTEMPTS="${DOWNLOAD_RETRY_ATTEMPTS:-2}"
+          LAST_EXIT_CODE=0
+          LAST_DURATION_SECONDS=0
+          run_scraper_once() {
+            local start_ts end_ts exit_code
+            local args=(
+              --rm
+              -v "${{ github.workspace }}/dumps:/usr/src/app/dumps"
+              -e "ENABLED_SCRAPERS=${SCRAPER}"
+              -e ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE,PROMO_FULL_FILE"
+              -e NUMBER_OF_PROCESSES="2"
+              -e OUTPUT_MODE="disk"
+              -e STORAGE_PATH="/usr/src/app/dumps"
+            )
+            if [ -n "${SCRAPER_TODAY}" ]; then
+              args+=( -e "TODAY=${SCRAPER_TODAY}" )
+            fi
+            start_ts=$(date +%s)
+            set +e
+            timeout --signal=TERM --kill-after=45s "${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER}m" \
+              docker run "${args[@]}" erlichsefi/israeli-supermarket-scarpers:latest
+            exit_code=$?
+            set -e
+            end_ts=$(date +%s)
+            LAST_EXIT_CODE="$exit_code"
+            LAST_DURATION_SECONDS=$((end_ts - start_ts))
+            return "$exit_code"
+          }
+          attempt=1
+          status="failed"
+          note="docker_run_failed"
+          while [ "$attempt" -le "$DOWNLOAD_RETRY_ATTEMPTS" ]; do
+            echo "Starting download for ${SCRAPER} (attempt ${attempt}/${DOWNLOAD_RETRY_ATTEMPTS})"
+            if run_scraper_once; then
+              status="success"
+              note="download_completed"
+              break
+            fi
+            if [ "$LAST_EXIT_CODE" -eq 124 ] || [ "$LAST_EXIT_CODE" -eq 137 ]; then
+              status="timeout"
+              note="download_timeout_per_retailer"
+              break
+            fi
+            if [ "$attempt" -ge "$DOWNLOAD_RETRY_ATTEMPTS" ]; then
+              status="failed"
+              note="docker_run_failed_after_retries"
+              break
+            fi
+            sleep $((attempt * 15))
+            attempt=$((attempt + 1))
+          done
+          printf "%s,%s,%s,%s,%s,%s,%s\n" \
+            "$SCRAPER" "$status" "$attempt" "$LAST_EXIT_CODE" "$DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER" "$LAST_DURATION_SECONDS" "$note" \
+            >> out/download_retailer_status.csv
+          if [ "$status" != "success" ]; then
+            echo "Retailer download failure recorded for ${SCRAPER}: ${status}"
+          fi
+
+      - name: Download YOHANANOF files
+        timeout-minutes: 16
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          SCRAPER="YOHANANOF"
+          DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER="${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER:-12}"
+          DOWNLOAD_RETRY_ATTEMPTS="${DOWNLOAD_RETRY_ATTEMPTS:-2}"
+          LAST_EXIT_CODE=0
+          LAST_DURATION_SECONDS=0
+          run_scraper_once() {
+            local start_ts end_ts exit_code
+            local args=(
+              --rm
+              -v "${{ github.workspace }}/dumps:/usr/src/app/dumps"
+              -e "ENABLED_SCRAPERS=${SCRAPER}"
+              -e ENABLED_FILE_TYPES="STORE_FILE,PRICE_FULL_FILE,PROMO_FULL_FILE"
+              -e NUMBER_OF_PROCESSES="2"
+              -e OUTPUT_MODE="disk"
+              -e STORAGE_PATH="/usr/src/app/dumps"
+            )
+            if [ -n "${SCRAPER_TODAY}" ]; then
+              args+=( -e "TODAY=${SCRAPER_TODAY}" )
+            fi
+            start_ts=$(date +%s)
+            set +e
+            timeout --signal=TERM --kill-after=45s "${DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER}m" \
+              docker run "${args[@]}" erlichsefi/israeli-supermarket-scarpers:latest
+            exit_code=$?
+            set -e
+            end_ts=$(date +%s)
+            LAST_EXIT_CODE="$exit_code"
+            LAST_DURATION_SECONDS=$((end_ts - start_ts))
+            return "$exit_code"
+          }
+          attempt=1
+          status="failed"
+          note="docker_run_failed"
+          while [ "$attempt" -le "$DOWNLOAD_RETRY_ATTEMPTS" ]; do
+            echo "Starting download for ${SCRAPER} (attempt ${attempt}/${DOWNLOAD_RETRY_ATTEMPTS})"
+            if run_scraper_once; then
+              status="success"
+              note="download_completed"
+              break
+            fi
+            if [ "$LAST_EXIT_CODE" -eq 124 ] || [ "$LAST_EXIT_CODE" -eq 137 ]; then
+              status="timeout"
+              note="download_timeout_per_retailer"
+              break
+            fi
+            if [ "$attempt" -ge "$DOWNLOAD_RETRY_ATTEMPTS" ]; then
+              status="failed"
+              note="docker_run_failed_after_retries"
+              break
+            fi
+            sleep $((attempt * 15))
+            attempt=$((attempt + 1))
+          done
+          printf "%s,%s,%s,%s,%s,%s,%s\n" \
+            "$SCRAPER" "$status" "$attempt" "$LAST_EXIT_CODE" "$DOWNLOAD_TIMEOUT_MINUTES_PER_RETAILER" "$LAST_DURATION_SECONDS" "$note" \
+            >> out/download_retailer_status.csv
+          if [ "$status" != "success" ]; then
+            echo "Retailer download failure recorded for ${SCRAPER}: ${status}"
+          fi
+
+      - name: Validate external scripts
+        run: |
+          set -euo pipefail
+          test -f scripts/build_download_inventory_summary.py
+          test -f scripts/sync_glutiwise_current_v26.py
+          python3 -m py_compile scripts/build_download_inventory_summary.py scripts/sync_glutiwise_current_v26.py
+
+      - name: Build download inventory summary
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 scripts/build_download_inventory_summary.py
+
+      - name: Build payload, validate, and sync
+        timeout-minutes: 85
+        run: |
+          set -euo pipefail
+          python3 scripts/sync_glutiwise_current_v26.py
+
+      - name: Upload run artifacts
+        if: always()
+        timeout-minutes: 10
+        uses: actions/upload-artifact@v4
+        with:
+          name: glutiwise-current-sync-v26-clean-${{ github.run_id }}
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          if-no-files-found: warn
+          path: |
+            out/run_summary.json
+            out/mvp_scope_summary.json
+            out/downloaded_dump_inventory.csv
+            out/download_stage_summary.json
+            out/download_retailer_status.csv
+            out/source_gap_summary.json
+            out/price_source_gap_summary.json
+            out/store_discovery_summary.json
+            out/stores_discovered.csv
+            out/target_stores.csv
+            out/non_target_stores.csv
+            out/ambiguous_city_matches.csv
+            out/legacy_store_key_aliases.csv
+            out/unresolved_existing_target_rows.csv
+            out/target_store_registry_fallback.csv
+            out/compare_ready_summary.json
+            out/target_coverage_by_store.csv
+            out/target_coverage_by_city_retailer.csv
+            out/store_readiness.csv
+            out/store_readiness_summary.json
+            out/store_readiness_consistency.json
+            out/store_comparison_modes_probe.json
+            out/store_comparison_modes_summary.json
+            out/store_comparison_modes_root_cause_summary.json
+            out/core_food_basket_probe_items.json
+            out/core_food_basket_probe_quality_summary.json
+            out/comparison_family_registry_audit.json
+            out/product_match_derivation_audit.json
+            out/basket_line_shadow_matches.csv
+            out/basket_store_shadow_summary.csv
+            out/store_side_equivalence_candidate_coverage.csv
+            out/store_side_equivalence_candidate_coverage_summary.json
+            out/basket_completion_readiness_summary.json
+            out/comparison_screen_readiness_summary.json
+            out/comparison_screen_store_mode_mix_summary.json
+            out/comparison_screen_store_mode_mix_by_city_scope.json
+            out/comparison_screen_store_cards_by_city_scope.json
+            out/store_relevance_classification_summary.json
+            out/city_selection_readiness_summary.json
+            out/cart_summary_offer_coverage.json
+            out/cart_summary_offer_coverage_by_city_scope.json
+            out/cart_offer_completion_gain_summary.json
+            out/incomplete_store_basket_gap_summary.json
+            out/equivalence_gap_examples.json
+            out/store_comparison_family_coverage.csv
+            out/store_comparison_family_coverage_summary.json
+            out/store_family_gap_diagnostic.csv
+            out/store_family_gap_diagnostic_summary.json
+            out/basket_shadow_root_cause_summary.json
+            out/comparison_source_coverage_audit.json
+            out/comparison_source_contract.json
+            out/supabase_ingest_contract.json
+            out/non_exact_upgrade_impact_summary.json
+            out/source_freshness_by_store.csv
+            out/source_freshness_summary.json
+            out/store_set_consistency.json
+            out/product_quality_gate.json
+            out/product_payload_coverage.json
+            out/product_field_coverage_by_store.csv
+            out/product_placeholder_leak_summary.json
+            out/db_write_decision.json
+            out/partial_safe_mode_summary.json
+            out/uncovered_target_stores.csv
+            out/failed_price_files.csv
+            out/failed_promo_files.csv
+            out/missing_price_files.csv
+            out/missing_promo_files.csv
+            out/target_validation_failures.csv
+            out/dump_prune_summary.json
+            out/chunks/*.json
