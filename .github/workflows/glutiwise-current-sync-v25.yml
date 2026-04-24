@@ -1480,6 +1480,25 @@ jobs:
           def select_fields(row, allowed_fields):
               return {key: row[key] for key in allowed_fields if key in row}
 
+          PRICES_CURRENT_DB_FIELDS = (
+              "price_key",
+              "barcode",
+              "store_key",
+              "price",
+              "updated_at",
+              "last_seen_at",
+              "regular_price",
+              "effective_price",
+              "has_promotion",
+              "has_club_promotion",
+              "applied_promotion_key",
+              "applied_promotion_title",
+              "applied_promotion_type",
+              "promotion_benefit_text",
+              "promotion_start_at",
+              "promotion_end_at",
+          )
+
           PROMOTIONS_CURRENT_DB_FIELDS = (
               "promotion_key",
               "store_key",
@@ -1494,6 +1513,15 @@ jobs:
               "end_at",
               "updated_at",
               "last_seen_at",
+          )
+
+          PROMOTION_ITEMS_CURRENT_DB_FIELDS = (
+              "promotion_item_key",
+              "promotion_key",
+              "barcode",
+              "updated_at",
+              "last_seen_at",
+              "raw_payload",
           )
           
           def fetch_existing_products(barcodes):
@@ -8012,7 +8040,46 @@ jobs:
           
           source_freshness_ok = not stale_price_source_store_keys and not stale_promo_source_store_keys
           strict_target_coverage_ok = not missing_price_store_keys and not failed_price_store_rows and not missing_promo_store_keys and not failed_promo_store_rows and source_freshness_ok
-          store_readiness_ok = not weak_target_store_keys
+          comparison_publish_probe_name = "core_food_basket_10"
+          comparison_publish_probe = comparison_screen_readiness_summary["basket_probes"].get(comparison_publish_probe_name, {})
+          comparison_publish_city_breakdown = comparison_publish_probe.get("city_breakdown", {})
+          comparison_relevance_probe = store_relevance_classification_summary["basket_probes"].get(comparison_publish_probe_name, {})
+          comparison_relevance_counts = Counter(comparison_relevance_probe.get("classification_counts", {}))
+          comparison_publish_full_store_count = int(
+              comparison_publish_probe.get("eligible_full_store_count_after_user_approved_equivalents")
+              or comparison_publish_probe.get("eligible_full_store_count")
+              or comparison_relevance_counts.get("comparison_ready_full_basket", 0)
+              or 0
+          )
+          comparison_publish_managed_partial_count = (
+              int(comparison_relevance_counts.get("comparison_ready_near_full_basket", 0))
+              + int(comparison_relevance_counts.get("small_format_partial_basket_store", 0))
+              + int(comparison_relevance_counts.get("genuinely_shallow_or_non_grocery_store", 0))
+          )
+          comparison_publish_managed_store_count = comparison_publish_full_store_count + comparison_publish_managed_partial_count
+          comparison_publish_city_gaps = sorted(
+              city_name
+              for city_name in TARGET_CITIES
+              if int((comparison_publish_city_breakdown.get(city_name) or {}).get("eligible_full_store_count_after_user_approved_equivalents") or 0) == 0
+          )
+          comparison_publish_blocking_store_count = sum(
+              int(count or 0)
+              for classification, count in comparison_relevance_counts.items()
+              if classification not in (
+                  "comparison_ready_full_basket",
+                  "comparison_ready_near_full_basket",
+                  "small_format_partial_basket_store",
+                  "genuinely_shallow_or_non_grocery_store",
+              )
+          )
+          comparison_publish_profile_ok = (
+              comparison_publish_full_store_count >= 23
+              and comparison_publish_managed_store_count == len(discovered_target_stores)
+              and comparison_publish_managed_partial_count <= 6
+              and not comparison_publish_city_gaps
+              and comparison_publish_blocking_store_count == 0
+          )
+          store_readiness_ok = comparison_publish_profile_ok
           covered_target_store_keys = sorted(target_store_key_set & price_store_key_set & promo_store_key_set)
           uncovered_target_store_keys = sorted(target_store_key_set - set(covered_target_store_keys))
           covered_target_city_set = {discovered_stores_map[key]["canonical_city"] for key in covered_target_store_keys}
@@ -8076,7 +8143,7 @@ jobs:
               "quarantined_target_store_count": len(quarantined_target_store_keys),
               "covered_store_keys": covered_target_store_keys,
               "quarantined_store_keys": quarantined_target_store_keys,
-              "note": "Full-comparison-only mode: the workflow writes only when every selected MVP store has both prices and promotions. Otherwise the DB is left untouched and the previous complete comparison remains in place.",
+              "note": "Approved comparison publish mode writes only when official current-state coverage is fresh and the selected basket profile has enough full stores plus managed partial stores for the site.",
           })
           write_json(OUT_DIR / "db_write_decision.json", {
               "write_mode": write_mode,
@@ -8084,6 +8151,13 @@ jobs:
               "source_freshness_ok": source_freshness_ok,
               "store_readiness_ok": store_readiness_ok,
               "store_set_consistency_ok": store_set_consistency_ok,
+              "comparison_publish_probe_name": comparison_publish_probe_name,
+              "comparison_publish_full_store_count": comparison_publish_full_store_count,
+              "comparison_publish_managed_partial_count": comparison_publish_managed_partial_count,
+              "comparison_publish_managed_store_count": comparison_publish_managed_store_count,
+              "comparison_publish_city_gaps": comparison_publish_city_gaps,
+              "comparison_publish_blocking_store_count": comparison_publish_blocking_store_count,
+              "comparison_publish_profile_ok": comparison_publish_profile_ok,
               "artifact_self_check_ok": artifact_self_check["artifact_self_check_ok"],
               "store_readiness_consistency_ok": store_readiness_consistency["consistency_ok"],
               "artifact_self_check_reasons": artifact_self_check["reasons"],
@@ -8132,6 +8206,10 @@ jobs:
               "artifact_self_check_ok": artifact_self_check["artifact_self_check_ok"],
               "strict_target_coverage_ok": strict_target_coverage_ok,
               "store_readiness_ok": store_readiness_ok,
+              "comparison_publish_full_store_count": comparison_publish_full_store_count,
+              "comparison_publish_managed_partial_count": comparison_publish_managed_partial_count,
+              "comparison_publish_managed_store_count": comparison_publish_managed_store_count,
+              "comparison_publish_blocking_store_count": comparison_publish_blocking_store_count,
               "covered_target_store_keys": len(covered_target_store_keys),
               "uncovered_target_store_keys": len(uncovered_target_store_keys),
               "quarantined_target_store_keys": len(quarantined_target_store_keys),
@@ -8148,16 +8226,16 @@ jobs:
           write_json(OUT_DIR / "payload_keysets_summary.json", {
               "products": summarize_payload_keysets(products_payload),
               "stores": summarize_payload_keysets(stores_payload),
-              "prices_current": summarize_payload_keysets(prices_payload),
+              "prices_current": summarize_payload_keysets([select_fields(row, PRICES_CURRENT_DB_FIELDS) for row in prices_payload]),
               "promotions_current": summarize_payload_keysets([select_fields(row, PROMOTIONS_CURRENT_DB_FIELDS) for row in promotions_payload]),
-              "promotion_items_current": summarize_payload_keysets(promotion_items_payload),
+              "promotion_items_current": summarize_payload_keysets([select_fields(row, PROMOTION_ITEMS_CURRENT_DB_FIELDS) for row in promotion_items_payload]),
           })
           write_json(OUT_DIR / "promotion_items_write_plan.json", {
               "write_promotion_items": WRITE_PROMOTION_ITEMS,
               "compare_ready_summary": compare_ready_summary,
               "promotion_items_payload_total": len(promotion_items_payload),
               "recommended_for_supabase_free": False,
-              "note": "Compare-ready mode keeps promotion_items_current disabled by default for the scheduled Free-plan run. The workflow still requires full store coverage before publishing.",
+              "note": "Compare-ready mode keeps promotion_items_current disabled by default for the scheduled Free-plan run. Publishing requires fresh official coverage plus the approved comparison profile.",
           })
           write_json(OUT_DIR / "run_summary.json", {
               **payload_counts,
@@ -8193,26 +8271,37 @@ jobs:
               if not store_set_consistency_ok:
                   coverage_errors.append("store_set_consistency_ok=false")
               if not store_readiness_ok:
-                  coverage_errors.append(f"weak_target_store_keys={len(weak_target_store_keys)}")
+                  coverage_errors.append(
+                      f"comparison_publish_profile={comparison_publish_full_store_count}_full/"
+                      f"{comparison_publish_managed_partial_count}_managed_partial"
+                  )
+                  if comparison_publish_city_gaps:
+                      coverage_errors.append(f"comparison_publish_city_gaps={len(comparison_publish_city_gaps)}")
+                  if comparison_publish_blocking_store_count:
+                      coverage_errors.append(f"comparison_publish_blocking_store_count={comparison_publish_blocking_store_count}")
               if not product_hard_quality_ok:
                   coverage_errors.append(
                       f"product_hard_quality_failed(name>={minimum_name_pct_hard},category>={minimum_category_pct},placeholder_leaks=0)"
                   )
-              message = "DB write blocked because the selected MVP scope is not complete enough for a full daily comparison: " + ", ".join(coverage_errors)
+              message = "DB write blocked because the selected MVP scope is not safe enough for the approved comparison publish profile: " + ", ".join(coverage_errors)
               if WRITE_TO_SUPABASE:
                   raise SystemExit(message)
               log(message)
-              log("WRITE_TO_SUPABASE=false -> payload built for inspection only. Full comparison publish gate not approved.")
+              log("WRITE_TO_SUPABASE=false -> payload built for inspection only. Approved comparison publish gate not reached.")
               sys.exit(0)
           
           if not WRITE_TO_SUPABASE:
-              log("WRITE_TO_SUPABASE=false -> full target coverage achieved; DB write is ready.")
+              log("WRITE_TO_SUPABASE=false -> approved comparison publish profile achieved; DB write is ready.")
               sys.exit(0)
           
           safe_write_store_keys = set(covered_target_store_keys)
           quarantined_target_store_key_set = set(quarantined_target_store_keys)
           safe_price_pairs = {(row["store_key"], row["barcode"]) for row in prices_payload if row["store_key"] in safe_write_store_keys}
-          prices_payload_to_write = [row for row in prices_payload if row["store_key"] in safe_write_store_keys]
+          prices_payload_to_write = [
+              select_fields(row, PRICES_CURRENT_DB_FIELDS)
+              for row in prices_payload
+              if row["store_key"] in safe_write_store_keys
+          ]
           promotions_payload_to_write = [
               select_fields(row, PROMOTIONS_CURRENT_DB_FIELDS)
               for row in promotions_payload
@@ -8220,7 +8309,8 @@ jobs:
           ]
           promotion_store_key_by_key = {row["promotion_key"]: row["store_key"] for row in promotions_payload_to_write}
           promotion_items_payload_to_write = [
-              row for row in promotion_items_payload
+              select_fields(row, PROMOTION_ITEMS_CURRENT_DB_FIELDS)
+              for row in promotion_items_payload
               if (promotion_store_key_by_key.get(row["promotion_key"]), row["barcode"]) in safe_price_pairs
           ]
           processed_promotion_keys_to_write = {row["promotion_key"] for row in promotions_payload_to_write}
