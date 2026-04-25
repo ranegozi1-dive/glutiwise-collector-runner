@@ -1,6 +1,8 @@
-name: GlutiWise Current Sync to Supabase v26 Clean
+﻿name: GlutiWise Current Sync to Supabase v26 Clean
 
 on:
+  schedule:
+    - cron: "0 3 */2 * *"
   workflow_dispatch:
     inputs:
       write_to_supabase:
@@ -57,7 +59,7 @@ jobs:
       ALLOW_LARGE_PROMOTION_SCOPE: ${{ inputs.allow_large_promotion_scope || 'false' }}
       SCRAPER_TODAY: ${{ inputs.scraper_today || '' }}
       SCHEDULED_SCOPE_PROFILE: "free_mvp_3_cities"
-      SCHEDULED_WRITE_TO_SUPABASE: "false"
+      SCHEDULED_WRITE_TO_SUPABASE: "true"
       SCHEDULED_WRITE_PROMOTION_ITEMS: "false"
       SCHEDULED_ALLOW_LARGE_PROMOTION_SCOPE: "false"
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -396,3 +398,4 @@ jobs:
             out/target_validation_failures.csv
             out/dump_prune_summary.json
             out/chunks/*.json
+
